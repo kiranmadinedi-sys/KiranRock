@@ -1,0 +1,250 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Professional Trading Platform Color Scheme */
+:root {
+  /* Light mode - Clean and professional */
+  --color-bg-primary: #ffffff;
+  --color-bg-secondary: #f8fafc;
+  --color-bg-tertiary: #f1f5f9;
+  --color-bg-hover: #f8fafc;
+  --color-text-primary: #0f172a;
+  --color-text-secondary: #64748b;
+  --color-text-muted: #94a3b8;
+  --color-border: #e2e8f0;
+  --color-border-hover: #cbd5e1;
+  --color-success: #10b981;
+  --color-success-bg: #ecfdf5;
+  --color-danger: #ef4444;
+  --color-danger-bg: #fef2f2;
+  --color-warning: #f59e0b;
+  --color-warning-bg: #fffbeb;
+  --color-info: #3b82f6;
+  --color-info-bg: #eff6ff;
+  --color-accent: #6366f1;
+  --color-accent-bg: #eef2ff;
+  --color-card: #ffffff;
+  --color-card-hover: #f8fafc;
+  --color-chart-bg: #ffffff;
+  --color-input-bg: #ffffff;
+  --color-button-primary: #3b82f6;
+  --color-button-primary-hover: #2563eb;
+  --color-button-secondary: #f1f5f9;
+  --color-button-secondary-hover: #e2e8f0;
+}
+
+.dark {
+  /* Dark mode - Professional and easy on eyes */
+  --color-bg-primary: #0f172a;
+  --color-bg-secondary: #1e293b;
+  --color-bg-tertiary: #334155;
+  --color-bg-hover: #1e293b;
+  --color-text-primary: #f8fafc;
+  --color-text-secondary: #cbd5e1;
+  --color-text-muted: #94a3b8;
+  --color-border: #334155;
+  --color-border-hover: #475569;
+  --color-success: #34d399;
+  --color-success-bg: #064e3b;
+  --color-danger: #f87171;
+  --color-danger-bg: #7f1d1d;
+  --color-warning: #fbbf24;
+  --color-warning-bg: #78350f;
+  --color-info: #60a5fa;
+  --color-info-bg: #1e3a8a;
+  --color-accent: #818cf8;
+  --color-accent-bg: #312e81;
+  --color-card: #1e293b;
+  --color-card-hover: #334155;
+  --color-chart-bg: #1e293b;
+  --color-input-bg: #334155;
+  --color-button-primary: #3b82f6;
+  --color-button-primary-hover: #60a5fa;
+  --color-button-secondary: #334155;
+  --color-button-secondary-hover: #475569;
+}
+
+/* Base styles with smooth transitions */
+* {
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom Scrollbar Styles */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+  transition: background-color 0.2s ease;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-secondary);
+}
+
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* Focus styles for accessibility */
+.focus-ring:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Professional card shadows */
+.shadow-professional {
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+}
+
+.dark .shadow-professional {
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.3), 0 1px 2px 0 rgba(0, 0, 0, 0.2);
+}
+
+.shadow-professional-lg {
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+}
+
+.dark .shadow-professional-lg {
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3), 0 4px 6px -2px rgba(0, 0, 0, 0.2);
+}
+
+/* News Alert Animation */
+@keyframes slideUp {
+  from {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.animate-slide-up {
+  animation: slideUp 0.3s ease-out;
+}
+
+/* Loading spinner */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* Gradient backgrounds for professional look */
+.gradient-primary {
+  background: linear-gradient(135deg, var(--color-accent) 0%, var(--color-info) 100%);
+}
+
+.gradient-success {
+  background: linear-gradient(135deg, var(--color-success) 0%, #059669 100%);
+}
+
+.gradient-warning {
+  background: linear-gradient(135deg, var(--color-warning) 0%, #d97706 100%);
+}
+
+.gradient-danger {
+  background: linear-gradient(135deg, var(--color-danger) 0%, #dc2626 100%);
+}
+
+/* Professional button styles */
+.btn-primary {
+  background-color: var(--color-button-primary);
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+
+.btn-primary:hover {
+  background-color: var(--color-button-primary-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+}
+
+.btn-secondary {
+  background-color: var(--color-button-secondary);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+
+.btn-secondary:hover {
+  background-color: var(--color-button-secondary-hover);
+  border-color: var(--color-border-hover);
+}
+
+/* Input styles */
+.input-professional {
+  background-color: var(--color-input-bg);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  transition: all 0.2s ease;
+}
+
+.input-professional:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+.input-professional::placeholder {
+  color: var(--color-text-muted);
+}
+
+/* Card styles */
+.card-professional {
+  background-color: var(--color-card);
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+  padding: 1.5rem;
+  transition: all 0.2s ease;
+}
+
+.card-professional:hover {
+  background-color: var(--color-card-hover);
+  border-color: var(--color-border-hover);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-professional-lg);
+}

@@ -1,0 +1,6 @@
+{
+  "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+  "timesCST": ["08:00", "10:00", "03:30"],
+  "timezone": "America/Chicago",
+  "description": "Send fresh weekly report to Telegram group at these times (CST) on weekdays."
+}

@@ -1,0 +1,432 @@
+[
+  {
+    "id": "83f08677-e55a-48d1-bd31-f5b56fa79c23",
+    "username": "user",
+    "password": "password",
+    "alerts": [],
+    "portfolio": [],
+    "tradingAccount": {
+      "balance": 2187.979999999998,
+      "totalDeposited": 10000,
+      "totalWithdrawn": 0,
+      "deposits": [
+        {
+          "id": "1762773728260",
+          "amount": 10000,
+          "timestamp": "2025-11-10T11:22:08.260Z",
+          "type": "deposit"
+        }
+      ],
+      "withdrawals": []
+    },
+    "trades": [
+      {
+        "id": "trade_1762773779601_ry8dyuuqs",
+        "symbol": "AAPL",
+        "type": "BUY",
+        "quantity": 5,
+        "price": 268.47,
+        "totalCost": 1342.3500000000001,
+        "timestamp": "2025-11-10T11:22:59.601Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762773779694_5nav8zx73",
+        "symbol": "MSFT",
+        "type": "BUY",
+        "quantity": 2,
+        "price": 496.82,
+        "totalCost": 993.64,
+        "timestamp": "2025-11-10T11:22:59.694Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762773779786_z7zvvsg6o",
+        "symbol": "GOOGL",
+        "type": "BUY",
+        "quantity": 3,
+        "price": 278.83,
+        "totalCost": 836.49,
+        "timestamp": "2025-11-10T11:22:59.786Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762773779878_mxgd2u7nb",
+        "symbol": "NVDA",
+        "type": "BUY",
+        "quantity": 4,
+        "price": 188.15,
+        "totalCost": 752.6,
+        "timestamp": "2025-11-10T11:22:59.878Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762773779969_bwxqeen8z",
+        "symbol": "AMZN",
+        "type": "BUY",
+        "quantity": 3,
+        "price": 244.41,
+        "totalCost": 733.23,
+        "timestamp": "2025-11-10T11:22:59.969Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762773780060_3eayyoqvo",
+        "symbol": "TSLA",
+        "type": "BUY",
+        "quantity": 1,
+        "price": 429.52,
+        "totalCost": 429.52,
+        "timestamp": "2025-11-10T11:23:00.060Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762773780151_q9xwavig6",
+        "symbol": "META",
+        "type": "BUY",
+        "quantity": 1,
+        "price": 621.71,
+        "totalCost": 621.71,
+        "timestamp": "2025-11-10T11:23:00.151Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762773780244_mktxc9atr",
+        "symbol": "AMD",
+        "type": "BUY",
+        "quantity": 2,
+        "price": 233.54,
+        "totalCost": 467.08,
+        "timestamp": "2025-11-10T11:23:00.244Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762773780334_ga62i2bjh",
+        "symbol": "JPM",
+        "type": "BUY",
+        "quantity": 2,
+        "price": 314.21,
+        "totalCost": 628.42,
+        "timestamp": "2025-11-10T11:23:00.334Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762815736362_rxh9s8078",
+        "symbol": "AAPL",
+        "type": "BUY",
+        "quantity": 1,
+        "price": 269.43,
+        "totalCost": 269.43,
+        "timestamp": "2025-11-10T23:02:16.362Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762815736467_py4x8h1u0",
+        "symbol": "GOOGL",
+        "type": "BUY",
+        "quantity": 1,
+        "price": 290.1,
+        "totalCost": 290.1,
+        "timestamp": "2025-11-10T23:02:16.467Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762815736633_gmr4f64tu",
+        "symbol": "NVDA",
+        "type": "BUY",
+        "quantity": 1,
+        "price": 199.05,
+        "totalCost": 199.05,
+        "timestamp": "2025-11-10T23:02:16.633Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762815736724_568wmj8gr",
+        "symbol": "AMZN",
+        "type": "BUY",
+        "quantity": 1,
+        "price": 248.4,
+        "totalCost": 248.4,
+        "timestamp": "2025-11-10T23:02:16.724Z",
+        "status": "executed"
+      }
+    ],
+    "holdings": [
+      {
+        "symbol": "AAPL",
+        "quantity": 6,
+        "averagePrice": 268.63000000000005,
+        "firstPurchaseDate": "2025-11-10T11:22:59.601Z",
+        "lastUpdated": "2025-11-10T23:02:16.362Z"
+      },
+      {
+        "symbol": "MSFT",
+        "quantity": 2,
+        "averagePrice": 496.82,
+        "firstPurchaseDate": "2025-11-10T11:22:59.694Z",
+        "lastUpdated": "2025-11-10T11:22:59.694Z"
+      },
+      {
+        "symbol": "GOOGL",
+        "quantity": 4,
+        "averagePrice": 281.64750000000004,
+        "firstPurchaseDate": "2025-11-10T11:22:59.786Z",
+        "lastUpdated": "2025-11-10T23:02:16.467Z"
+      },
+      {
+        "symbol": "NVDA",
+        "quantity": 5,
+        "averagePrice": 190.33,
+        "firstPurchaseDate": "2025-11-10T11:22:59.878Z",
+        "lastUpdated": "2025-11-10T23:02:16.633Z"
+      },
+      {
+        "symbol": "AMZN",
+        "quantity": 4,
+        "averagePrice": 245.4075,
+        "firstPurchaseDate": "2025-11-10T11:22:59.969Z",
+        "lastUpdated": "2025-11-10T23:02:16.724Z"
+      },
+      {
+        "symbol": "TSLA",
+        "quantity": 1,
+        "averagePrice": 429.52,
+        "firstPurchaseDate": "2025-11-10T11:23:00.060Z",
+        "lastUpdated": "2025-11-10T11:23:00.060Z"
+      },
+      {
+        "symbol": "META",
+        "quantity": 1,
+        "averagePrice": 621.71,
+        "firstPurchaseDate": "2025-11-10T11:23:00.151Z",
+        "lastUpdated": "2025-11-10T11:23:00.151Z"
+      },
+      {
+        "symbol": "AMD",
+        "quantity": 2,
+        "averagePrice": 233.54,
+        "firstPurchaseDate": "2025-11-10T11:23:00.244Z",
+        "lastUpdated": "2025-11-10T11:23:00.244Z"
+      },
+      {
+        "symbol": "JPM",
+        "quantity": 2,
+        "averagePrice": 314.21,
+        "firstPurchaseDate": "2025-11-10T11:23:00.334Z",
+        "lastUpdated": "2025-11-10T11:23:00.334Z"
+      }
+    ],
+    "firstName": "Kiran",
+    "lastName": "Madinedi",
+    "email": "kiran.madinedi@gmail.com",
+    "phone": "6504830983",
+    "updatedAt": "2025-11-10T18:46:04.999Z",
+    "aiTradingSettings": {
+      "stopLoss": 0.06,
+      "takeProfit": 0.4,
+      "minCashReserve": 0
+    }
+  },
+  {
+    "id": "b6e15e2e-60f1-41f0-8747-e8ea65748e1a",
+    "username": "useruser",
+    "password": "passwordpassword",
+    "alerts": [],
+    "portfolio": [],
+    "phone": "",
+    "tradingAccount": {
+      "balance": 0,
+      "totalDeposited": 0,
+      "totalWithdrawn": 0,
+      "deposits": [],
+      "withdrawals": []
+    }
+  },
+  {
+    "id": "adbc9127-f105-447f-9489-93cce427aebc",
+    "username": "User",
+    "password": "password",
+    "alerts": [],
+    "portfolio": [],
+    "phone": "",
+    "tradingAccount": {
+      "balance": 11825.280000000002,
+      "totalDeposited": 100000,
+      "totalWithdrawn": 0
+    },
+    "trades": [
+      {
+        "id": "trade_1762833128768_4napjoj4o",
+        "symbol": "AAPL",
+        "type": "BUY",
+        "quantity": 50,
+        "price": 269.43,
+        "totalCost": 13471.5,
+        "timestamp": "2025-11-11T03:52:08.768Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762833128919_vv0i91hih",
+        "symbol": "MSFT",
+        "type": "BUY",
+        "quantity": 26,
+        "price": 506,
+        "totalCost": 13156,
+        "timestamp": "2025-11-11T03:52:08.919Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762833129014_ouxpfzc4u",
+        "symbol": "GOOGL",
+        "type": "BUY",
+        "quantity": 37,
+        "price": 290.1,
+        "totalCost": 10733.7,
+        "timestamp": "2025-11-11T03:52:09.014Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762833129102_lzx6ja34c",
+        "symbol": "NVDA",
+        "type": "BUY",
+        "quantity": 45,
+        "price": 199.05,
+        "totalCost": 8957.25,
+        "timestamp": "2025-11-11T03:52:09.102Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762833129198_2u8sp4893",
+        "symbol": "AMZN",
+        "type": "BUY",
+        "quantity": 36,
+        "price": 248.4,
+        "totalCost": 8942.4,
+        "timestamp": "2025-11-11T03:52:09.198Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762833129287_q4medfagf",
+        "symbol": "TSLA",
+        "type": "BUY",
+        "quantity": 16,
+        "price": 445.23,
+        "totalCost": 7123.68,
+        "timestamp": "2025-11-11T03:52:09.287Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762833129372_hl0so3vnq",
+        "symbol": "META",
+        "type": "BUY",
+        "quantity": 11,
+        "price": 631.76,
+        "totalCost": 6949.36,
+        "timestamp": "2025-11-11T03:52:09.372Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762833129493_5nnj9s19m",
+        "symbol": "AMD",
+        "type": "BUY",
+        "quantity": 25,
+        "price": 243.98,
+        "totalCost": 6099.5,
+        "timestamp": "2025-11-11T03:52:09.493Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762833129583_kn5714o7t",
+        "symbol": "NFLX",
+        "type": "BUY",
+        "quantity": 6,
+        "price": 1120.07,
+        "totalCost": 6720.42,
+        "timestamp": "2025-11-11T03:52:09.583Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1762833129667_0cnxgfkah",
+        "symbol": "JPM",
+        "type": "BUY",
+        "quantity": 19,
+        "price": 316.89,
+        "totalCost": 6020.91,
+        "timestamp": "2025-11-11T03:52:09.667Z",
+        "status": "executed"
+      }
+    ],
+    "holdings": [
+      {
+        "symbol": "AAPL",
+        "quantity": 50,
+        "averagePrice": 269.43,
+        "firstPurchaseDate": "2025-11-11T03:52:08.768Z",
+        "lastUpdated": "2025-11-11T03:52:08.768Z"
+      },
+      {
+        "symbol": "MSFT",
+        "quantity": 26,
+        "averagePrice": 506,
+        "firstPurchaseDate": "2025-11-11T03:52:08.920Z",
+        "lastUpdated": "2025-11-11T03:52:08.920Z"
+      },
+      {
+        "symbol": "GOOGL",
+        "quantity": 37,
+        "averagePrice": 290.1,
+        "firstPurchaseDate": "2025-11-11T03:52:09.014Z",
+        "lastUpdated": "2025-11-11T03:52:09.014Z"
+      },
+      {
+        "symbol": "NVDA",
+        "quantity": 45,
+        "averagePrice": 199.05,
+        "firstPurchaseDate": "2025-11-11T03:52:09.102Z",
+        "lastUpdated": "2025-11-11T03:52:09.102Z"
+      },
+      {
+        "symbol": "AMZN",
+        "quantity": 36,
+        "averagePrice": 248.4,
+        "firstPurchaseDate": "2025-11-11T03:52:09.198Z",
+        "lastUpdated": "2025-11-11T03:52:09.198Z"
+      },
+      {
+        "symbol": "TSLA",
+        "quantity": 16,
+        "averagePrice": 445.23,
+        "firstPurchaseDate": "2025-11-11T03:52:09.287Z",
+        "lastUpdated": "2025-11-11T03:52:09.287Z"
+      },
+      {
+        "symbol": "META",
+        "quantity": 11,
+        "averagePrice": 631.76,
+        "firstPurchaseDate": "2025-11-11T03:52:09.372Z",
+        "lastUpdated": "2025-11-11T03:52:09.372Z"
+      },
+      {
+        "symbol": "AMD",
+        "quantity": 25,
+        "averagePrice": 243.98,
+        "firstPurchaseDate": "2025-11-11T03:52:09.493Z",
+        "lastUpdated": "2025-11-11T03:52:09.493Z"
+      },
+      {
+        "symbol": "NFLX",
+        "quantity": 6,
+        "averagePrice": 1120.07,
+        "firstPurchaseDate": "2025-11-11T03:52:09.583Z",
+        "lastUpdated": "2025-11-11T03:52:09.583Z"
+      },
+      {
+        "symbol": "JPM",
+        "quantity": 19,
+        "averagePrice": 316.89,
+        "firstPurchaseDate": "2025-11-11T03:52:09.667Z",
+        "lastUpdated": "2025-11-11T03:52:09.667Z"
+      }
+    ]
+  }
+]

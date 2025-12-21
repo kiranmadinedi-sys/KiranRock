@@ -20,15 +20,20 @@ const tradingRoutes = require('./routes/tradingRoutes');
 const aiTradingRoutes = require('./routes/aiTradingRoutes');
 const earningsRoutes = require('./routes/earningsRoutes');
 const newsAlertsRoutes = require('./routes/newsAlertsRoutes');
+const newsAggregationRoutes = require('./routes/newsAggregationRoutes');
 const backtestRoutes = require('./routes/backtestRoutes');
 const swingTradingRoutes = require('./routes/swingTradingRoutes');
 const optionsRoutes = require('./routes/optionsRoutes');
 const scalpingRoutes = require('./routes/scalpingRoutes');
 const scenarioRoutes = require('./routes/scenarioRoutes');
 const screenerRoutes = require('./routes/screenerRoutes');
+const enhancedSignalRoutes = require('./routes/enhancedSignalRoutes');
+const watchlistRoutes = require('./routes/watchlistRoutes');
 const aiTradingScheduler = require('./services/aiTradingScheduler');
 const optionsScheduler = require('./services/optionsScheduler');
 const newsMonitoringService = require('./services/newsMonitoringService');
+// Load enhanced Telegram weekly report scheduler
+require('./scheduleTelegramReport');
 
 const app = express();
 
@@ -39,28 +44,48 @@ app.use(cors({
     
     // Allow localhost and common development origins
     const allowedOrigins = [
-      'http://localhost:3000',
-      'http://127.0.0.1:3000',
       'http://192.168.1.206:3000',
-      'http://99.47.183.33:3000'
+      'http://99.47.183.33:3000',
+      'http://99.47.183.33:3001'
     ];
     
-    // Allow any origin that ends with common ports (for dynamic IPs)
-    if (origin.match(/^https?:\/\/.*:3000$/)) {
+    // Allow localhost and 127.0.0.1 on any port during development
+    if (origin && (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:'))) {
       return callback(null, true);
     }
     
-    if (allowedOrigins.includes(origin)) {
+    // Allow your public IP on any port
+    if (origin && origin.startsWith('http://99.47.183.33:')) {
       return callback(null, true);
     }
     
-    console.log(`CORS blocked origin: ${origin}`);
-    return callback(new Error('Not allowed by CORS'));
+    // Allow your local network IP on any port
+    if (origin && origin.startsWith('http://192.168.1.206:')) {
+      return callback(null, true);
+    }
+    
+    // Allow dynamic dev ports like :3000, :3001 etc
+    if (origin && origin.match(/^https?:\/\/.*:(\d{2,5})$/)) {
+      return callback(null, true);
+    }
+    
+    if (origin && allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    console.log(`CORS allowed origin: ${origin}`);
+    return callback(null, true);
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
+  exposedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+  maxAge: 600, // Cache preflight for 10 minutes
+  preflightContinue: false,
+  optionsSuccessStatus: 204
 }));
+
+// Handle preflight requests explicitly
 app.options('*', cors());
 app.use(bodyParser.json());
 
@@ -104,12 +129,15 @@ app.use('/api/trading', tradingRoutes);
 app.use('/api/ai-trading', aiTradingRoutes);
 app.use('/api/earnings', earningsRoutes);
 app.use('/api/news-alerts', newsAlertsRoutes);
+app.use('/api/news-aggregation', newsAggregationRoutes);
 app.use('/api/backtest', backtestRoutes);
 app.use('/api/swing-trading', swingTradingRoutes);
 app.use('/api/options', optionsRoutes);
 app.use('/api/scalping', scalpingRoutes);
 app.use('/api/scenarios', scenarioRoutes);
 app.use('/api/screener', screenerRoutes);
+app.use('/api/enhanced-signals', enhancedSignalRoutes);
+app.use('/api/watchlist', watchlistRoutes);
 
 const PORT = process.env.PORT || 3001;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -126,4 +154,7 @@ app.listen(PORT, HOST, () => {
   // Start News monitoring service
   const defaultSymbols = ['AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX'];
   newsMonitoringService.startNewsMonitoring(defaultSymbols);
+  
+  // Enhanced Telegram weekly report scheduler is loaded via require('./scheduleTelegramReport')
+  // It auto-sends on startup and schedules Monday & Wednesday 6 AM EST
 });

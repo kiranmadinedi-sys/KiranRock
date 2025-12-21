@@ -1,6 +1,6 @@
 
 'use client';
-import { API_BASE_URL } from '../config/apiConfig';
+import { getApiBaseUrl } from '../config';
 import React, { useState, useEffect } from 'react';
 
 interface FundamentalsProps {
@@ -10,26 +10,48 @@ interface FundamentalsProps {
 const FundamentalsView: React.FC<FundamentalsProps> = ({ symbol }) => {
     const [fundamentals, setFundamentals] = useState<any>(null);
     const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
         const fetchFundamentals = async () => {
             setLoading(true);
+            setError(null);
             const token = localStorage.getItem('token');
+            
+            // Debug token
+            console.log(`[FundamentalsView] Token exists:`, !!token);
+            console.log(`[FundamentalsView] Token preview:`, token ? `${token.substring(0, 20)}...` : 'null');
+            
+            if (!token) {
+                setError('Authentication required. Please log in again.');
+                setLoading(false);
+                return;
+            }
+            
             try {
-                console.log(`Fetching fundamentals for ${symbol}...`);
-                const response = await fetch(`${API_BASE_URL}/api/fundamentals/${symbol}`, {
+                console.log(`[FundamentalsView] Fetching fundamentals for ${symbol}...`);
+                const response = await fetch(`${getApiBaseUrl()}/api/fundamentals/${symbol}`, {
                     headers: { Authorization: `Bearer ${token}` }
                 });
-                console.log('Response status:', response.status);
+                console.log('[FundamentalsView] Response status:', response.status);
                 if (response.ok) {
                     const data = await response.json();
-                    console.log('Fundamentals data:', data);
+                    console.log('[FundamentalsView] Fundamentals data received:', data);
                     setFundamentals(data);
+                    setError(null);
                 } else {
-                    console.error('Response not OK:', response.status, response.statusText);
+                    const errorText = await response.text();
+                    console.error('[FundamentalsView] Response not OK:', response.status, response.statusText, errorText);
+                    
+                    if (response.status === 401) {
+                        setError('Session expired. Please log in again.');
+                    } else {
+                        setError(`Failed to fetch fundamentals: ${response.status} ${response.statusText}`);
+                    }
                 }
             } catch (error) {
-                console.error('Error fetching fundamentals:', error);
+                console.error('[FundamentalsView] Error fetching fundamentals:', error);
+                setError(`Network error: ${error instanceof Error ? error.message : 'Unknown error'}`);
             } finally {
                 setLoading(false);
             }
@@ -43,7 +65,24 @@ const FundamentalsView: React.FC<FundamentalsProps> = ({ symbol }) => {
     if (loading) {
         return (
             <div className="bg-[var(--color-card)] rounded-lg border border-[var(--color-border)] p-4">
-                <div className="text-center text-[var(--color-text-secondary)]">Loading fundamentals...</div>
+                <div className="text-center text-[var(--color-text-secondary)]">Loading fundamentals for {symbol}...</div>
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="bg-[var(--color-card)] rounded-lg border border-[var(--color-border)] p-4">
+                <div className="text-center text-red-500">
+                    <p className="font-semibold mb-2">Error Loading Fundamentals</p>
+                    <p className="text-sm">{error}</p>
+                    <button 
+                        onClick={() => window.location.reload()}
+                        className="mt-4 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+                    >
+                        Retry
+                    </button>
+                </div>
             </div>
         );
     }
@@ -51,7 +90,7 @@ const FundamentalsView: React.FC<FundamentalsProps> = ({ symbol }) => {
     if (!fundamentals || fundamentals.error) {
         return (
             <div className="bg-[var(--color-card)] rounded-lg border border-[var(--color-border)] p-4">
-                <div className="text-center text-[var(--color-text-secondary)]">Fundamental data unavailable</div>
+                <div className="text-center text-[var(--color-text-secondary)]">Fundamental data unavailable for {symbol}</div>
             </div>
         );
     }

@@ -12,7 +12,8 @@ const noCache = (req, res, next) => {
   next();
 };
 
-router.get('/historical/:symbol', protect, noCache, getHistoricalSignals);
-router.get('/:symbol', protect, noCache, getSignal);
+// Temporarily disable auth for local development/testing
+router.get('/historical/:symbol', noCache, getHistoricalSignals);
+router.get('/:symbol', noCache, getSignal);
 
 module.exports = router;

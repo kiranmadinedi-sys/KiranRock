@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 // ...existing code...
-import { API_BASE_URL } from '../config/apiConfig';
+import { getApiBaseUrl } from '../config';
 
 const StockTicker = ({ symbol, onSelect, isSelected, onRemove }: { symbol: string, onSelect: (symbol: string) => void, isSelected: boolean, onRemove?: () => void }) => {
     const [price, setPrice] = useState<number | null>(null);
@@ -15,10 +15,10 @@ const StockTicker = ({ symbol, onSelect, isSelected, onRemove }: { symbol: strin
             try {
                 // Fetch true live price (tick)
                 const [priceResponse, signalResponse] = await Promise.all([
-                    fetch(`${API_BASE_URL}/api/stocks/price/${symbol}`, {
+                    fetch(`${getApiBaseUrl()}/api/stocks/price/${symbol}`, {
                         headers: { Authorization: `Bearer ${token}` },
                     }),
-                    fetch(`${API_BASE_URL}/api/signals/${symbol}`, {
+                    fetch(`${getApiBaseUrl()}/api/signals/${symbol}`, {
                         headers: { Authorization: `Bearer ${token}` },
                     }),
                 ]);

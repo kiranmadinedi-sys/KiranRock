@@ -174,14 +174,70 @@ const searchSymbols = async (query) => {
         // Try Yahoo Finance autocomplete API for real symbol search
         const results = await yahooFinance.search(query);
         if (results && results.quotes && results.quotes.length > 0) {
-            // Return only valid equity symbols (exclude currency pairs, etc.)
+            // Return objects with symbol and name (exclude currency pairs, etc.)
             return results.quotes
                 .filter(q => q.symbol && q.exchange && /^[A-Z.]+$/.test(q.symbol) && !q.symbol.includes('='))
-                .map(q => q.symbol);
+                .slice(0, 10) // Limit to top 10 results
+                .map(q => ({
+                    symbol: q.symbol,
+                    name: q.shortname || q.longname || q.symbol,
+                    type: q.quoteType || 'EQUITY',
+                    exchange: q.exchange
+                }));
         }
         // Fallback to demo list if no results
-        const allSymbols = ['AMD', 'AAPL', 'GOOGL', 'MSFT', 'TSLA', 'NVDA', 'VISA', 'V', 'META', 'NFLX', 'DIS', 'BAC', 'JPM', 'WMT', 'INTC', 'CSCO', 'ORCL', 'PYPL', 'ADBE', 'CRM', 'UBER', 'LYFT', 'SHOP', 'SQ', 'COIN', 'PLTR', 'SNOW', 'SPOT', 'TWLO', 'ZM', 'ROKU', 'F', 'GM', 'T', 'VZ', 'PEP', 'KO', 'MCD', 'SBUX', 'NKE', 'COST', 'AVGO', 'TXN', 'QCOM', 'AMAT', 'LRCX', 'TSMC', 'HON', 'GE', 'BA', 'CAT', 'DE', 'MMM', 'GS', 'AXP', 'BLK', 'MS', 'USB', 'PNC', 'TFC', 'BK', 'SCHW', 'CB', 'AIG', 'TRV', 'ALL', 'PGR', 'C', 'WFC', 'DFS', 'SYF', 'COF', 'MTB', 'FITB', 'KEY', 'HBAN', 'CMA', 'ZION', 'RF', 'FRC', 'SIVB', 'VISA'];
-        return allSymbols.filter(s => s.toLowerCase().includes(query.toLowerCase()));
+        const stockNames = {
+            'AMD': 'Advanced Micro Devices',
+            'AAPL': 'Apple Inc.',
+            'GOOGL': 'Alphabet Inc.',
+            'MSFT': 'Microsoft Corporation',
+            'TSLA': 'Tesla Inc.',
+            'NVDA': 'NVIDIA Corporation',
+            'V': 'Visa Inc.',
+            'META': 'Meta Platforms Inc.',
+            'NFLX': 'Netflix Inc.',
+            'DIS': 'The Walt Disney Company',
+            'BAC': 'Bank of America Corp',
+            'JPM': 'JPMorgan Chase & Co.',
+            'WMT': 'Walmart Inc.',
+            'INTC': 'Intel Corporation',
+            'CSCO': 'Cisco Systems Inc.',
+            'ORCL': 'Oracle Corporation',
+            'PYPL': 'PayPal Holdings Inc.',
+            'ADBE': 'Adobe Inc.',
+            'CRM': 'Salesforce Inc.',
+            'UBER': 'Uber Technologies Inc.',
+            'LYFT': 'Lyft Inc.',
+            'SHOP': 'Shopify Inc.',
+            'SQ': 'Block Inc.',
+            'COIN': 'Coinbase Global Inc.',
+            'PLTR': 'Palantir Technologies Inc.',
+            'SNOW': 'Snowflake Inc.',
+            'SPOT': 'Spotify Technology S.A.',
+            'TWLO': 'Twilio Inc.',
+            'ZM': 'Zoom Video Communications',
+            'ROKU': 'Roku Inc.',
+            'F': 'Ford Motor Company',
+            'GM': 'General Motors Company',
+            'T': 'AT&T Inc.',
+            'VZ': 'Verizon Communications',
+            'PEP': 'PepsiCo Inc.',
+            'KO': 'The Coca-Cola Company',
+            'MCD': 'McDonald\'s Corporation',
+            'SBUX': 'Starbucks Corporation',
+            'NKE': 'Nike Inc.',
+            'COST': 'Costco Wholesale Corporation'
+        };
+        const matchedSymbols = Object.keys(stockNames).filter(s => 
+            s.toLowerCase().includes(query.toLowerCase()) || 
+            stockNames[s].toLowerCase().includes(query.toLowerCase())
+        );
+        return matchedSymbols.slice(0, 10).map(s => ({
+            symbol: s,
+            name: stockNames[s],
+            type: 'EQUITY',
+            exchange: 'NASDAQ/NYSE'
+        }));
     } catch (error) {
         console.error(`Failed to search for symbols with query "${query}":`, error);
         return [];

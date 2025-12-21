@@ -12,43 +12,50 @@ if (!token) {
   process.exit(1);
 }
 
-const bot = new TelegramBot(token, { polling: true });
+// Only start polling if this file is run directly (not imported as a module)
+const isMainModule = require.main === module;
+const bot = new TelegramBot(token, { polling: isMainModule });
 
-console.log('Telegram logger started (polling). Send a message to your bot now.');
+if (isMainModule) {
+  console.log('Telegram logger started (polling). Send a message to your bot now.');
+}
 
-bot.on('message', (msg) => {
-  const payload = {
-    receivedAt: new Date().toISOString(),
-    chat: {
-      id: msg.chat.id,
-      type: msg.chat.type,
-      title: msg.chat.title || null,
-      username: msg.chat.username || null
-    },
-    from: {
-      id: msg.from ? msg.from.id : null,
-      username: msg.from ? msg.from.username : null,
-      first_name: msg.from ? msg.from.first_name : null,
-      last_name: msg.from ? msg.from.last_name : null
-    },
-    text: msg.text || null,
-    raw: msg
-  };
+// Only set up event listeners if running as main module
+if (isMainModule) {
+  bot.on('message', (msg) => {
+    const payload = {
+      receivedAt: new Date().toISOString(),
+      chat: {
+        id: msg.chat.id,
+        type: msg.chat.type,
+        title: msg.chat.title || null,
+        username: msg.chat.username || null
+      },
+      from: {
+        id: msg.from ? msg.from.id : null,
+        username: msg.from ? msg.from.username : null,
+        first_name: msg.from ? msg.from.first_name : null,
+        last_name: msg.from ? msg.from.last_name : null
+      },
+      text: msg.text || null,
+      raw: msg
+    };
 
-  console.log('Incoming Telegram message:');
-  console.log(JSON.stringify(payload, null, 2));
+    console.log('Incoming Telegram message:');
+    console.log(JSON.stringify(payload, null, 2));
 
-  // Friendly note to user to confirm we've captured chat id
-  try {
-    bot.sendMessage(msg.chat.id, "Thanks — I logged your chat id. You can close this chat or continue messaging.");
-  } catch (err) {
-    // ignore send errors here
-  }
-});
+    // Friendly note to user to confirm we've captured chat id
+    try {
+      bot.sendMessage(msg.chat.id, "Thanks — I logged your chat id. You can close this chat or continue messaging.");
+    } catch (err) {
+      // ignore send errors here
+    }
+  });
 
-bot.on('polling_error', (err) => {
-  console.error('Polling error:', err && err.message ? err.message : err);
-});
+  bot.on('polling_error', (err) => {
+    console.error('Polling error:', err && err.message ? err.message : err);
+  });
+}
 
 process.on('SIGINT', () => {
   console.log('\nStopping Telegram logger...');

@@ -1,6 +1,6 @@
 
 'use client';
-import { API_BASE_URL } from '../config/apiConfig';
+import { getApiBaseUrl } from '../config';
 import React, { useState, useEffect } from 'react';
 
 interface NewsSentimentProps {
@@ -16,7 +16,7 @@ const NewsSentimentView: React.FC<NewsSentimentProps> = ({ symbol }) => {
             setLoading(true);
             const token = localStorage.getItem('token');
             try {
-                const response = await fetch(`${API_BASE_URL}/api/news/${symbol}`, {
+                const response = await fetch(`${getApiBaseUrl()}/api/news/${symbol}`, {
                     headers: { Authorization: `Bearer ${token}` }
                 });
                 if (response.ok) {

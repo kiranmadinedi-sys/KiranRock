@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { API_BASE_URL } from '../config/apiConfig';
+import { getApiBaseUrl } from '../config';
 
 interface QuickStat {
     label: string;
@@ -28,13 +28,13 @@ export default function QuickStatsWidget({ symbol }: QuickStatsProps) {
                 
                 // Fetch multiple data sources in parallel
                 const [priceRes, volumeRes, fundamentalsRes] = await Promise.all([
-                    fetch(`${API_BASE_URL}/api/stocks/${symbol}?interval=1d`, {
+                    fetch(`${getApiBaseUrl()}/api/stocks/${symbol}?interval=1d`, {
                         headers: { Authorization: `Bearer ${token}` }
                     }),
-                    fetch(`${API_BASE_URL}/api/volume/${symbol}`, {
+                    fetch(`${getApiBaseUrl()}/api/volume/${symbol}`, {
                         headers: { Authorization: `Bearer ${token}` }
                     }),
-                    fetch(`${API_BASE_URL}/api/fundamentals/${symbol}`, {
+                    fetch(`${getApiBaseUrl()}/api/fundamentals/${symbol}`, {
                         headers: { Authorization: `Bearer ${token}` }
                     })
                 ]);

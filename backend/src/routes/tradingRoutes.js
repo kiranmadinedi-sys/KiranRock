@@ -2,23 +2,6 @@ const express = require('express');
 const router = express.Router();
 const { protect } = require('../middleware/authMiddleware');
 const tradingAccountService = require('../services/tradingAccountService');
-
-/**
- * POST /api/trading/reset-balance
- * Reset trading account balance to a specified amount
- */
-router.post('/reset-balance', async (req, res) => {
-    try {
-        const { amount } = req.body;
-        if (typeof amount !== 'number' || amount < 0) {
-            return res.status(400).json({ error: 'Invalid reset amount' });
-        }
-        const result = await tradingAccountService.resetBalance(req.userId, amount);
-        res.json(result);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
 const tradingService = require('../services/tradingService');
 const portfolioTrackingService = require('../services/portfolioTrackingService');
 
@@ -73,6 +56,44 @@ router.post('/withdraw', async (req, res) => {
         res.json(result);
     } catch (error) {
         res.status(400).json({ error: error.message });
+    }
+});
+
+/**
+ * POST /api/trading/reset-balance
+ * Reset trading account balance to a specified amount
+ */
+router.post('/reset-balance', async (req, res) => {
+    try {
+        const { amount } = req.body;
+        if (typeof amount !== 'number' || amount < 0) {
+            return res.status(400).json({ error: 'Invalid reset amount' });
+        }
+        const result = await tradingAccountService.resetBalance(req.userId, amount);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * POST /api/trading/clear-all
+ * Clear all portfolio data (cash balance, holdings, trade history) - reset everything to zero
+ */
+router.post('/clear-all', async (req, res) => {
+    try {
+        // Clear trading account (cash balance)
+        await tradingAccountService.clearAllPortfolio(req.userId);
+        
+        // Clear holdings and trade history
+        await tradingService.clearAllHoldings(req.userId);
+        
+        res.json({ 
+            success: true, 
+            message: 'Portfolio cleared successfully. All balances and holdings reset to zero.' 
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
     }
 });
 

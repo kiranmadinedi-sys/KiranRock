@@ -74,35 +74,69 @@ async function analyzeStock(symbol, vixData = null) {
         const volume = result.price.regularMarketVolume || 0;
         const avgVolume = result.summaryDetail?.averageDailyVolume10Day || volume;
 
-        // Simple momentum score
-        const momentumScore = change > 0 ? Math.min(change / 5, 1) : Math.max(change / 5, -1);
+        // Enhanced momentum score with better weighting
+        const momentumScore = change > 2 ? 1 : change > 0.5 ? 0.7 : change > 0 ? 0.4 : change > -2 ? -0.3 : -1;
 
-        // Volume score (higher volume = more interest)
-        const volumeScore = volume > avgVolume ? 0.8 : 0.5;
+        // Volume score (higher volume = more interest and liquidity)
+        const volumeRatio = volume / avgVolume;
+        const volumeScore = volumeRatio > 1.5 ? 1 : volumeRatio > 1.2 ? 0.8 : volumeRatio > 0.8 ? 0.5 : 0.3;
 
-        // VIX impact: if VIX is high, reduce buy confidence
+        // VIX impact: if VIX is high, reduce buy confidence more aggressively
         let vixImpact = 0;
-        if (vixData && vixData.price > 20) {
-            vixImpact = -0.2; // High volatility, reduce buy confidence
+        if (vixData) {
+            if (vixData.price > 30) {
+                vixImpact = -0.4; // Very high volatility, strong sell signal
+            } else if (vixData.price > 25) {
+                vixImpact = -0.3; // High volatility, moderate sell signal
+            } else if (vixData.price > 20) {
+                vixImpact = -0.15; // Elevated volatility, slight caution
+            } else if (vixData.price < 15) {
+                vixImpact = 0.1; // Low volatility, slight buy boost
+            }
         }
 
-        // Overall AI score (0-100)
-        const aiScore = Math.round(((momentumScore + volumeScore + vixImpact) / 2 + 1) * 50);
+        // Overall AI score (0-100) with better signal weighting
+        const rawScore = (momentumScore * 0.5) + (volumeScore * 0.3) + vixImpact;
+        const aiScore = Math.round(Math.max(0, Math.min(100, (rawScore + 1) * 50)));
 
-        // Candlestick chart signal: if VIX is high, prefer HOLD/SELL
-        let chartSignal = aiScore > 60 && (!vixData || vixData.price <= 20) ? 'BUY' : aiScore < 40 || (vixData && vixData.price > 25) ? 'SELL' : 'HOLD';
+        // Enhanced chart signal with better thresholds
+        let chartSignal = 'HOLD';
+        if (aiScore > 70 && (!vixData || vixData.price <= 20)) {
+            chartSignal = 'STRONG BUY';
+        } else if (aiScore > 60 && (!vixData || vixData.price <= 25)) {
+            chartSignal = 'BUY';
+        } else if (aiScore < 30 || (vixData && vixData.price > 30)) {
+            chartSignal = 'STRONG SELL';
+        } else if (aiScore < 40 || (vixData && vixData.price > 25)) {
+            chartSignal = 'SELL';
+        }
+
+        // Better recommendation logic
+        let recommendation = 'HOLD';
+        if (aiScore > 70) {
+            recommendation = 'STRONG BUY';
+        } else if (aiScore > 60) {
+            recommendation = 'BUY';
+        } else if (aiScore < 30) {
+            recommendation = 'STRONG SELL';
+        } else if (aiScore < 40) {
+            recommendation = 'SELL';
+        }
 
         return {
             symbol,
             price: currentPrice,
             change,
             volume,
+            volumeRatio: volumeRatio.toFixed(2),
             aiScore,
-            vixImpact,
+            vixImpact: vixImpact.toFixed(2),
             vix: vixData ? vixData.price : null,
-            recommendation: aiScore > 60 ? 'BUY' : aiScore < 40 ? 'SELL' : 'HOLD',
+            recommendation,
             chartSignal,
             confidence: Math.abs(aiScore - 50) / 50 * 100,
+            buyStrength: aiScore > 50 ? ((aiScore - 50) / 50 * 100).toFixed(1) : 0,
+            sellStrength: aiScore < 50 ? ((50 - aiScore) / 50 * 100).toFixed(1) : 0,
             timestamp: new Date()
         };
     } catch (error) {
@@ -122,7 +156,8 @@ async function generatePortfolioAllocation(userId, availableBalance) {
     for (const stock of AI_RECOMMENDED_STOCKS) {
         const analysis = await analyzeStock(stock.symbol);
 
-        if (analysis && analysis.recommendation !== 'SELL') {
+        // Only buy stocks with strong signals (BUY or STRONG BUY)
+        if (analysis && (analysis.recommendation === 'BUY' || analysis.recommendation === 'STRONG BUY') && analysis.aiScore >= 60) {
             const targetAmount = investmentAmount * stock.weight;
             const shares = Math.floor(targetAmount / analysis.price);
 
@@ -134,6 +169,8 @@ async function generatePortfolioAllocation(userId, availableBalance) {
                     currentPrice: analysis.price,
                     aiScore: analysis.aiScore,
                     recommendation: analysis.recommendation,
+                    chartSignal: analysis.chartSignal,
+                    buyStrength: analysis.buyStrength,
                     sector: stock.sector,
                     weight: stock.weight
                 });
@@ -248,16 +285,30 @@ async function rebalancePortfolio(userId) {
                 continue;
             }
 
-            // Check take profit
+            // Check take profit - Sell entire position to lock in gains
             if (profitLossPercent >= strategyConfig.takeProfit * 100) {
-                // Sell 50% of position to lock in gains
-                const sellQuantity = Math.floor(holding.quantity / 2);
+                // Sell entire position to maximize profit taking
+                rebalanceActions.push({
+                    action: 'SELL',
+                    symbol: holding.symbol,
+                    quantity: holding.quantity,
+                    reason: `Take Profit Target Reached (${profitLossPercent.toFixed(2)}% gain)`,
+                    currentPL: profitLossPercent,
+                    targetProfit: strategyConfig.takeProfit * 100
+                });
+                continue;
+            }
+            
+            // Check partial profit taking at 15% gain (before full take profit)
+            if (profitLossPercent >= 15 && profitLossPercent < strategyConfig.takeProfit * 100) {
+                // Sell 40% of position to lock in some gains while keeping upside
+                const sellQuantity = Math.floor(holding.quantity * 0.4);
                 if (sellQuantity > 0) {
                     rebalanceActions.push({
                         action: 'SELL',
                         symbol: holding.symbol,
                         quantity: sellQuantity,
-                        reason: 'Take Profit',
+                        reason: `Partial Profit Taking (${profitLossPercent.toFixed(2)}% gain)`,
                         currentPL: profitLossPercent
                     });
                 }

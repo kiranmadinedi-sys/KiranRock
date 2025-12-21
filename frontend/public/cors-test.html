@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CORS Diagnostic</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 900px; margin: 20px auto; padding: 20px; background: #f5f5f5; }
+        .box { background: white; padding: 20px; margin: 15px 0; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        .success { color: #10b981; font-weight: bold; }
+        .error { color: #ef4444; font-weight: bold; }
+        button { background: #3b82f6; color: white; padding: 12px 24px; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; margin: 5px; }
+        button:hover { background: #2563eb; }
+        pre { background: #1f2937; color: #10b981; padding: 15px; border-radius: 4px; overflow-x: auto; font-size: 12px; }
+        h1 { color: #1f2937; }
+        h2 { color: #374151; margin-top: 0; }
+        .info { background: #dbeafe; padding: 10px; border-left: 4px solid #3b82f6; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <h1>🔧 CORS Diagnostic Tool</h1>
+    
+    <div class="box">
+        <h2>Current Configuration</h2>
+        <p><strong>Frontend URL:</strong> <span id="frontendUrl"></span></p>
+        <p><strong>Backend URL:</strong> <span id="backendUrl"></span></p>
+        <p><strong>Origin Header:</strong> <span id="origin"></span></p>
+    </div>
+
+    <div class="box">
+        <h2>Test 1: OPTIONS Preflight Request</h2>
+        <button onclick="testPreflight()">Run Preflight Test</button>
+        <div id="preflightResult"></div>
+    </div>
+
+    <div class="box">
+        <h2>Test 2: POST Login Request</h2>
+        <button onclick="testLogin()">Test Login API</button>
+        <div id="loginResult"></div>
+    </div>
+
+    <div class="box info">
+        <strong>💡 If you see CORS errors:</strong>
+        <ol>
+            <li>Press <strong>Ctrl+Shift+R</strong> to hard refresh</li>
+            <li>Clear browser cache completely</li>
+            <li>Close and reopen browser</li>
+            <li>Try in Incognito/Private mode</li>
+        </ol>
+    </div>
+
+    <script>
+        const hostname = window.location.hostname;
+        const frontendUrl = window.location.origin;
+        let backendUrl;
+        
+        if (hostname === '99.47.183.33' || hostname === '192.168.1.206') {
+            backendUrl = `http://${hostname}:3001`;
+        } else if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
+            backendUrl = `http://${hostname}:3001`;
+        } else {
+            backendUrl = 'http://localhost:3001';
+        }
+
+        document.getElementById('frontendUrl').textContent = frontendUrl;
+        document.getElementById('backendUrl').textContent = backendUrl;
+        document.getElementById('origin').textContent = window.location.origin;
+
+        async function testPreflight() {
+            const resultDiv = document.getElementById('preflightResult');
+            resultDiv.innerHTML = '<p>Testing OPTIONS preflight...</p>';
+            
+            try {
+                const response = await fetch(`${backendUrl}/api/auth/login`, {
+                    method: 'OPTIONS',
+                    headers: {
+                        'Origin': window.location.origin,
+                        'Access-Control-Request-Method': 'POST',
+                        'Access-Control-Request-Headers': 'Content-Type'
+                    }
+                });
+                
+                const headers = {};
+                response.headers.forEach((value, key) => {
+                    headers[key] = value;
+                });
+                
+                resultDiv.innerHTML = `
+                    <p class="success">✅ Preflight successful!</p>
+                    <p>Status: ${response.status}</p>
+                    <pre>${JSON.stringify(headers, null, 2)}</pre>
+                `;
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <p class="error">❌ Preflight failed!</p>
+                    <p>Error: ${error.message}</p>
+                    <p><strong>This means CORS is blocking the request.</strong></p>
+                `;
+            }
+        }
+
+        async function testLogin() {
+            const resultDiv = document.getElementById('loginResult');
+            resultDiv.innerHTML = '<p>Testing POST request...</p>';
+            
+            try {
+                const response = await fetch(`${backendUrl}/api/auth/login`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ username: 'test', password: 'test' })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    resultDiv.innerHTML = `
+                        <p class="success">✅ Login API working!</p>
+                        <p>Status: ${response.status}</p>
+                        <p>User created: ${data.user.username}</p>
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    `;
+                } else {
+                    resultDiv.innerHTML = `
+                        <p class="success">✅ API reachable (authentication failed as expected)</p>
+                        <p>Status: ${response.status}</p>
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    `;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <p class="error">❌ Request failed!</p>
+                    <p>Error: ${error.message}</p>
+                    <p><strong>Possible causes:</strong></p>
+                    <ul>
+                        <li>CORS policy blocking request</li>
+                        <li>Backend not running</li>
+                        <li>Firewall blocking port 3001</li>
+                        <li>Network connectivity issue</li>
+                    </ul>
+                `;
+            }
+        }
+
+        // Auto-run tests
+        window.addEventListener('load', () => {
+            setTimeout(() => {
+                testPreflight();
+                setTimeout(testLogin, 1000);
+            }, 500);
+        });
+    </script>
+</body>
+</html>

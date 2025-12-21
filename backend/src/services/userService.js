@@ -35,17 +35,27 @@ const findUserById = (id) => {
     return users.find(u => u.id === id);
 };
 
+const findUserByEmail = (email) => {
+    const users = readUsers();
+    return users.find(u => u.email === email);
+};
+
 const { v4: uuidv4 } = require('uuid');
 
-const createUser = (username, password) => {
+const createUser = (username, password, additionalData = {}) => {
     const users = readUsers();
     const newUser = {
         id: uuidv4(),
         username,
         password, // In a real app, hash this!
+        email: additionalData.email || '',
+        firstName: additionalData.firstName || '',
+        lastName: additionalData.lastName || '',
+        phone: additionalData.phone || '',
         alerts: [],
         portfolio: [],
-        phone: '', // Add phone field, empty by default
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
     };
     users.push(newUser);
     writeUsers(users);
@@ -57,5 +67,6 @@ module.exports = {
     writeUsers,
     findUserByUsername,
     findUserById,
+    findUserByEmail,
     createUser,
 };

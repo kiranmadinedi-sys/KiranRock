@@ -1,4 +1,4 @@
-import { API_BASE_URL } from '../config/apiConfig';
+import { getApiBaseUrl } from '../config';
 import React, { useState, useEffect } from 'react';
 
 const ReportView = ({ symbol, token }) => {
@@ -25,7 +25,7 @@ const ReportView = ({ symbol, token }) => {
         setError('');
         setReport(null);
         try {
-            const response = await fetch(`${API_BASE_URL}/api/reports/${symbol}`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/reports/${symbol}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',

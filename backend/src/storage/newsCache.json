@@ -1,0 +1,1160 @@
+{
+  "timestamp": 1766271075907,
+  "news": [
+    {
+      "headline": "The Stock Market Is Sounding a Dire Warning for 2026 -- but Are Investors Paying Attention?",
+      "source": "Motley Fool",
+      "published_at": "2025-12-20T11:26:00.000Z",
+      "url": "https://finance.yahoo.com/m/d758d7f8-39c7-357b-8649-1015a57db6a9/the-stock-market-is-sounding.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/0drriX02MgSnO7lvGDk.ow--~B/aD03ODA7dz0xMjAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/motleyfool.com/7e9a6682cf43ab54f3ce318fd6c22171",
+      "market_impact": 4
+    },
+    {
+      "headline": "Aravolta Is the Software Powering Data Centers Behind the Scenes",
+      "source": "Business Wire",
+      "published_at": "2025-12-19T21:15:00.000Z",
+      "url": "https://finance.yahoo.com/news/aravolta-software-powering-data-centers-211500868.html",
+      "tickers": [
+        "MSFT"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/gplmn2Q9_fhnKoY_XzOGtQ--~B/aD0xMjM5O3c9NjI0NzthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/business-wire.com/b2276e029da115de0e7aa41139f2cb6a",
+      "market_impact": 4
+    },
+    {
+      "headline": "1 Tech Stock That Should Be on Every Investor's Holiday List",
+      "source": "Motley Fool",
+      "published_at": "2025-12-20T22:41:00.000Z",
+      "url": "https://finance.yahoo.com/m/337e521b-c579-3eef-93d4-01601f4d7361/1-tech-stock-that-should-be.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/iepE54.QFVRXVrTFMTBPbw--~B/aD04MDA7dz0xMjAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/motleyfool.com/5b9629685d5811dd060eaa0663d7c93e",
+      "market_impact": 3
+    },
+    {
+      "headline": "PSG cruise past fifth-tier Fontenay in French Cup",
+      "source": "AFP",
+      "published_at": "2025-12-20T22:39:12.000Z",
+      "url": "https://finance.yahoo.com/m/2c2403f6-5f68-3f2b-b18e-b8f3880e2313/psg-cruise-past-fifth-tier.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/q0AXt6MlOfwNDC9lkbv72A--~B/aD01MTE7dz03Njg7YXBwaWQ9eXRhY2h5b24-/https://media.zenfs.com/en/afp.com/a096d697c9e7a350a10b7b8610d36ae9",
+      "market_impact": 3
+    },
+    {
+      "headline": "Trader Loses $50M in USDT to Address Scam: Check Your Wallet Habits",
+      "source": "99bitcoins",
+      "published_at": "2025-12-20T22:37:36.000Z",
+      "url": "https://finance.yahoo.com/m/cc95baa5-0e22-3847-baf1-5199691f9468/trader-loses-%2450m-in-usdt-to.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/AfAT8FbGs7C70.sbCJ_ISQ--~B/aD02Mjg7dz0xMDI0O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/99bitcoins_us_315/e313988772675a6f2d1b65fed5c120a6",
+      "market_impact": 3
+    },
+    {
+      "headline": "Alicia Basir Presents New Voodoo Love Spells for Romantic Success",
+      "source": "GlobeNewswire",
+      "published_at": "2025-12-20T22:35:00.000Z",
+      "url": "https://finance.yahoo.com/news/alicia-basir-presents-voodoo-love-223500955.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/.9nO3yf6_sg0GhH5Gl.ceQ--~B/aD00MDg7dz02MTI7YXBwaWQ9eXRhY2h5b24-/https://media.zenfs.com/en/globenewswire.com/b2c81b9bef563c6afbc13eae2da2d484",
+      "market_impact": 3
+    },
+    {
+      "headline": "Honour to match idol Ronaldo's Real Madrid calendar year goal record: Mbappe",
+      "source": "AFP",
+      "published_at": "2025-12-20T22:34:25.000Z",
+      "url": "https://finance.yahoo.com/m/bd079cda-998d-3c75-bc69-e9c00da338ea/honour-to-match-idol.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/_VuYHGAU5vsSF9rwATA0iA--~B/aD01MTI7dz03Njg7YXBwaWQ9eXRhY2h5b24-/https://media.zenfs.com/en/afp.com/d33b58aa6710f2497eeeb699446d88ab",
+      "market_impact": 3
+    },
+    {
+      "headline": "While institutions own 18% of Astral Resources NL (ASX:AAR), individual investors are its largest shareholders with 54% ownership",
+      "source": "Simply Wall St.",
+      "published_at": "2025-12-20T22:34:12.000Z",
+      "url": "https://finance.yahoo.com/news/while-institutions-own-18-astral-223412559.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/UrHBsIrR8XWjKtdqSp2vkw--~B/aD00MzI7dz0xMTk0O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/simply_wall_st__316/b3b5a2748dbe57dca97087f8af8726d5",
+      "market_impact": 3
+    },
+    {
+      "headline": "2026 Oscars Best Supporting Actor Predictions",
+      "source": "Variety",
+      "published_at": "2025-12-20T22:32:50.000Z",
+      "url": "https://finance.yahoo.com/m/08202f04-26f2-3aa7-879e-aa5e4d8c8293/2026-oscars-best-supporting.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/IUmkyuBOCfeJ64VmirwJMA--~B/aD02MDA7dz05MDA7YXBwaWQ9eXRhY2h5b24-/https://media.zenfs.com/en/variety.com/b36b11045c01a4406571be30916ecca1",
+      "market_impact": 3
+    },
+    {
+      "headline": "Mark Cuban Says 'This Is The Job-Hunting Advice I Give My Own Kids In The Age Of AI'",
+      "source": "Benzinga",
+      "published_at": "2025-12-20T22:31:41.000Z",
+      "url": "https://finance.yahoo.com/news/mark-cuban-says-job-hunting-223141964.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/ZUyRT8jnTYoaUMWmQ6nelA--~B/aD03MTc7dz0xMDI0O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/Benzinga/875c123ae3321dff199bb2c439c1791a",
+      "market_impact": 3
+    },
+    {
+      "headline": "Lululemon is selling $128 leggings for just $49 right now",
+      "source": "TheStreet",
+      "published_at": "2025-12-20T22:30:00.000Z",
+      "url": "https://finance.yahoo.com/m/e7efd7af-9ec6-3660-b52d-db6c736508be/lululemon-is-selling-%24128.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/S4W09h2M5fbBm_CAJvKLIw--~B/aD04MDA7dz0xMTk5O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/thestreet_ecomm_249/9c68bbd3bc650323471f5ed1f3352afb",
+      "market_impact": 3
+    },
+    {
+      "headline": "Best Stock to Buy Right Now: Apple vs. Amazon",
+      "source": "Motley Fool",
+      "published_at": "2025-12-20T22:25:00.000Z",
+      "url": "https://finance.yahoo.com/m/29da4429-e231-360e-837f-be9ebb1a2f49/best-stock-to-buy-right-now%3A.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/GJ8P1BurcFMY1MRENO9XVw--~B/aD04NDA7dz0xNDAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/motleyfool.com/c5ba0c8b0d22b3df66ca102406fccc1b",
+      "market_impact": 3
+    },
+    {
+      "headline": "Dow Jones Futures: Bearish To Bullish In Two Days; Palantir, GE Lead 12 Stocks In Buy Zones",
+      "source": "Investor's Business Daily",
+      "published_at": "2025-12-20T14:29:00.000Z",
+      "url": "https://finance.yahoo.com/m/80a2ea9c-2db3-3528-b01e-3c1d9015e4c7/dow-jones-futures%3A-bearish-to.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/yx3pInYMw8mBNtrGqhPWhA--~B/aD01NzI7dz0xMDEyO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/ibd.com/6110bd4e4da5de8873d1cebd0418528c",
+      "market_impact": 3
+    },
+    {
+      "headline": "How AI will drive profit growth for credit cards, retailers in 2026",
+      "source": "Yahoo Finance Video",
+      "published_at": "2025-12-20T13:00:52.000Z",
+      "url": "https://finance.yahoo.com/video/ai-drive-profit-growth-credit-130052291.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/HazCQUqwDvhub.zXVzLTjg--~B/aD0xNjIxO3c9Mjg4MDthcHBpZD15dGFjaHlvbg--/https://s.yimg.com/os/creatr-uploaded-images/2025-12/29470c90-db89-11f0-8bfd-6910ed755844",
+      "market_impact": 3
+    },
+    {
+      "headline": "Review & Preview: Here Comes Santa Claus",
+      "source": "Barrons.com",
+      "published_at": "2025-12-20T00:55:00.000Z",
+      "url": "https://finance.yahoo.com/m/0c2b94ad-4843-3e7e-9302-7984f68a7a24/review-%26-preview%3A-here-comes.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/_kc6REYMS1JrAuV5bYtjfA--~B/aD02NTt3PTMyMDthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/Barrons.com/12ea0f43d8f8307249a68d1cb2e0587e",
+      "market_impact": 3
+    },
+    {
+      "headline": "Wall Street ends higher as tech rally continues",
+      "source": "Reuters Videos",
+      "published_at": "2025-12-19T23:48:39.000Z",
+      "url": "https://finance.yahoo.com/video/wall-street-ends-higher-tech-234839001.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/xWSPOn3swEqUHMhxRVwFOg--~B/aD03MjA7dz0xMjgwO2FwcGlkPXl0YWNoeW9u/https://cf-images.us-east-1.prod.boltdns.net/v1/jit/6415665815001/396f834f-1f7d-4990-821e-ab47f9a69d41/main/1280x720/1m1s194ms/match/image.jpg",
+      "market_impact": 3
+    },
+    {
+      "headline": "Medpace (MEDP) Outperforms Broader Market: What You Need to Know",
+      "source": "Zacks",
+      "published_at": "2025-12-19T23:15:03.000Z",
+      "url": "https://finance.yahoo.com/news/medpace-medp-outperforms-broader-market-231503368.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/CorpxfcSD3xaruoFanouDg--~B/aD00NzY7dz05MDA7YXBwaWQ9eXRhY2h5b24-/https://media.zenfs.com/en/zacks.com/ace7df31c7fcb10255abe7c990ea373a",
+      "market_impact": 3
+    },
+    {
+      "headline": "Lyft (LYFT) Stock Slides as Market Rises: Facts to Know Before You Trade",
+      "source": "Zacks",
+      "published_at": "2025-12-19T23:15:03.000Z",
+      "url": "https://finance.yahoo.com/news/lyft-lyft-stock-slides-market-231503286.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/M2z0wFqvnPw7eaLU0tPuyQ--~B/aD02MzY7dz05MDA7YXBwaWQ9eXRhY2h5b24-/https://media.zenfs.com/en/zacks.com/0c6f98f4bf655bec3b199bc1a71b8b85",
+      "market_impact": 3
+    },
+    {
+      "headline": "Equinix (EQIX) Outpaces Stock Market Gains: What You Should Know",
+      "source": "Zacks",
+      "published_at": "2025-12-19T23:15:02.000Z",
+      "url": "https://finance.yahoo.com/news/equinix-eqix-outpaces-stock-market-231502822.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/T44Iwg7RbRrkaTIYz_liyQ--~B/aD00Njk7dz05MDA7YXBwaWQ9eXRhY2h5b24-/https://media.zenfs.com/en/zacks.com/737ffb82e07dc8bffb77e72d153c91f2",
+      "market_impact": 3
+    },
+    {
+      "headline": "The Stock Market Needs to Focus on Lucky 13",
+      "source": "Barrons.com",
+      "published_at": "2025-12-19T23:03:00.000Z",
+      "url": "https://finance.yahoo.com/m/f2bf3ed7-e663-31d2-80f1-9dbb57f82008/the-stock-market-needs-to.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/hojCJNFHhOPYTe9d8tivWw--~B/aD02NDA7dz0xMjgwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/Barrons.com/172571c723b38f47c5a9810164d2c794",
+      "market_impact": 3
+    },
+    {
+      "headline": "Dominion Energy (D) Stock Sinks As Market Gains: What You Should Know",
+      "source": "Zacks",
+      "published_at": "2025-12-19T23:00:04.000Z",
+      "url": "https://finance.yahoo.com/news/dominion-energy-d-stock-sinks-230004619.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/aMCT_Lh5K9xNn9.QUdX03w--~B/aD01ODc7dz05MDA7YXBwaWQ9eXRhY2h5b24-/https://media.zenfs.com/en/zacks.com/17a4db66bb13bdabcbf848550a6ea15a",
+      "market_impact": 3
+    },
+    {
+      "headline": "Breaking Down Oracle, the AI Trade, and the Outlook for Tech Earnings",
+      "source": "Zacks",
+      "published_at": "2025-12-19T22:39:00.000Z",
+      "url": "https://finance.yahoo.com/news/breaking-down-oracle-ai-trade-223900137.html",
+      "tickers": [
+        "MSFT"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/rYP8VPOUfQj30jWv52_m5w--~B/aD00MDA7dz02MzU7YXBwaWQ9eXRhY2h5b24-/https://media.zenfs.com/en/zacks.com/53d9a3fd304ab73d580828e5367313eb",
+      "market_impact": 3
+    },
+    {
+      "headline": "My Top Vanguard ETFs To Buy In 2026",
+      "source": "24/7 Wall St.",
+      "published_at": "2025-12-18T21:13:11.000Z",
+      "url": "https://finance.yahoo.com/m/751538eb-bebd-3ac5-908e-1f88f29d976c/my-top-vanguard-etfs-to-buy.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/_9ljnBC1z_Zk72IRArNskQ--~B/aD04NDM7dz0xNTAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/24_7_wall_st__718/5675d93d5665df35cd7bbc73e52f44ee",
+      "market_impact": 3
+    },
+    {
+      "headline": "There’s No Quick Fix for Soaring Health Insurance Costs. These Accounts Can Help.",
+      "source": "Barrons.com",
+      "published_at": "2025-12-18T17:20:00.000Z",
+      "url": "https://finance.yahoo.com/m/6f73783c-2eee-31c3-bec2-831cad427e51/there%E2%80%99s-no-quick-fix-for.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/x2XDYy8NyXjDI3zkGckRHA--~B/aD02NDA7dz0xMjgwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/Barrons.com/39ab8409541b8b1134996bb96b4e46d7",
+      "market_impact": 3
+    },
+    {
+      "headline": "ITOT’s 37% Concentration in Top Ten Holdings Could Make or Break 2026 Returns",
+      "source": "24/7 Wall St.",
+      "published_at": "2025-12-18T13:41:10.000Z",
+      "url": "https://finance.yahoo.com/m/539c86e9-9ef1-3d87-9690-7ea571b29eaa/itot%E2%80%99s-37%25-concentration-in.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/1D6Z2V__MJmNWcK0AD5zrg--~B/aD03Njg7dz0xMzc2O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/24_7_wall_st__718/d8655e62993db66844870c245fcb5d03",
+      "market_impact": 3
+    },
+    {
+      "headline": "Oracle Woes Ruin Cross-Asset Party as Traders Flock to Safety",
+      "source": "Bloomberg",
+      "published_at": "2025-12-11T06:35:05.000Z",
+      "url": "https://finance.yahoo.com/news/oracle-woes-ruin-cross-asset-063505922.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/xui9sSdKDbW48jLp9PoaHQ--~B/aD0xMzMxO3c9MjAwMDthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/bloomberg_holding_pen_162/da61d574207d88ae0e24709b305db241",
+      "market_impact": 3
+    },
+    {
+      "headline": "Stock market today: Dow, S&P 500, Nasdaq end little changed as Wall Street's Fed rate cut conviction runs high",
+      "source": "Yahoo Finance",
+      "published_at": "2025-12-04T21:00:46.000Z",
+      "url": "https://finance.yahoo.com/news/live/stock-market-today-dow-sp-500-nasdaq-end-little-changed-as-wall-streets-fed-rate-cut-conviction-runs-high-210046639.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/XXf5PGUIwNdsPYvIPVeZYQ--~B/aD0zMzUwO3c9NTAyNTthcHBpZD15dGFjaHlvbg--/https://s.yimg.com/os/creatr-uploaded-images/2025-12/2b62fd50-d089-11f0-b7df-24b60ba4bfa1",
+      "market_impact": 3
+    },
+    {
+      "headline": "ETFs to Keep Your Portfolio on Track in the Long Term",
+      "source": "Zacks",
+      "published_at": "2025-12-04T16:08:00.000Z",
+      "url": "https://finance.yahoo.com/news/etfs-keep-portfolio-track-long-160800229.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/L_CKvT8w1HX0lwtD7o5QmQ--~B/aD00NTU7dz02MjA7YXBwaWQ9eXRhY2h5b24-/https://media.zenfs.com/en/zacks.com/02bc9c8dd5ce844476ef82070ed95b77",
+      "market_impact": 3
+    },
+    {
+      "headline": "Here's Why This ETF Is a Multimillionaire Maker",
+      "source": "Motley Fool",
+      "published_at": "2025-12-04T15:50:00.000Z",
+      "url": "https://finance.yahoo.com/m/41bb49e9-5c08-38ac-8d89-c0d326db1a26/here%27s-why-this-etf-is-a.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/vOFVYAWOwdEgktRpQtGRrQ--~B/aD05MzM7dz0xNDAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/motleyfool.com/6e6a5b33c3708bc6bbece9780521d0a7",
+      "market_impact": 3
+    },
+    {
+      "headline": "Find companies with 'dominant' characteristics, strategist says",
+      "source": "Yahoo Finance Video",
+      "published_at": "2025-11-30T11:00:32.000Z",
+      "url": "https://finance.yahoo.com/video/companies-dominant-characteristics-strategist-says-110032815.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/FsEyY5VWOqfe5uHRrbi0_w--~B/aD0xNjgyO3c9Mjk4NzthcHBpZD15dGFjaHlvbg--/https://s.yimg.com/os/creatr-uploaded-images/2025-11/6d3bef90-c970-11f0-bc99-9bc596503faf",
+      "market_impact": 3
+    },
+    {
+      "headline": "CME Futures Outage Disrupts Trading Across Global Markets",
+      "source": "Bloomberg",
+      "published_at": "2025-11-28T11:00:36.000Z",
+      "url": "https://finance.yahoo.com/news/cme-futures-trading-stopped-friday-041013534.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/iBjwn2fdQLHRU7_Lz1dtlQ--~B/aD0xMzMwO3c9MjAwMDthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/bloomberg_holding_pen_162/e4aadec923de9d354cd6987b3dcf8b79",
+      "market_impact": 3
+    },
+    {
+      "headline": "Global Stocks Hold Steady After Four-Day Rally: Markets Wrap",
+      "source": "Bloomberg",
+      "published_at": "2025-11-27T20:49:45.000Z",
+      "url": "https://finance.yahoo.com/news/stocks-near-erasing-november-losses-065543367.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/NB4D1VkAfE1VyKHwroJuPA--~B/aD04ODA7dz0xMzQwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/bloomberg_holding_pen_162/e53dc263bee1bfe69fb120686793c79f",
+      "market_impact": 3
+    },
+    {
+      "headline": "If I Could Choose Only 1 ETF to Buy and Hold Forever, This Would Be It",
+      "source": "Motley Fool",
+      "published_at": "2025-11-24T08:15:00.000Z",
+      "url": "https://finance.yahoo.com/m/d1fdddb9-c08d-33c4-a6a5-23354a1e8a76/if-i-could-choose-only-1-etf.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/.GiPTAVjV.LlmYXCY7X7nA--~B/aD04Mzk7dz0xNDAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/motleyfool.com/28a5681fe6cc5c9cc18f3873ff7f22a0",
+      "market_impact": 3
+    },
+    {
+      "headline": "Here's How Many Shares of the Vanguard Total Stock Market ETF (VTI) You'd Need for $500 in Yearly Dividends",
+      "source": "Motley Fool",
+      "published_at": "2025-11-23T20:50:00.000Z",
+      "url": "https://finance.yahoo.com/m/34c30e63-4b19-3dde-83ca-9034e11f82ce/here%27s-how-many-shares-of-the.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/TauL5qm2t7ckgjTJ510F4w--~B/aD05MzM7dz0xNDAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/motleyfool.com/1d814016a4e009fa3566a6f56d218010",
+      "market_impact": 3
+    },
+    {
+      "headline": "Buy These 4 ETFs if You Want to be Rich in 2026, According to John Liang",
+      "source": "GOBankingRates",
+      "published_at": "2025-11-22T04:24:04.000Z",
+      "url": "https://finance.yahoo.com/news/buy-4-etfs-want-rich-042404092.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/KdRffH0EH0t0jQEnZBm2Cg--~B/aD0xMDgwO3c9MTkyMDthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/gobankingrates_644/3001caf1b05aa32d13ec69858b431cad",
+      "market_impact": 3
+    },
+    {
+      "headline": "Private vs. public markets: Why liquid investments are still king",
+      "source": "Yahoo Finance Video",
+      "published_at": "2025-11-20T17:53:33.000Z",
+      "url": "https://finance.yahoo.com/video/private-vs-public-markets-why-175333357.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/xuCtKShSjT7ME8N89woLpg--~B/aD0zMTk3O3c9NTY3NTthcHBpZD15dGFjaHlvbg--/https://s.yimg.com/os/creatr-uploaded-images/2025-11/ade69250-c639-11f0-b67f-63ac95866785",
+      "market_impact": 3
+    },
+    {
+      "headline": "Two Paths to the Total US Market: Vanguard’s Total Stock Market ETF vs. iShares’ Core S&P Total US Stock Market ETF",
+      "source": "Motley Fool",
+      "published_at": "2025-11-19T23:45:06.000Z",
+      "url": "https://finance.yahoo.com/m/7dd78558-e7d1-32b6-95bf-8247fbbeb672/two-paths-to-the-total-us.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/Np9o3bh8VC1sVtimeVtyug--~B/aD0xMjUxO3c9MTQwMTthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/motleyfool.com/6b28a065be0b5031477267afbc8e62a9",
+      "market_impact": 3
+    },
+    {
+      "headline": "The Clear Winner for Building Long Term Wealth, QQQ or VTI?",
+      "source": "24/7 Wall St.",
+      "published_at": "2025-11-19T21:00:54.000Z",
+      "url": "https://finance.yahoo.com/m/794b4311-7b64-3873-aae3-e5bc37477c25/the-clear-winner-for-building.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/tsc16y77bB.nysaOcMCzPg--~B/aD05MjQ7dz0xNTAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/24_7_wall_st__718/7f7e09295f90386a8fe3c4ec01ea7f9e",
+      "market_impact": 3
+    },
+    {
+      "headline": "Bitcoin's slide, Nvidia earnings, Sept. jobs report: 3 Things",
+      "source": "Yahoo Finance Video",
+      "published_at": "2025-11-17T14:06:44.000Z",
+      "url": "https://finance.yahoo.com/video/bitcoins-slide-nvidia-earnings-sept-140644912.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/pQRWbylM8.D96caEprF9.A--~B/aD0yMjQ2O3c9NDAwMDthcHBpZD15dGFjaHlvbg--/https://s.yimg.com/os/creatr-uploaded-images/2025-11/8d37eae0-c3be-11f0-9bff-6c2a118015ca",
+      "market_impact": 3
+    },
+    {
+      "headline": "Stock market today: Dow closes above 48,000 for first time, Nasdaq slips with government shutdown vote on deck",
+      "source": "Yahoo Finance",
+      "published_at": "2025-11-12T21:00:39.000Z",
+      "url": "https://finance.yahoo.com/news/live/stock-market-today-dow-closes-above-48000-for-first-time-nasdaq-slips-with-government-shutdown-vote-on-deck-210039048.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/1AWEzv8oxmk_rcAQJBkLwg--~B/aD0yMzc2O3c9NDIyNDthcHBpZD15dGFjaHlvbg--/https://s.yimg.com/os/creatr-uploaded-images/2025-01/ca5b4ea0-ce03-11ef-97f9-4dd9fad99c21",
+      "market_impact": 3
+    },
+    {
+      "headline": "Palantir's post-earnings drag, Uber sinks, Pfizer earnings",
+      "source": "Yahoo Finance Video",
+      "published_at": "2025-11-04T14:12:24.000Z",
+      "url": "https://finance.yahoo.com/video/palantirs-post-earnings-drag-uber-141224137.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/bU6H1HreVkA6v6XtaUXQfQ--~B/aD0yNjg4O3c9NDc3MjthcHBpZD15dGFjaHlvbg--/https://s.yimg.com/os/creatr-uploaded-images/2025-11/d45a0c00-b987-11f0-aebf-55ddcc75add4",
+      "market_impact": 3
+    },
+    {
+      "headline": "Amazon surges, Apple earnings, Chevron & Exxon: 3 Things",
+      "source": "Yahoo Finance Video",
+      "published_at": "2025-10-31T13:07:20.000Z",
+      "url": "https://finance.yahoo.com/video/amazon-surges-apple-earnings-chevron-130720880.html",
+      "tickers": [],
+      "category": "macro",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/4SRn3Nrdfy2x9y3yUu44rw--~B/aD0zNzM4O3c9NjYzOTthcHBpZD15dGFjaHlvbg--/https://s.yimg.com/os/creatr-uploaded-images/2025-10/6b1d4e80-b65a-11f0-bbfd-6e460a1f9f13",
+      "market_impact": 3
+    },
+    {
+      "headline": "Analysts Have a Moderate Buy Rating on Apple Inc. (AAPL)",
+      "source": "Insider Monkey",
+      "published_at": "2025-12-20T11:56:31.000Z",
+      "url": "https://finance.yahoo.com/news/analysts-moderate-buy-rating-apple-115631787.html",
+      "tickers": [
+        "AAPL"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/ZW3fq6JkBYqEx9N2Vum6qQ--~B/aD04MTY7dz0xNDU2O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/insidermonkey.com/410ac07c4c90786d8592963501a2ed84",
+      "market_impact": 2
+    },
+    {
+      "headline": "Wells Fargo Reiterates Overweight Rating on Amazon.com, Inc. (AMZN)",
+      "source": "Insider Monkey",
+      "published_at": "2025-12-20T11:56:20.000Z",
+      "url": "https://finance.yahoo.com/news/wells-fargo-reiterates-overweight-rating-115620466.html",
+      "tickers": [
+        "AMZN"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/gRr4SX5mRuKOklt034YZrw--~B/aD04MTY7dz0xNDU2O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/insidermonkey.com/ad45e965b4e54ca4038c3c524bb47a1a",
+      "market_impact": 2
+    },
+    {
+      "headline": "Prediction: These 3 Stocks Will Be Worth More Than $2 Trillion by 2026",
+      "source": "Motley Fool",
+      "published_at": "2025-12-20T22:20:00.000Z",
+      "url": "https://finance.yahoo.com/m/34babe8e-f320-3309-b1eb-a70401a464c5/prediction%3A-these-3-stocks.html",
+      "tickers": [
+        "TSLA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/o6WvC0uCe.YJK6UHfRLlIA--~B/aD05MzM7dz0xNDAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/motleyfool.com/718f5335df5bb6b296d717b4e17c9119",
+      "market_impact": 1
+    },
+    {
+      "headline": "Is Nvidia Stock a Buy in 2026?",
+      "source": "Motley Fool",
+      "published_at": "2025-12-20T21:35:00.000Z",
+      "url": "https://finance.yahoo.com/m/a7e0c0fe-aa2f-3714-8090-32a2bca545e8/is-nvidia-stock-a-buy-in-2026%3F.html",
+      "tickers": [
+        "NVDA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/OVqy7mZ6auEdg5F9AueVKQ--~B/aD01MDc7dz03MjA7YXBwaWQ9eXRhY2h5b24-/https://media.zenfs.com/en/motleyfool.com/28668478ea304dcf3e26085eabb00fec",
+      "market_impact": 1
+    },
+    {
+      "headline": "‘It felt so wrong’: Colin Angle on iRobot, the FTC, and the Amazon deal that never was",
+      "source": "TechCrunch",
+      "published_at": "2025-12-20T21:31:33.000Z",
+      "url": "https://finance.yahoo.com/news/felt-wrong-colin-angle-irobot-213133707.html",
+      "tickers": [
+        "AMZN"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/LTjRZVRPykyOh68xw2Gs.Q--~B/aD0xNTM2O3c9MjA0ODthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/techcrunch_finance_785/a39d7a37d7255d6a9c48b9d0f9a3a2fd",
+      "market_impact": 1
+    },
+    {
+      "headline": "Elon Musk Called His Father 'Evil': 'He Was Such a Terrible Human Being'",
+      "source": "Benzinga",
+      "published_at": "2025-12-20T20:41:33.000Z",
+      "url": "https://finance.yahoo.com/m/e05c274e-f2e4-3132-afc8-8b1915bc806c/elon-musk-called-his-father.html",
+      "tickers": [
+        "TSLA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/OPl14OO9Jfq1m9acA_2INg--~B/aD02ODM7dz0xMDI0O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/Benzinga/2cdf275f70066f8691b44bdaadd1c415",
+      "market_impact": 1
+    },
+    {
+      "headline": "Should You Buy Amazon Stock in 2026?",
+      "source": "Motley Fool",
+      "published_at": "2025-12-20T20:23:00.000Z",
+      "url": "https://finance.yahoo.com/m/a9146815-f8a5-3226-a7b5-70c4f2e0c3cf/should-you-buy-amazon-stock.html",
+      "tickers": [
+        "AMZN"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/rhn_64.ChjXN1THxaC3KLg--~B/aD04NDA7dz0xNDAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/motleyfool.com/6374cacddd65f4e3e2f4c351f173367e",
+      "market_impact": 1
+    },
+    {
+      "headline": "CoreWeave Stock Soars: Time to Buy?",
+      "source": "Motley Fool",
+      "published_at": "2025-12-20T20:11:00.000Z",
+      "url": "https://finance.yahoo.com/m/3ef08f96-d774-3846-b38c-054a03400761/coreweave-stock-soars%3A-time.html",
+      "tickers": [
+        "NVDA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/YCQBTUbId_mUUOB0BGg_Iw--~B/aD05MDA7dz0xNDAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/motleyfool.com/5c0ecead1a653114edb8b96e4e32f07f",
+      "market_impact": 1
+    },
+    {
+      "headline": "Cathie Wood Dumps $11 Milllion Worth Of Tesla Stock While Doubling Down On These Notable Crypto Plays",
+      "source": "Benzinga",
+      "published_at": "2025-12-20T19:30:21.000Z",
+      "url": "https://finance.yahoo.com/news/cathie-wood-dumps-11-milllion-193021656.html",
+      "tickers": [
+        "TSLA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/DL4r1CYDjsrSM9HgUt1kxw--~B/aD01NzY7dz0xMDI0O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/Benzinga/d0e58570c1197e019a70b389c62196b5",
+      "market_impact": 1
+    },
+    {
+      "headline": "Elon Musk-Led Tesla's Cybercab Spotted Testing In Austin Amid Robotaxi, Driverless Push",
+      "source": "Benzinga",
+      "published_at": "2025-12-20T19:00:25.000Z",
+      "url": "https://finance.yahoo.com/news/elon-musk-led-teslas-cybercab-190025184.html",
+      "tickers": [
+        "TSLA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/rvbfp26zrNdZR1ostCROeg--~B/aD01NzY7dz0xMDI0O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/Benzinga/a87f0fd17002b2e8d999d2782977d269",
+      "market_impact": 1
+    },
+    {
+      "headline": "Why Alphabet Stock Could Double By 2030",
+      "source": "Motley Fool",
+      "published_at": "2025-12-20T18:51:00.000Z",
+      "url": "https://finance.yahoo.com/m/dd5096cd-6f72-3dd4-8613-4a18ec167a19/why-alphabet-stock-could.html",
+      "tickers": [
+        "GOOGL"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/bgbPYqw6q8WrfRu6ZpwtHg--~B/aD03MzY7dz0xNDAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/motleyfool.com/2ea9ba5dd81eaced56751dcb61900fdb",
+      "market_impact": 1
+    },
+    {
+      "headline": "OpenAI vs. Apple? Sam Altman is setting his sights on winning what could be an even higher-stakes AI battle",
+      "source": "Fortune",
+      "published_at": "2025-12-20T18:25:00.000Z",
+      "url": "https://finance.yahoo.com/news/openai-vs-apple-sam-altman-182500752.html",
+      "tickers": [
+        "AAPL"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/jUsQ4W00wgSxcM0rviKqyQ--~B/aD0xMzY1O3c9MjA0ODthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/fortune_175/cb7cd1f93eb8465044a56d7686ee7465",
+      "market_impact": 1
+    },
+    {
+      "headline": "Cathie Wood trims $11.2 million in longtime favorite stock",
+      "source": "TheStreet",
+      "published_at": "2025-12-20T18:20:00.000Z",
+      "url": "https://finance.yahoo.com/m/e079b6d7-d97a-3935-87a0-f08c19690f94/cathie-wood-trims-%2411.2.html",
+      "tickers": [
+        "TSLA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/LXTavjD_zouu4HlZML2vFQ--~B/aD04MDA7dz0xMjAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/thestreet_881/423a07b39c6eca835af18c270c138ef6",
+      "market_impact": 1
+    },
+    {
+      "headline": "Prediction: This Company Is All Set to Hit a $5 Trillion Market Cap in 2026 (Hint: It's Not Nvidia)",
+      "source": "Motley Fool",
+      "published_at": "2025-12-20T17:50:00.000Z",
+      "url": "https://finance.yahoo.com/m/770eccf1-34a8-31a2-aec2-333ff118a491/prediction%3A-this-company-is.html",
+      "tickers": [
+        "MSFT"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/0ghXPEem27m83b35EujYzQ--~B/aD04OTQ7dz0xNDAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/motleyfool.com/d754b0032b3ba58253828d1c0e6ae313",
+      "market_impact": 1
+    },
+    {
+      "headline": "Why Micron Stock Can Continue to Soar",
+      "source": "Motley Fool",
+      "published_at": "2025-12-20T17:39:00.000Z",
+      "url": "https://finance.yahoo.com/m/d130af4a-f916-3e1a-88d8-fb9bcb0b2027/why-micron-stock-can-continue.html",
+      "tickers": [
+        "NVDA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/98gyKL2bbKycxhFLYTxc7Q--~B/aD05MzM7dz0xNDAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/motleyfool.com/22d2cc9ada19013c20488cd7b06a0a8c",
+      "market_impact": 1
+    },
+    {
+      "headline": "Should You Buy Artificial Intelligence (AI) Stocks In 2026?",
+      "source": "Motley Fool",
+      "published_at": "2025-12-20T17:05:00.000Z",
+      "url": "https://finance.yahoo.com/m/7cc2604e-98b6-3594-b56d-89c649ecb5f0/should-you-buy-artificial.html",
+      "tickers": [
+        "MSFT"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/GTqho602HCS.euf9SqgJVg--~B/aD05MzM7dz0xNDAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/motleyfool.com/2d236b99dd573a2fe29fcd3c9a9f4f71",
+      "market_impact": 1
+    },
+    {
+      "headline": "Instacart Is Under Investigation. Should You Buy the Dip in CART Stock?",
+      "source": "Barchart",
+      "published_at": "2025-12-20T16:00:02.000Z",
+      "url": "https://finance.yahoo.com/m/20ed9ece-1cda-33d6-bb7b-15adeb60da27/instacart-is-under.html",
+      "tickers": [
+        "AMZN"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/KwAb3MtazknYDn72UtjLEw--~B/aD0xMDY3O3c9MTYwMDthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/barchart_com_477/5e8f936c3140d7b4b2c375470b4a7378",
+      "market_impact": 1
+    },
+    {
+      "headline": "AMAZON WORKERS AT DJT6 FACILITY IN RIVERSIDE JOIN TEAMSTERS",
+      "source": "PR Newswire",
+      "published_at": "2025-12-20T16:00:00.000Z",
+      "url": "https://finance.yahoo.com/news/amazon-workers-djt6-facility-riverside-160000455.html",
+      "tickers": [
+        "AMZN"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/xNef9JlUAq03kFOb7RbF.A--~B/aD00MDA7dz0zMjA7YXBwaWQ9eXRhY2h5b24-/https://media.zenfs.com/en/prnewswire.com/8811058b6364e462c0012e705fb12fb8",
+      "market_impact": 1
+    },
+    {
+      "headline": "A Signal Seen Only Once Before: History’s Forecast for the S&P 500’s Next Move",
+      "source": "24/7 Wall St.",
+      "published_at": "2025-12-20T15:19:02.000Z",
+      "url": "https://finance.yahoo.com/m/1005c6b3-e4e5-388c-a3b3-6d06852f0b8a/a-signal-seen-only-once.html",
+      "tickers": [
+        "NVDA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/GCsqpV60YPA.HVq2bwz8Ow--~B/aD04NDM7dz0xNTAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/24_7_wall_st__718/bd8b3b8c2c3ddad288bb62950051255b",
+      "market_impact": 1
+    },
+    {
+      "headline": "This Glorious Artificial Intelligence (AI) Stock Has Crushed Nvidia and Broadcom With 147% Returns in 2025. It Can Jump by 111% in 2026",
+      "source": "Motley Fool",
+      "published_at": "2025-12-20T15:05:00.000Z",
+      "url": "https://finance.yahoo.com/m/23e2d588-a4c5-3ba9-bf87-652fae75e3be/this-glorious-artificial.html",
+      "tickers": [
+        "NVDA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/9haqNptyllMzD9tEAvTy3g--~B/aD05MzQ7dz0xNDAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/motleyfool.com/ec43d7eafcd75d8f0680192fed84a8a5",
+      "market_impact": 1
+    },
+    {
+      "headline": "How the World of Work Will Change Over the Next 20 Years",
+      "source": "The Wall Street Journal",
+      "published_at": "2025-12-20T15:00:00.000Z",
+      "url": "https://finance.yahoo.com/m/bb60af9d-b530-3d9f-813e-ea9e20b49f30/how-the-world-of-work-will.html",
+      "tickers": [
+        "MSFT"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/YFZWKSJYQdTpDDxRIAlYFQ--~B/aD02NDA7dz0xMjgwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/wsj.com/a1d9085f59cf71eb0f6c0f04423787f1",
+      "market_impact": 1
+    },
+    {
+      "headline": "The Ultimate Stock to Buy for 2026",
+      "source": "Motley Fool",
+      "published_at": "2025-12-20T14:35:00.000Z",
+      "url": "https://finance.yahoo.com/m/b6114bc6-b23e-3a66-be9e-095a1bb51d65/the-ultimate-stock-to-buy-for.html",
+      "tickers": [
+        "NVDA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/MIumVek2FwvL1eTw8CUbZg--~B/aD05MzM7dz0xNDAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/motleyfool.com/5cc3ff6ef88cd7d3471a3dfc6f16f2d9",
+      "market_impact": 1
+    },
+    {
+      "headline": "If You Invested $5,000 in CoreWeave at Its March IPO, Here’s How Much You’d Have Today",
+      "source": "24/7 Wall St.",
+      "published_at": "2025-12-20T14:11:11.000Z",
+      "url": "https://finance.yahoo.com/m/3bda4784-db21-3255-90ba-9834817d7905/if-you-invested-%245%2C000-in.html",
+      "tickers": [
+        "MSFT"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/VHeGBROIbBV7UpC4b9yL7g--~B/aD04NDc7dz0xNTAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/24_7_wall_st__718/e475aa66301a01f05390a71a4146e852",
+      "market_impact": 1
+    },
+    {
+      "headline": "Did Nvidia Just Lose Its Spot as Wall Street’s AI Chip Darling? JPMorgan Says This ‘Overall Top Pick’ Is Better.",
+      "source": "Barchart",
+      "published_at": "2025-12-20T14:00:02.000Z",
+      "url": "https://finance.yahoo.com/m/dbf36f71-185e-34f4-8d6d-16427b651b9b/did-nvidia-just-lose-its-spot.html",
+      "tickers": [
+        "NVDA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/Xc9fmnGItTPiM1FHygTocA--~B/aD04NzA7dz0xMjgwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/barchart_com_477/c895bde2c9f51ad5a3f1c3f479a4b84b",
+      "market_impact": 1
+    },
+    {
+      "headline": "Peter Thiel Reported To Me, Says Elon Musk, Calls PayPal Exit 'Palace Coup' Fueled By Board: 'There Was Nothing Anyone Could…'",
+      "source": "Benzinga",
+      "published_at": "2025-12-20T13:31:06.000Z",
+      "url": "https://finance.yahoo.com/news/peter-thiel-reported-says-elon-133106070.html",
+      "tickers": [
+        "TSLA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/vbV7WZgXlnh75Gl9MKELwQ--~B/aD01NzY7dz0xMDI0O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/Benzinga/9795a34263227036bb013ce10b3353bb",
+      "market_impact": 1
+    },
+    {
+      "headline": "Will Penguin Solutions (PENG) DDR5 AI Memory Push Clarify Its Long‑Term Edge Compute Strategy?",
+      "source": "Simply Wall St.",
+      "published_at": "2025-12-20T13:09:16.000Z",
+      "url": "https://finance.yahoo.com/news/penguin-solutions-peng-ddr5-ai-130916667.html",
+      "tickers": [
+        "NVDA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/AkhBH_k5gBqIX8a81ksk_Q--~B/aD00MzI7dz0xMTk0O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/simply_wall_st__316/1d618ff9ab875bb9b8cc70f749d1f2d0",
+      "market_impact": 1
+    },
+    {
+      "headline": "Next Data Center Roadblock For Google, Microsoft, Oracle, Meta Is On Main Street",
+      "source": "Investor's Business Daily",
+      "published_at": "2025-12-20T12:43:00.000Z",
+      "url": "https://finance.yahoo.com/m/21efdd73-59b7-33fc-8e84-fd1b3ad8eb99/next-data-center-roadblock.html",
+      "tickers": [
+        "MSFT"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/M529sf_I9CPsDnhDKbGTNQ--~B/aD01NjM7dz0xMDAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/ibd.com/72ec9f6160960871d85d277d1857a137",
+      "market_impact": 1
+    },
+    {
+      "headline": "3 Reasons to Buy Alphabet Stock in 2026 (And 1 to Sell)",
+      "source": "Motley Fool",
+      "published_at": "2025-12-20T12:20:00.000Z",
+      "url": "https://finance.yahoo.com/m/75009171-693c-3ac9-97d6-8a98dfb8154f/3-reasons-to-buy-alphabet.html",
+      "tickers": [
+        "GOOGL"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/pXr9dw5_5npONsYaUNcLMg--~B/aD0xMDIxO3c9MTQwMDthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/motleyfool.com/0a381813bdcbed28e7630fed613cabde",
+      "market_impact": 1
+    },
+    {
+      "headline": "IREN (NasdaqGS:IREN) Valuation After Microsoft AI Deal, Capital Raises and Mounting Dilution Concerns",
+      "source": "Simply Wall St.",
+      "published_at": "2025-12-20T12:08:59.000Z",
+      "url": "https://finance.yahoo.com/news/iren-nasdaqgs-iren-valuation-microsoft-120859869.html",
+      "tickers": [
+        "MSFT"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/gnGTQ_q9KCdl7Xvx_ppB0g--~B/aD00MzI7dz0xMTk0O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/simply_wall_st__316/0fe4d5d105492213ce106a92b49639d4",
+      "market_impact": 1
+    },
+    {
+      "headline": "Alphabet Inc. (GOOGL) and Meta Working Together To Challenge Nvidia’s Market Dominance: Report",
+      "source": "Insider Monkey",
+      "published_at": "2025-12-20T11:56:25.000Z",
+      "url": "https://finance.yahoo.com/news/alphabet-inc-googl-meta-working-115625127.html",
+      "tickers": [
+        "GOOGL"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/PBR5Zaj1mx6Y5DBeaeMo_A--~B/aD0zMjQwO3c9NDg2MDthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/insidermonkey.com/b37705cc559a18e5d7c905152c29378c",
+      "market_impact": 1
+    },
+    {
+      "headline": "Analysts Rate Meta Platforms, Inc. (META) a Strong Buy, Forecast 28% Upside",
+      "source": "Insider Monkey",
+      "published_at": "2025-12-20T11:56:24.000Z",
+      "url": "https://finance.yahoo.com/news/analysts-rate-meta-platforms-inc-115624625.html",
+      "tickers": [
+        "META"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/HyGwtSrPVAu6tYoEuE4y5A--~B/aD0yOTE2O3c9NTE4NDthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/insidermonkey.com/2789a9f903e10b49fcb49a5f127bafb2",
+      "market_impact": 1
+    },
+    {
+      "headline": "Analysts See 33% Upside To Microsoft Corporation (MSFT)",
+      "source": "Insider Monkey",
+      "published_at": "2025-12-20T11:56:22.000Z",
+      "url": "https://finance.yahoo.com/news/analysts-see-33-upside-microsoft-115622194.html",
+      "tickers": [
+        "MSFT"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/lGw0foqqmsU_stW6Xl_Zjg--~B/aD04NTM7dz0xMjgwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/insidermonkey.com/e594c84b43643f9264f217379beb7064",
+      "market_impact": 1
+    },
+    {
+      "headline": "Amazon’s Retail Engine May Matter More Than AWS Right Now",
+      "source": "24/7 Wall St.",
+      "published_at": "2025-12-20T11:23:54.000Z",
+      "url": "https://finance.yahoo.com/m/434e4d2f-f159-320a-95de-899cc6da22f5/amazon%E2%80%99s-retail-engine-may.html",
+      "tickers": [
+        "AMZN"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/GlEw04s0KBAZ7WMNxts0gQ--~B/aD0xMDgwO3c9MTkyMDthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/24_7_wall_st__718/3ade87a6df2364318c62b5595b0af017",
+      "market_impact": 1
+    },
+    {
+      "headline": "What’s next for EVs after a year of unraveling",
+      "source": "Yahoo Finance",
+      "published_at": "2025-12-20T11:00:45.000Z",
+      "url": "https://finance.yahoo.com/news/whats-next-for-evs-after-a-year-of-unraveling-110045894.html",
+      "tickers": [
+        "GOOGL"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/UxJm1q09HbjiyLKI2uqyYw--~B/aD01MzQ3O3c9ODAzNDthcHBpZD15dGFjaHlvbg--/https://s.yimg.com/os/creatr-uploaded-images/2025-12/57fd4a70-dcee-11f0-9f57-29827ad768a5",
+      "market_impact": 1
+    },
+    {
+      "headline": "Tesla’s deliveries set to undershoot in Q4, Deutsche Bank says",
+      "source": "Investing.com",
+      "published_at": "2025-12-20T10:37:49.000Z",
+      "url": "https://finance.yahoo.com/news/tesla-deliveries-set-undershoot-q4-103749469.html",
+      "tickers": [
+        "TSLA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": null,
+      "market_impact": 1
+    },
+    {
+      "headline": "Roku (ROKU) Price Target Raised as CTV Growth Accelerates",
+      "source": "Insider Monkey",
+      "published_at": "2025-12-20T08:59:58.000Z",
+      "url": "https://finance.yahoo.com/news/roku-roku-price-target-raised-085958571.html",
+      "tickers": [
+        "AMZN"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/.uiUODHKSWWJvvw12.JZyQ--~B/aD0xMjgwO3c9MTkyMDthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/insidermonkey.com/263fd91e560c552db5adb2d71bd6f614",
+      "market_impact": 1
+    },
+    {
+      "headline": "Mizuho Maintains Outperform on Tesla (TSLA) Amid BEV Subsidy Concerns",
+      "source": "Insider Monkey",
+      "published_at": "2025-12-20T08:59:42.000Z",
+      "url": "https://finance.yahoo.com/news/mizuho-maintains-outperform-tesla-tsla-085942803.html",
+      "tickers": [
+        "TSLA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/RiIXeuKcRq6E.3..u340Lg--~B/aD0xMDAwO3c9NTk2O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/insidermonkey.com/88ff36b867d43de240dd7e19110814bc",
+      "market_impact": 1
+    },
+    {
+      "headline": "Is Microsoft Still Attractive After AI Investment Push and Strong Multi Year Share Gains?",
+      "source": "Simply Wall St.",
+      "published_at": "2025-12-20T05:17:06.000Z",
+      "url": "https://finance.yahoo.com/news/microsoft-still-attractive-ai-investment-051706443.html",
+      "tickers": [
+        "MSFT"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/vI2scrIoG3Y.UMQ70PAfYg--~B/aD00MzI7dz0xMTk0O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/simply_wall_st__316/df4b73b911e0bdb53cb26c5cad04a925",
+      "market_impact": 1
+    },
+    {
+      "headline": "Musk wins US court appeal of $56 bn Tesla pay package",
+      "source": "AFP",
+      "published_at": "2025-12-20T03:50:11.000Z",
+      "url": "https://finance.yahoo.com/news/musk-wins-us-court-appeal-234312294.html",
+      "tickers": [
+        "TSLA"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/Qg9lo8UAVSxTVVrc6IdsLw--~B/aD01MTE7dz03Njg7YXBwaWQ9eXRhY2h5b24-/https://media.zenfs.com/en/afp.com/1e7f98f9ba6d3b8d91913f73913cf5d9",
+      "market_impact": 1
+    },
+    {
+      "headline": "This Is What the World’s Smartest Minds Really Think About AI",
+      "source": "The Wall Street Journal",
+      "published_at": "2025-12-20T02:00:00.000Z",
+      "url": "https://finance.yahoo.com/m/025784ec-2c95-3674-adce-6a8fe4053809/this-is-what-the-world%E2%80%99s.html",
+      "tickers": [
+        "GOOGL"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/.9N08JJaxFCl4Tz6uMTlpg--~B/aD02NDA7dz0xMjgwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/wsj.com/73992b6b7079bb2b519fc937e3d338b1",
+      "market_impact": 1
+    },
+    {
+      "headline": "3 of the Best Artificial Intelligence (AI) Stocks to Buy for 2026",
+      "source": "Motley Fool",
+      "published_at": "2025-12-20T01:58:00.000Z",
+      "url": "https://finance.yahoo.com/m/d192ed75-1615-330b-a6c3-400023741ce5/3-of-the-best-artificial.html",
+      "tickers": [
+        "GOOGL"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/fqMZD04HCsyZU3Y4ZipOjA--~B/aD03ODc7dz0xNDAwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/motleyfool.com/a9d15abd5222b14236755d41cac34dd2",
+      "market_impact": 1
+    },
+    {
+      "headline": "5 predictions for tech and AI in 2026 from mega-bull Dan Ives",
+      "source": "Business Insider",
+      "published_at": "2025-12-20T01:11:28.000Z",
+      "url": "https://finance.yahoo.com/m/8c220dd6-74d5-3970-9b87-7fcf28ccabfe/5-predictions-for-tech-and-ai.html",
+      "tickers": [
+        "AAPL"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/9BRiCvqqK8mrGs9x1b5Saw--~B/aD0zMTY4O3c9NDIyNDthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/business_insider_articles_888/4d6b6ec0551a2649edfee021321f2067",
+      "market_impact": 1
+    },
+    {
+      "headline": "Meta's Dina Powell McCormick quits board, may stay on as adviser",
+      "source": "Reuters",
+      "published_at": "2025-12-19T23:15:47.000Z",
+      "url": "https://finance.yahoo.com/news/metas-dina-powell-mccormick-quits-231547285.html",
+      "tickers": [
+        "META"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/xCLsl5xFN32WH0KNObm2YA--~B/aD00NTA7dz04MDA7YXBwaWQ9eXRhY2h5b24-/https://media.zenfs.com/en/reuters-finance.com/926eaceefb1689cd6672f089720cdc0b",
+      "market_impact": 1
+    },
+    {
+      "headline": "Will Alibaba’s AI Chip Push and Four‑Hour Delivery Expansion Change Alibaba Group Holding's (BABA) Narrative",
+      "source": "Simply Wall St.",
+      "published_at": "2025-12-19T23:15:38.000Z",
+      "url": "https://finance.yahoo.com/news/alibaba-ai-chip-push-four-231538954.html",
+      "tickers": [
+        "META"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/Asb.EQEV7awFB_Mkuf_o.A--~B/aD00MzI7dz0xMTk0O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/simply_wall_st__316/7ea8a72848a91550608dfe380952013a",
+      "market_impact": 1
+    },
+    {
+      "headline": "Trump's $100,000 H1B Visa Fee Sparks Shareholder Revolt As Amazon, Google Pressed On Long-Term Impact Of ICE Activity",
+      "source": "Benzinga",
+      "published_at": "2025-12-19T22:31:32.000Z",
+      "url": "https://finance.yahoo.com/news/trumps-100-000-h1b-visa-223132749.html",
+      "tickers": [
+        "META"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/E.XoTqXa4H8vz0EH1hQV2g--~B/aD02ODM7dz0xMDI0O2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/Benzinga/8d9a8e3e0cf7385ce786b123fce5452e",
+      "market_impact": 1
+    },
+    {
+      "headline": "‘I don’t know how much my wife earns’: I’m 63 with $6.4 million in stocks, mostly Apple. Will I get punished on taxes?",
+      "source": "MarketWatch",
+      "published_at": "2025-12-19T22:30:00.000Z",
+      "url": "https://finance.yahoo.com/m/83faeafe-1349-355b-ac46-f730bbf4bc5f/%E2%80%98i-don%E2%80%99t-know-how-much-my.html",
+      "tickers": [
+        "AAPL"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/q1LYVP7qoa7qXuT6WWqmww--~B/aD02NDA7dz0xMjgwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/marketwatch_hosted_869/528d8f3cb1677881b5ffa1ace6e3974e",
+      "market_impact": 1
+    },
+    {
+      "headline": "Nvidia, Tesla dominate Dec. trading as 2025 options demand surges",
+      "source": "Yahoo Finance Video",
+      "published_at": "2025-12-19T21:48:29.000Z",
+      "url": "https://finance.yahoo.com/video/nvidia-tesla-dominate-dec-trading-214829316.html",
+      "tickers": [
+        "AAPL"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/lQjeLbajcimwLPWH6yrTKw--~B/aD0yODI2O3c9NTAyMDthcHBpZD15dGFjaHlvbg--/https://s.yimg.com/os/creatr-uploaded-images/2025-12/75ff7d70-dd22-11f0-bf3b-0fd7f855de24",
+      "market_impact": 1
+    },
+    {
+      "headline": "Get Ready for New Chip Shortages. Micron’s Success All but Guarantees It.",
+      "source": "Barrons.com",
+      "published_at": "2025-12-19T21:38:00.000Z",
+      "url": "https://finance.yahoo.com/m/1543cda8-d7ab-3f93-875a-1af97e564e19/get-ready-for-new-chip.html",
+      "tickers": [
+        "AAPL"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/oqjdXYVlspaoEK1H846lrg--~B/aD02NDA7dz0xMjgwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/Barrons.com/d734190101cac4d53dde2da84402da79",
+      "market_impact": 1
+    },
+    {
+      "headline": "Sector Update: Tech Stocks Gain Late Afternoon",
+      "source": "MT Newswires",
+      "published_at": "2025-12-19T21:00:29.000Z",
+      "url": "https://finance.yahoo.com/news/sector-tech-stocks-gain-afternoon-210029981.html",
+      "tickers": [
+        "META"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": null,
+      "market_impact": 1
+    },
+    {
+      "headline": "Mag 7 Stocks Keep Bouncing Back",
+      "source": "Barrons.com",
+      "published_at": "2025-12-19T20:21:04.000Z",
+      "url": "https://finance.yahoo.com/m/1ea65ad6-71ea-3962-a1dc-765342474b9b/mag-7-stocks-keep-bouncing.html",
+      "tickers": [
+        "AAPL"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/_kc6REYMS1JrAuV5bYtjfA--~B/aD02NTt3PTMyMDthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/Barrons.com/12ea0f43d8f8307249a68d1cb2e0587e",
+      "market_impact": 1
+    },
+    {
+      "headline": "Jim Cramer Explains How Market Rotation Boosted Companies Like Johnson & Johnson",
+      "source": "Insider Monkey",
+      "published_at": "2025-12-19T20:14:09.000Z",
+      "url": "https://finance.yahoo.com/news/jim-cramer-explains-market-rotation-201409602.html",
+      "tickers": [
+        "META"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/5U9y4pqzouMIK9NKYNArvw--~B/aD0yMDAxO3c9MzAwMDthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/insidermonkey.com/e7ce02738b547dc513a8196cdef40274",
+      "market_impact": 1
+    },
+    {
+      "headline": "Jim Cramer Says “We Need More Winners, But It’s Just Alphabet”",
+      "source": "Insider Monkey",
+      "published_at": "2025-12-19T19:14:47.000Z",
+      "url": "https://finance.yahoo.com/news/jim-cramer-says-more-winners-191447373.html",
+      "tickers": [
+        "AAPL"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/5i30it7RT8AZBHZBJSSzig--~B/aD0xNDQwO3c9MTkyMDthcHBpZD15dGFjaHlvbg--/https://media.zenfs.com/en/insidermonkey.com/af2bb6bdbc4f56cfaf197a2118a94cf1",
+      "market_impact": 1
+    },
+    {
+      "headline": "Visa, Mastercard make a global push for mobile wallets",
+      "source": "American Banker",
+      "published_at": "2025-12-19T18:40:22.000Z",
+      "url": "https://finance.yahoo.com/m/a3519738-7c05-35f6-9633-f60762211131/visa%2C-mastercard-make-a.html",
+      "tickers": [
+        "AAPL"
+      ],
+      "category": "company",
+      "sentiment": 0,
+      "thumbnail": "https://s.yimg.com/uu/api/res/1.2/M60naO6.5feQ0ToOj_VW3g--~B/aD01NzQ7dz0xMDIwO2FwcGlkPXl0YWNoeW9u/https://media.zenfs.com/en/american_banker_655/712e36914f4d23e42fb4da9abf71beef",
+      "market_impact": 1
+    }
+  ]
+}

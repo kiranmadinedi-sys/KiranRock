@@ -275,10 +275,35 @@ const getHoldings = async (userId) => {
     }
 };
 
+/**
+ * Clear all holdings and trade history
+ */
+const clearAllHoldings = async (userId) => {
+    try {
+        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
+        const userIndex = users.findIndex(u => u.id === userId);
+        
+        if (userIndex === -1) {
+            throw new Error('User not found');
+        }
+        
+        // Clear holdings and trade history
+        users[userIndex].holdings = [];
+        users[userIndex].tradeHistory = [];
+        
+        await fs.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
+        return { success: true, message: 'Holdings cleared successfully' };
+    } catch (error) {
+        console.error('Error clearing holdings:', error);
+        throw error;
+    }
+};
+
 module.exports = {
     executeBuyOrder,
     executeSellOrder,
     getTradeHistory,
     getHoldings,
-    getCurrentPrice
+    getCurrentPrice,
+    clearAllHoldings
 };

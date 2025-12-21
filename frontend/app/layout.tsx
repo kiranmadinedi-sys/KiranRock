@@ -7,8 +7,27 @@ import { ThemeProvider } from './contexts/ThemeContext';
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'Stock Analysis App',
-  description: 'Candlestick Stock Analysis Web Application',
+  title: 'AI Trading Pro - Professional Trading Platform',
+  description: 'Professional AI-powered trading platform with real-time market analysis, paper trading, and advanced analytics',
+  viewport: {
+    width: 'device-width',
+    initialScale: 1,
+    maximumScale: 5,
+    userScalable: true,
+    viewportFit: 'cover',
+  },
+  themeColor: [
+    { media: '(prefers-color-scheme: light)', color: '#ffffff' },
+    { media: '(prefers-color-scheme: dark)', color: '#0f172a' },
+  ],
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: 'black-translucent',
+    title: 'AI Trading Pro',
+  },
+  formatDetection: {
+    telephone: false,
+  },
 };
 
 export default function RootLayout({

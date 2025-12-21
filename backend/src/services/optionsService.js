@@ -237,8 +237,20 @@ async function getOptionsWithGreeks(symbol, marketCap = null) {
         }
         
         const optionsChain = await getOptionsChain(symbol);
+        
+        // Check if options data is available
+        if (!optionsChain || !optionsChain.expirationDates || optionsChain.expirationDates.length === 0) {
+            console.warn(`[Options] No options data available for ${symbol}`);
+            return {
+                symbol,
+                stockPrice: null,
+                error: 'No options data available for this symbol',
+                options: []
+            };
+        }
+        
         const quote = await yahooFinance.quote(symbol);
-        const stockPrice = quote.regularMarketPrice;
+        const stockPrice = quote.regularMarketPrice || quote.regularMarketPrice;
         
         // Default volatility if not available
         const historicVolatility = quote.fiftyTwoWeekRange 
@@ -316,7 +328,13 @@ async function getOptionsWithGreeks(symbol, marketCap = null) {
         };
     } catch (error) {
         console.error(`[Options] Error getting options with Greeks for ${symbol}:`, error.message);
-        throw error;
+        // Return graceful error response instead of throwing
+        return {
+            symbol,
+            stockPrice: null,
+            error: `Failed to fetch options data: ${error.message}`,
+            options: []
+        };
     }
 }
 
@@ -362,7 +380,8 @@ async function findOptionsOpportunities(symbol, criteria = {}) {
         return filtered;
     } catch (error) {
         console.error(`[Options] Error finding opportunities for ${symbol}:`, error.message);
-        throw error;
+        // Return empty array instead of throwing
+        return [];
     }
 }
 

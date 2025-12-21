@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { API_BASE_URL } from '../config/apiConfig';
+import { getApiBaseUrl } from '../config';
 
 interface QuickStatsProps {
     symbol: string;
@@ -32,7 +32,7 @@ export default function QuickStats({ symbol }: QuickStatsProps) {
         const fetchStats = async () => {
             try {
                 const token = localStorage.getItem('token');
-                const response = await fetch(`${API_BASE_URL}/api/stocks/price/${symbol}`, {
+                const response = fetch(`${getApiBaseUrl()}/api/stocks/price/${symbol}`, {
                     headers: { Authorization: `Bearer ${token}` },
                 });
 

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { API_BASE_URL } from '../config/apiConfig';
+import { getApiBaseUrl } from '../config';
 
 interface AIInsightProps {
   signal?: string;
@@ -36,9 +36,10 @@ const AIInsightEnhanced: React.FC<AIInsightProps> = ({ signal, symbol, mode = 'e
       
       setLoading(true);
       const token = localStorage.getItem('token');
+      const apiUrl = getApiBaseUrl();
       const endpoint = selectedMode === 'ensemble' 
-          ? `${API_BASE_URL}/api/ai/ensemble/${symbol}`
-          : `${API_BASE_URL}/api/ai/prediction/${symbol}`;
+          ? `${apiUrl}/api/ai/ensemble/${symbol}`
+          : `${apiUrl}/api/ai/prediction/${symbol}`;
       
       try {
         const response = await fetch(endpoint, {

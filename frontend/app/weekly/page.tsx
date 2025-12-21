@@ -1,11 +1,9 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { API_BASE_URL } from '../config/apiConfig';
+import { getApiBaseUrl } from '../config';
 import { useRouter } from 'next/navigation';
-import Link from 'next/link';
-import Logo from '../components/Logo';
-import ThemeToggle from '../components/ThemeToggle';
+import AppHeader from '../components/AppHeader';
 
 interface StockPrediction {
   symbol: string;
@@ -110,13 +108,15 @@ export default function WeeklyPredictionsPage() {
   const fetchWeeklyPredictions = async () => {
     setLoading(true);
     try {
-  const response = await fetch(`${API_BASE_URL}/api/weekly/predictions?limit=50`, {
+      const response = await fetch(`${getApiBaseUrl()}/api/weekly/predictions?limit=50`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (response.ok) {
         const data = await response.json();
         setPredictions(data.topPicks || []);
         setMarketContext(data.marketContext);
+      } else {
+        console.error('Failed to fetch predictions:', response.status);
       }
     } catch (error) {
       console.error('Error fetching weekly predictions:', error);
@@ -196,67 +196,24 @@ export default function WeeklyPredictionsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-[var(--color-bg-primary)]">
-      {/* Header */}
-      <header className="bg-[var(--color-card)] border-b border-[var(--color-border)] shadow-sm sticky top-0 z-50">
-        <div className="max-w-[1800px] mx-auto px-4 py-3">
-          <div className="flex items-center justify-between">
-            <Link href="/dashboard">
-              <Logo />
-            </Link>
-            <div className="flex items-center gap-6">
-              <nav className="flex gap-4 text-sm">
-                <Link href="/dashboard" className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors">
-                  Dashboard
-                </Link>
-                <Link href="/weekly" className="text-[var(--color-primary)] font-semibold">
-                  Weekly Picks
-                </Link>
-                <Link href="/portfolio" className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors">
-                  Portfolio
-                </Link>
-                <Link href="/alerts" className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors">
-                  Alerts
-                </Link>
-                <Link href="/ai-trading" className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors">
-                  🤖 AI Trading
-                </Link>
-                <Link href="/swing-trading" className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors">
-                  📈 Swing
-                </Link>
-                <Link href="/backtest" className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors">
-                  📊 Backtest
-                </Link>
-              </nav>
-              <div className="flex items-center gap-3">
-                <ThemeToggle />
-                <button
-                  onClick={handleLogout}
-                  className="px-3 py-1.5 text-sm bg-red-500 hover:bg-red-600 text-white rounded-md transition-colors"
-                >
-                  Logout
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </header>
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-gray-100 dark:from-gray-900 dark:via-slate-900 dark:to-gray-900">
+      <AppHeader showSearch={false} />
 
-      <div className="max-w-[1800px] mx-auto px-4 py-6">
+      <div className="max-w-[1800px] mx-auto px-3 sm:px-4 py-3 sm:py-4">
         {/* Page Title */}
-        <div className="mb-6 flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+        <div className="mb-3 sm:mb-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
           <div>
-            <h1 className="text-3xl font-bold text-[var(--color-text-primary)] mb-2 flex items-center gap-2">
+            <h1 className="text-xl sm:text-2xl lg:text-3xl font-bold text-[var(--color-text-primary)] mb-2 flex items-center gap-2">
               <span>🔮</span>
               Top Weekly Stock Predictions
             </h1>
-            <p className="text-[var(--color-text-secondary)]">
-              AI-powered analysis of {predictions.length}+ major stocks | Updated: {new Date().toLocaleString()}
+            <p className="text-xs sm:text-sm text-[var(--color-text-secondary)]">
+              AI-powered analysis of {predictions.length}+ major stocks | Updated: {new Date().toLocaleDateString()}
             </p>
           </div>
           <button
             onClick={downloadCSV}
-            className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-md font-semibold text-sm shadow transition-colors"
+            className="px-3 sm:px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-md font-semibold text-xs sm:text-sm shadow transition-colors whitespace-nowrap w-full lg:w-auto"
             disabled={!filteredPredictions.length}
             title={filteredPredictions.length ? 'Download CSV' : 'No data to download'}
           >
@@ -266,10 +223,10 @@ export default function WeeklyPredictionsPage() {
 
         {/* Market Context */}
         {marketContext && (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-            <div className="bg-[var(--color-card)] rounded-lg p-4 border border-[var(--color-border)]">
-              <h3 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-2">Market Sentiment</h3>
-              <div className={`text-2xl font-bold ${
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 mb-4 sm:mb-6">
+            <div className="bg-[var(--color-card)] rounded-lg p-3 sm:p-4 border border-[var(--color-border)]">
+              <h3 className="text-xs sm:text-sm font-semibold text-[var(--color-text-secondary)] mb-2">Market Sentiment</h3>
+              <div className={`text-xl sm:text-2xl font-bold ${
                 marketContext.marketSentiment === 'Bullish' ? 'text-green-500' :
                 marketContext.marketSentiment === 'Bearish' ? 'text-red-500' : 'text-yellow-500'
               }`}>
@@ -280,9 +237,9 @@ export default function WeeklyPredictionsPage() {
               </p>
             </div>
 
-            <div className="bg-[var(--color-card)] rounded-lg p-4 border border-[var(--color-border)]">
-              <h3 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-2">Distribution</h3>
-              <div className="flex gap-4 text-sm">
+            <div className="bg-[var(--color-card)] rounded-lg p-3 sm:p-4 border border-[var(--color-border)]">
+              <h3 className="text-xs sm:text-sm font-semibold text-[var(--color-text-secondary)] mb-2">Distribution</h3>
+              <div className="flex flex-wrap gap-3 sm:gap-4 text-xs sm:text-sm">
                 <div>
                   <span className="text-green-500 font-bold">{marketContext.distribution.bullish}</span>
                   <span className="text-[var(--color-text-secondary)] ml-1">Bullish</span>

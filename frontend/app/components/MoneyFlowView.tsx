@@ -1,6 +1,6 @@
 
 'use client';
-import { API_BASE_URL } from '../config/apiConfig';
+import { getApiBaseUrl } from '../config';
 import React, { useState, useEffect } from 'react';
 
 interface MoneyFlowProps {
@@ -16,7 +16,7 @@ const MoneyFlowView: React.FC<MoneyFlowProps> = ({ symbol }) => {
             setLoading(true);
             const token = localStorage.getItem('token');
             try {
-                const response = await fetch(`${API_BASE_URL}/api/moneyflow/${symbol}`, {
+                const response = await fetch(`${getApiBaseUrl()}/api/moneyflow/${symbol}`, {
                     headers: { Authorization: `Bearer ${token}` }
                 });
                 if (response.ok) {

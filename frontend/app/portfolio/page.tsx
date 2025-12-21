@@ -1,10 +1,9 @@
-﻿"use client";
+"use client";
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { API_BASE_URL } from '../config/apiConfig';
-import Logo from '../components/Logo';
-import ThemeToggle from '../components/ThemeToggle';
+import { getApiBaseUrl } from '../config';
+import AppHeader from '../components/AppHeader';
 import { Line } from 'react-chartjs-2';
 import {
   Chart as ChartJS,
@@ -91,7 +90,7 @@ function PortfolioPage() {
     const fetchAISettings = async () => {
         setSettingsLoading(true);
         try {
-            const response = await fetch(`${API_BASE_URL}/api/ai-trading/settings`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/ai-trading/settings`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
             if (response.ok) {
@@ -113,7 +112,7 @@ function PortfolioPage() {
     const saveAISettings = async () => {
         setSettingsLoading(true);
         try {
-            const response = await fetch(`${API_BASE_URL}/api/ai-trading/settings`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/ai-trading/settings`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -161,7 +160,7 @@ function PortfolioPage() {
             return;
         }
         try {
-            const response = await fetch(`${API_BASE_URL}/api/trading/reset-balance`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/trading/reset-balance`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -182,9 +181,41 @@ function PortfolioPage() {
         }
     };
 
+    const handleClearAll = async () => {
+        const confirmed = window.confirm(
+            '⚠️ WARNING: This will permanently reset your entire portfolio to zero!\n\n' +
+            '• Cash Balance → $0.00\n' +
+            '• All Holdings → Cleared\n' +
+            '• Trade History → Deleted\n' +
+            '• Deposits/Withdrawals → Cleared\n\n' +
+            'This action cannot be undone. Are you sure?'
+        );
+
+        if (!confirmed) return;
+
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/trading/clear-all`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                }
+            });
+
+            if (response.ok) {
+                alert('Portfolio cleared successfully! Starting fresh from $0.00');
+                await fetchPortfolio();
+            } else {
+                const data = await response.json();
+                alert(data.error || 'Failed to clear portfolio');
+            }
+        } catch (error) {
+            alert('Error clearing portfolio');
+        }
+    };
+
     const fetchPortfolio = async () => {
         try {
-            const response = await fetch(`${API_BASE_URL}/api/trading/portfolio`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/trading/portfolio`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
             if (response.ok) {
@@ -199,7 +230,7 @@ function PortfolioPage() {
 
     const fetchTradeHistory = async () => {
         try {
-            const response = await fetch(`${API_BASE_URL}/api/trading/history?limit=50`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/trading/history?limit=50`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
             if (response.ok) {
@@ -213,7 +244,7 @@ function PortfolioPage() {
 
     const fetchPerformance = async () => {
         try {
-            const response = await fetch(`${API_BASE_URL}/api/trading/performance`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/trading/performance`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
             if (response.ok) {
@@ -229,7 +260,7 @@ function PortfolioPage() {
         if (!symbol.trim()) return;
         setLoadingPrice(true);
         try {
-            const response = await fetch(`${API_BASE_URL}/api/trading/quote/${symbol}`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/trading/quote/${symbol}`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
             if (response.ok) {
@@ -264,7 +295,7 @@ function PortfolioPage() {
 
         try {
             const endpoint = tradeType === 'buy' ? 'buy' : 'sell';
-            const response = await fetch(`${API_BASE_URL}/api/trading/${endpoint}`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/trading/${endpoint}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -303,7 +334,7 @@ function PortfolioPage() {
         }
 
         try {
-            const response = await fetch(`${API_BASE_URL}/api/trading/deposit`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/trading/deposit`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -339,7 +370,7 @@ function PortfolioPage() {
         }
 
         try {
-            const response = await fetch(`${API_BASE_URL}/api/trading/withdraw`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/trading/withdraw`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -403,63 +434,26 @@ function PortfolioPage() {
     };
     // (Removed duplicate state and chartOptions blocks)
     return (
-        <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
-            {/* Navigation/Menu Bar - now at the top */}
-            <header className="bg-white dark:bg-gray-800 shadow-sm sticky top-0 z-20">
-                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-                    <div className="flex justify-between items-center">
-                        <Logo />
-                        <div className="flex items-center gap-4">
-                            <Link href="/dashboard" className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">
-                                Dashboard
-                            </Link>
-                            <Link href="/alerts" className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">
-                                Alerts
-                            </Link>
-                            <Link href="/weekly" className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">
-                                📅 Next Week
-                            </Link>
-                            <Link href="/ai-trading" className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">
-                                🤖 AI Trading
-                            </Link>
-                            <Link href="/swing-trading" className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">
-                                📈 Swing
-                            </Link>
-                            <Link href="/backtest" className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">
-                                📊 Backtest
-                            </Link>
-                            <Link href="/profile" className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors">
-                                Profile
-                            </Link>
-                            <ThemeToggle />
-                            <button
-                                onClick={handleLogout}
-                                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
-                            >
-                                Logout
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </header>
+        <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-gray-100 dark:from-gray-900 dark:via-slate-900 dark:to-gray-900 pb-20 lg:pb-8">
+            <AppHeader showSearch={false} />
 
-            {/* Portfolio Summary & Chart */}
-            <div className="max-w-3xl mx-auto mt-8 mb-6">
-                <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4 mb-2">
+            {/* Portfolio Summary & Chart - Mobile Optimized */}
+            <div className="max-w-3xl mx-auto mt-4 sm:mt-6 lg:mt-8 mb-4 sm:mb-6 px-3 sm:px-0">
+                <div className="flex flex-col gap-3 mb-3">
                     <div>
-                        <div className="text-4xl font-bold text-gray-900 dark:text-white">
+                        <div className="text-2xl sm:text-3xl lg:text-4xl font-bold text-gray-900 dark:text-white">
                             ${totalPortfolioValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                         </div>
-                        <div className={`mt-1 text-lg font-semibold ${portfolioChange.value < 0 ? 'text-red-600' : 'text-green-600'}`}> 
-                            {portfolioChange.value < 0 ? '▼' : '▲'} ${Math.abs(portfolioChange.value).toLocaleString(undefined, { minimumFractionDigits: 2 })} ({portfolioChange.percent.toFixed(2)}%) Today
+                        <div className={`mt-1 text-base sm:text-lg font-semibold ${portfolioChange.value < 0 ? 'text-red-600' : 'text-green-600'}`}> 
+                            {portfolioChange.value < 0 ? '?' : '?'} ${Math.abs(portfolioChange.value).toLocaleString(undefined, { minimumFractionDigits: 2 })} ({portfolioChange.percent.toFixed(2)}%) Today
                         </div>
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex gap-1.5 sm:gap-2 overflow-x-auto scrollbar-hide pb-2">
                         {['1D','1W','1M','3M','YTD','1Y'].map((range) => (
                             <button
                                 key={range}
                                 onClick={() => setChartRange(range as any)}
-                                className={`px-3 py-1 rounded-lg text-sm font-semibold ${chartRange === range ? 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-200' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'}`}
+                                className={`px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-semibold whitespace-nowrap touch-manipulation min-h-[44px] transition-colors ${chartRange === range ? 'bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-200' : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'}`}
                             >
                                 {range}
                             </button>
@@ -542,23 +536,24 @@ function PortfolioPage() {
                 <div className="mb-8 bg-blue-50 dark:bg-blue-900/20 rounded-lg p-6">
                     <h3 className="text-lg font-semibold text-blue-900 dark:text-blue-300 mb-3">How AI Trading Works</h3>
                     <ul className="space-y-2 text-sm text-blue-800 dark:text-blue-300">
-                        <li>✅ <strong>Diversification:</strong> AI invests across 10 top stocks in multiple sectors</li>
-                        <li>✅ <strong>Risk Management:</strong> Automatic stop-loss (<span className="font-bold">6%</span> by default, user-configurable) and take-profit (<span className="font-bold">30%</span> by default, user-configurable) triggers</li>
-                        <li>✅ <strong>Smart Rebalancing:</strong> AI maintains optimal portfolio allocation automatically</li>
-                        <li>✅ <strong>Real-time Analysis:</strong> Continuous market monitoring and AI-powered signals</li>
-                        <li>✅ <strong>Cash Reserve:</strong> No default reserve; users can set their own cash reserve percentage</li>
+                        <li>? <strong>Diversification:</strong> AI invests across 10 top stocks in multiple sectors</li>
+                        <li>? <strong>Risk Management:</strong> Automatic stop-loss (<span className="font-bold">6%</span> by default, user-configurable) and take-profit (<span className="font-bold">30%</span> by default, user-configurable) triggers</li>
+                        <li>? <strong>Smart Rebalancing:</strong> AI maintains optimal portfolio allocation automatically</li>
+                        <li>? <strong>Real-time Analysis:</strong> Continuous market monitoring and AI-powered signals</li>
+                        <li>? <strong>Cash Reserve:</strong> No default reserve; users can set their own cash reserve percentage</li>
                     </ul>
                 </div>
-                <div className="mb-6">
-                    <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Paper Trading Portfolio</h1>
-                    <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">Practice trading with virtual money</p>
+                <div className="mb-4 sm:mb-6">
+                    <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white">Paper Trading Portfolio</h1>
+                    <p className="mt-1 sm:mt-2 text-xs sm:text-sm text-gray-600 dark:text-gray-400">Practice trading with virtual money</p>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-                    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-                        <div className="text-sm font-medium text-gray-500 dark:text-gray-400">Cash Balance</div>
-                        <div className="mt-2 text-2xl font-bold text-gray-900 dark:text-white">${cashBalance.toFixed(2)}</div>
-                        <div className="mt-4">
+                {/* Mobile-Optimized Portfolio Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6 sm:mb-8">
+                    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4 sm:p-6">
+                        <div className="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Cash Balance</div>
+                        <div className="mt-1 sm:mt-2 text-xl sm:text-2xl font-bold text-gray-900 dark:text-white">${cashBalance.toFixed(2)}</div>
+                        <div className="mt-3 sm:mt-4">
                             <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Reset Cash Balance</label>
                             <div className="flex gap-2">
                                 <input
@@ -567,45 +562,51 @@ function PortfolioPage() {
                                     step="0.01"
                                     value={resetAmount}
                                     onChange={e => setResetAmount(e.target.value)}
-                                    placeholder="Enter amount ($)"
-                                    className="flex-1 px-2 py-1 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
+                                    placeholder="Amount ($)"
+                                    className="flex-1 px-2 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm min-h-[44px]"
                                 />
                                 <button
                                     onClick={handleResetBalance}
-                                    className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm"
+                                    className="px-3 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 active:bg-blue-800 text-sm font-medium touch-manipulation min-h-[44px]"
                                 >
                                     Reset
                                 </button>
                             </div>
+                            <button
+                                onClick={handleClearAll}
+                                className="mt-2 w-full px-3 py-2.5 bg-red-600 text-white rounded hover:bg-red-700 active:bg-red-800 text-sm font-medium transition-colors touch-manipulation min-h-[44px]"
+                            >
+                                🗑️ Clear All Portfolio
+                            </button>
                         </div>
                     </div>
-                    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-                        <div className="text-sm font-medium text-gray-500 dark:text-gray-400">Holdings Value</div>
-                        <div className="mt-2 text-2xl font-bold text-gray-900 dark:text-white">${totalHoldingsValue.toFixed(2)}</div>
+                    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4 sm:p-6">
+                        <div className="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Holdings Value</div>
+                        <div className="mt-1 sm:mt-2 text-xl sm:text-2xl font-bold text-gray-900 dark:text-white">${totalHoldingsValue.toFixed(2)}</div>
                     </div>
-                    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-                        <div className="text-sm font-medium text-gray-500 dark:text-gray-400">Total Portfolio</div>
-                        <div className="mt-2 text-2xl font-bold text-gray-900 dark:text-white">${totalPortfolioValue.toFixed(2)}</div>
+                    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4 sm:p-6">
+                        <div className="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Total Portfolio</div>
+                        <div className="mt-1 sm:mt-2 text-xl sm:text-2xl font-bold text-gray-900 dark:text-white">${totalPortfolioValue.toFixed(2)}</div>
                     </div>
-                    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-                        <div className="text-sm font-medium text-gray-500 dark:text-gray-400">Unrealized P/L</div>
-                        <div className={`mt-2 text-2xl font-bold ${totalUnrealizedPL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4 sm:p-6">
+                        <div className="text-xs sm:text-sm font-medium text-gray-500 dark:text-gray-400">Unrealized P/L</div>
+                        <div className={`mt-1 sm:mt-2 text-xl sm:text-2xl font-bold ${totalUnrealizedPL >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                             ${totalUnrealizedPL.toFixed(2)}
                         </div>
                     </div>
                 </div>
 
                 <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
-                    <div className="border-b border-gray-200 dark:border-gray-700">
+                    <div className="border-b border-gray-200 dark:border-gray-700 overflow-x-auto scrollbar-hide">
                         <nav className="flex -mb-px">
                             {['overview', 'trade', 'history', 'performance'].map((tab) => (
                                 <button
                                     key={tab}
                                     onClick={() => setActiveTab(tab)}
-                                    className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
+                                    className={`flex-1 sm:flex-none px-4 sm:px-6 py-3 text-xs sm:text-sm font-medium border-b-2 transition-colors whitespace-nowrap touch-manipulation min-h-[44px] ${
                                         activeTab === tab
                                             ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                                            : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'
+                                            : 'border-transparent text-gray-500 active:text-gray-700 dark:text-gray-400 dark:active:text-gray-300'
                                     }`}
                                 >
                                     {tab.charAt(0).toUpperCase() + tab.slice(1)}
@@ -614,14 +615,14 @@ function PortfolioPage() {
                         </nav>
                     </div>
 
-                    <div className="p-6">
+                    <div className="p-3 sm:p-4 lg:p-6">
                         {activeTab === 'overview' && (
                             <div>
-                                <div className="flex justify-between items-center mb-4">
-                                    <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Current Holdings</h2>
+                                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-4">
+                                    <h2 className="text-lg sm:text-xl font-semibold text-gray-900 dark:text-white">Current Holdings</h2>
                                     <button
                                         onClick={() => setShowDepositModal(true)}
-                                        className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                                        className="w-full sm:w-auto px-4 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 active:bg-green-800 transition-colors font-medium touch-manipulation min-h-[44px]"
                                     >
                                         Deposit Funds
                                     </button>

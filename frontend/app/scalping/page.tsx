@@ -1,8 +1,9 @@
 
 'use client';
-import { API_BASE_URL } from '../config/apiConfig';
+import { getApiBaseUrl } from '../config';
 
 import { useState, useEffect } from 'react';
+import AppHeader from '../components/AppHeader';
 import StockSearch from '../components/StockSearch';
 
 interface ScalpingOpportunity {
@@ -58,7 +59,7 @@ export default function ScalpingPage() {
   const loadWatchlist = async () => {
     try {
       const token = localStorage.getItem('token');
-  const response = await fetch(`${API_BASE_URL}/api/scalping/watchlist/recommended`, {
+  const response = fetch(`${getApiBaseUrl()}/api/scalping/watchlist/recommended`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       const data = await response.json();
@@ -78,7 +79,7 @@ export default function ScalpingPage() {
     setLoading(true);
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch(`${API_BASE_URL}/api/scalping/${selectedSymbol}`, {
+      const response = fetch(`${getApiBaseUrl()}/api/scalping/${selectedSymbol}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       const data = await response.json();
@@ -99,7 +100,7 @@ export default function ScalpingPage() {
     setScanning(true);
     try {
       const token = localStorage.getItem('token');
-  const response = await fetch(`${API_BASE_URL}/api/scalping/scan`, {
+  const response = fetch(`${getApiBaseUrl()}/api/scalping/scan`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -130,7 +131,7 @@ export default function ScalpingPage() {
     setCriteriaLoading(true);
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch(`${API_BASE_URL}/api/scalping/criteria/settings`, {
+      const response = fetch(`${getApiBaseUrl()}/api/scalping/criteria/settings`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       const data = await response.json();
@@ -149,21 +150,9 @@ export default function ScalpingPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 p-0">
-      {/* Menu Bar */}
-      <nav className="bg-white dark:bg-gray-800 shadow flex items-center justify-between px-6 py-3 mb-8">
-        <div className="flex items-center gap-6">
-          <span className="font-bold text-xl text-blue-700 dark:text-blue-300">TradeAI</span>
-          <a href="/dashboard" className="text-gray-700 dark:text-gray-200 hover:text-blue-600 font-medium">Dashboard</a>
-          <a href="/ai-trading" className="text-gray-700 dark:text-gray-200 hover:text-blue-600 font-medium">AI Trading</a>
-          <a href="/swing-trading" className="text-gray-700 dark:text-gray-200 hover:text-blue-600 font-medium">Swing Trading</a>
-          <a href="/scalping" className="text-blue-600 dark:text-blue-400 font-semibold underline">Scalping</a>
-          <a href="/backtest" className="text-gray-700 dark:text-gray-200 hover:text-blue-600 font-medium">Backtest</a>
-          <a href="/alerts" className="text-gray-700 dark:text-gray-200 hover:text-blue-600 font-medium">Alerts</a>
-          <a href="/profile" className="text-gray-700 dark:text-gray-200 hover:text-blue-600 font-medium">Profile</a>
-        </div>
-      </nav>
-      <div className="max-w-7xl mx-auto px-6">
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-gray-100 dark:from-gray-900 dark:via-slate-900 dark:to-gray-900">
+      <AppHeader showSearch={false} />
+      <div className="max-w-7xl mx-auto px-4 sm:px-6">
         {/* Scalping Criteria Section */}
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 mb-6">
           <h2 className="text-xl font-bold mb-4 text-gray-900 dark:text-white">Scalping Criteria</h2>
@@ -189,28 +178,28 @@ export default function ScalpingPage() {
           {/* Future: PATCH criteria button */}
         </div>
         {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold text-gray-900 dark:text-white mb-2">
+        <div className="mb-3 sm:mb-4">
+          <h1 className="text-2xl sm:text-3xl lg:text-4xl font-bold text-gray-900 dark:text-white mb-1">
             Options Scalping Strategy
           </h1>
-          <p className="text-gray-600 dark:text-gray-400">
+          <p className="text-sm sm:text-base text-gray-600 dark:text-gray-400">
             Ultra-short-term trading opportunities with high gamma and tight spreads
           </p>
         </div>
 
         {/* Controls */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 mb-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-3 sm:p-4 mb-3 sm:mb-4">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
             {/* Single Symbol Scan */}
             <div>
-              <h3 className="text-lg font-semibold mb-3 text-gray-900 dark:text-white">
+              <h3 className="text-base sm:text-lg font-semibold mb-3 text-gray-900 dark:text-white">
                 Single Symbol Scan
               </h3>
-              <div className="flex gap-3">
+              <div className="flex flex-col sm:flex-row gap-3">
                 <div className="flex-1">
                   <StockSearch onSelectStock={setSelectedSymbol} />
                   {selectedSymbol && (
-                    <div className="mt-2 text-sm text-gray-600 dark:text-gray-400">
+                    <div className="mt-2 text-xs sm:text-sm text-gray-600 dark:text-gray-400">
                       Selected: <span className="font-semibold text-blue-600">{selectedSymbol}</span>
                     </div>
                   )}
@@ -218,7 +207,7 @@ export default function ScalpingPage() {
                 <button
                   onClick={scanSingleSymbol}
                   disabled={loading || !selectedSymbol}
-                  className="px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="px-4 sm:px-6 py-2 text-sm sm:text-base bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
                 >
                   {loading ? 'Scanning...' : 'Scan'}
                 </button>
@@ -227,16 +216,16 @@ export default function ScalpingPage() {
 
             {/* Multi-Symbol Scan */}
             <div>
-              <h3 className="text-lg font-semibold mb-3 text-gray-900 dark:text-white">
+              <h3 className="text-base sm:text-lg font-semibold mb-3 text-gray-900 dark:text-white">
                 Market Scan
               </h3>
               <div className="space-y-3">
                 <input
                   type="text"
-                  placeholder="Enter symbols (comma-separated, leave empty for watchlist)"
+                  placeholder="Symbols (comma-separated) or leave empty for watchlist"
                   value={customSymbols}
                   onChange={(e) => setCustomSymbols(e.target.value)}
-                  className="w-full p-2 border rounded dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                  className="w-full p-2 text-sm sm:text-base border rounded dark:bg-gray-700 dark:border-gray-600 dark:text-white"
                 />
                 <div className="flex gap-3">
                   <input
@@ -245,14 +234,14 @@ export default function ScalpingPage() {
                     onChange={(e) => setScanLimit(parseInt(e.target.value) || 10)}
                     min="1"
                     max="50"
-                    className="w-24 p-2 border rounded dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                    className="w-20 sm:w-24 p-2 text-sm sm:text-base border rounded dark:bg-gray-700 dark:border-gray-600 dark:text-white"
                   />
                   <button
                     onClick={scanMultipleSymbols}
                     disabled={scanning}
-                    className="flex-1 px-6 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
+                    className="flex-1 px-4 sm:px-6 py-2 text-sm sm:text-base bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
                   >
-                    {scanning ? 'Scanning Market...' : 'Scan Market'}
+                    {scanning ? 'Scanning...' : 'Scan Market'}
                   </button>
                 </div>
               </div>
@@ -263,9 +252,9 @@ export default function ScalpingPage() {
         {/* Advanced Scalping Signals & Strategy Summary */}
         {scanSignals && (
           (scanSignals.preMarketHigh || scanSignals.vwap || scanSignals.ema9 || scanSignals.volumeSpikes) ? (
-            <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg shadow-lg p-6 mb-6">
-              <h2 className="text-xl font-bold mb-2 text-blue-900 dark:text-blue-200">Scalping Signals & Strategy</h2>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+            <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg shadow-lg p-3 sm:p-4 mb-3 sm:mb-4">
+              <h2 className="text-lg sm:text-xl font-bold mb-2 text-blue-900 dark:text-blue-200">Scalping Signals & Strategy</h2>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 sm:gap-4 mb-4">
                 <div>
                   <div className="text-xs text-gray-600">Pre-market High</div>
                   <div className="font-bold text-blue-700">{scanSignals.preMarketHigh !== undefined ? scanSignals.preMarketHigh.toFixed(2) : '-'}</div>
@@ -299,10 +288,10 @@ export default function ScalpingPage() {
                   <div className="font-bold text-red-700">{scanSignals.volumeSpikes ? scanSignals.volumeSpikes.length : 0}</div>
                 </div>
               </div>
-              <div className="mt-2 text-sm text-gray-700 dark:text-gray-200">
+              <div className="mt-2 text-xs sm:text-sm text-gray-700 dark:text-gray-200">
                 <b>Strategy:</b> Trade 1-min/5-min breakouts above resistance or breakdowns below support, confirmed by volume spikes and tight spread (&lt;$0.10 for TSLA). Use VWAP and EMA(9/21) for confirmation. Take quick profits ($1.5–$3/share), set tight stop-loss (0.3–0.5%).
               </div>
-              <div className="mt-2 text-xs text-gray-500">Example: Enter long at resistance breakout with volume, exit at next $1.5–$3 move, stop-loss just below entry.</div>
+              <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">Example: Enter long at resistance breakout with volume, exit at next $1.5–$3 move, stop-loss just below entry.</div>
             </div>
           ) : (
             <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg shadow-lg p-6 mb-6 text-center text-blue-900 dark:text-blue-200">
@@ -313,11 +302,11 @@ export default function ScalpingPage() {
         )}
         {/* Results */}
         {opportunities.length > 0 && (
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
-            <h2 className="text-2xl font-bold mb-4 text-gray-900 dark:text-white">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-3 sm:p-4">
+            <h2 className="text-xl sm:text-2xl font-bold mb-4 text-gray-900 dark:text-white">
               Top Scalping Opportunities ({opportunities.length})
             </h2>
-            <div className="space-y-4">
+            <div className="space-y-3 sm:space-y-4">
               {opportunities.map((opp, index) => (
                 <div
                   key={index}
@@ -327,57 +316,57 @@ export default function ScalpingPage() {
                       : 'border-gray-300 dark:border-gray-600'
                   }`}
                 >
-                  <div className="flex justify-between items-start mb-3">
-                    <div>
-                      <h3 className="text-xl font-bold text-gray-900 dark:text-white">
+                  <div className="flex flex-col sm:flex-row justify-between items-start gap-3 mb-3">
+                    <div className="flex-1">
+                      <h3 className="text-lg sm:text-xl font-bold text-gray-900 dark:text-white">
                         {opp.symbol}
                       </h3>
-                      <p className="text-sm text-gray-600 dark:text-gray-400">
+                      <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400 break-all">
                         {opp.option.contractSymbol}
                       </p>
-                      <p className="text-sm text-gray-600 dark:text-gray-400">
+                      <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">
                         {opp.option.optionType.toUpperCase()} ${opp.option.strike} exp {opp.option.expirationDate}
                       </p>
                     </div>
-                    <div className="text-right">
-                      <div className={`text-2xl font-bold ${
+                    <div className="text-left sm:text-right">
+                      <div className={`text-xl sm:text-2xl font-bold ${
                         opp.scalpScore >= 80 ? 'text-green-600' :
                         opp.scalpScore >= 60 ? 'text-yellow-600' : 'text-gray-600'
                       }`}>
                         {opp.scalpScore.toFixed(0)}
                       </div>
-                      <div className="text-sm text-gray-600 dark:text-gray-400">Scalp Score</div>
+                      <div className="text-xs sm:text-sm text-gray-600 dark:text-gray-400">Scalp Score</div>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-3">
-                    <div>
-                      <div className="text-sm text-gray-600 dark:text-gray-400">Entry (Ask)</div>
-                      <div className="font-semibold text-gray-900 dark:text-white">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 sm:gap-4 mb-3">
+                    <div className="bg-gray-50 dark:bg-gray-700 p-2 rounded">
+                      <div className="text-xs text-gray-600 dark:text-gray-400">Entry (Ask)</div>
+                      <div className="text-sm sm:text-base font-semibold text-gray-900 dark:text-white">
                         ${opp.analysis.entryPrice.toFixed(2)}
                       </div>
                     </div>
-                    <div>
-                      <div className="text-sm text-gray-600 dark:text-gray-400">Target (+20%)</div>
-                      <div className="font-semibold text-green-600">
+                    <div className="bg-gray-50 dark:bg-gray-700 p-2 rounded">
+                      <div className="text-xs text-gray-600 dark:text-gray-400">Target (+20%)</div>
+                      <div className="text-sm sm:text-base font-semibold text-green-600">
                         ${opp.analysis.targetPrice.toFixed(2)}
                       </div>
                     </div>
-                    <div>
-                      <div className="text-sm text-gray-600 dark:text-gray-400">Stop (-10%)</div>
-                      <div className="font-semibold text-red-600">
+                    <div className="bg-gray-50 dark:bg-gray-700 p-2 rounded">
+                      <div className="text-xs text-gray-600 dark:text-gray-400">Stop (-10%)</div>
+                      <div className="text-sm sm:text-base font-semibold text-red-600">
                         ${opp.analysis.stopLoss.toFixed(2)}
                       </div>
                     </div>
-                    <div>
-                      <div className="text-sm text-gray-600 dark:text-gray-400">Timeframe</div>
-                      <div className="font-semibold text-gray-900 dark:text-white">
+                    <div className="bg-gray-50 dark:bg-gray-700 p-2 rounded col-span-2 sm:col-span-1">
+                      <div className="text-xs text-gray-600 dark:text-gray-400">Timeframe</div>
+                      <div className="text-sm sm:text-base font-semibold text-gray-900 dark:text-white">
                         {opp.timeframeRecommendation}
                       </div>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-3 text-sm">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-3 mb-3 text-xs sm:text-sm">
                     <div>
                       <span className="text-gray-600 dark:text-gray-400">Gamma:</span>
                       <span className="ml-2 font-semibold text-gray-900 dark:text-white">

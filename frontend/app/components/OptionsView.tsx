@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { API_BASE_URL } from '../config/apiConfig';
+import { getApiBaseUrl } from '../config';
 
 interface GreeksData {
     delta: number;
@@ -56,22 +56,31 @@ export default function OptionsView({ symbol }: OptionsViewProps) {
             
             try {
                 const token = localStorage.getItem('token');
-                const response = await fetch(`${API_BASE_URL}/api/options/${symbol}`, {
-                    headers: { Authorization: `Bearer ${token}` },
+                const response = fetch(`${getApiBaseUrl()}/api/options/${symbol}`, {
+                    headers: token ? { Authorization: `Bearer ${token}` } : {},
                 });
 
                 if (!response.ok) {
-                    throw new Error('Failed to fetch options data');
+                    throw new Error(`Failed to fetch options data (${response.status})`);
                 }
 
                 const data = await response.json();
-                setOptionsData(data);
                 
-                if (data.expirationDates && data.expirationDates.length > 0 && !selectedExpiration) {
-                    setSelectedExpiration(data.expirationDates[0]);
+                // Check if the response contains an error field
+                if (data.error) {
+                    setError(data.error);
+                    setOptionsData(null);
+                } else {
+                    setOptionsData(data);
+                    
+                    if (data.expirationDates && data.expirationDates.length > 0 && !selectedExpiration) {
+                        setSelectedExpiration(data.expirationDates[0]);
+                    }
                 }
             } catch (err) {
+                console.error('[OptionsView] Error:', err);
                 setError(err instanceof Error ? err.message : 'Unknown error');
+                setOptionsData(null);
             } finally {
                 setLoading(false);
             }
@@ -119,10 +128,13 @@ export default function OptionsView({ symbol }: OptionsViewProps) {
     if (error) {
         return (
             <div className="flex items-center justify-center h-96">
-                <div className="text-center">
-                    <div className="text-red-500 text-5xl mb-4">⚠️</div>
-                    <p className="text-red-600 dark:text-red-400 font-medium">{error}</p>
-                    <p className="text-gray-600 dark:text-gray-400 text-sm mt-2">Please try again later</p>
+                <div className="text-center max-w-md mx-auto p-6">
+                    <div className="text-yellow-500 text-5xl mb-4">📊</div>
+                    <p className="text-gray-900 dark:text-gray-100 font-semibold mb-2">Options Data Unavailable</p>
+                    <p className="text-gray-600 dark:text-gray-400 text-sm">{error}</p>
+                    <p className="text-gray-500 dark:text-gray-500 text-xs mt-3">
+                        Options data may not be available for all symbols or during certain market hours.
+                    </p>
                 </div>
             </div>
         );

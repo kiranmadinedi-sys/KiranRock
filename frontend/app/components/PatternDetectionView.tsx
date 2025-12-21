@@ -1,6 +1,6 @@
 
 'use client';
-import { API_BASE_URL } from '../config/apiConfig';
+import { getApiBaseUrl } from '../config';
 import React, { useState, useEffect } from 'react';
 
 interface PatternDetectionProps {
@@ -16,9 +16,10 @@ const PatternDetectionView: React.FC<PatternDetectionProps> = ({ symbol, interva
         const fetchPatterns = async () => {
             setLoading(true);
             const token = localStorage.getItem('token');
+            const apiUrl = getApiBaseUrl();
             try {
                 const response = await fetch(
-                    `${API_BASE_URL}/api/patterns/${symbol}?interval=${interval}`,
+                    `${apiUrl}/api/patterns/${symbol}?interval=${interval}`,
                     { headers: { Authorization: `Bearer ${token}` } }
                 );
                 if (response.ok) {

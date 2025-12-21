@@ -14,6 +14,7 @@ export default function MobileMenu({ onLogout }: MobileMenuProps) {
         { href: '/dashboard', label: 'Dashboard', icon: '📊' },
         { href: '/portfolio', label: 'Portfolio', icon: '💼' },
         { href: '/alerts', label: 'Alerts', icon: '🔔' },
+        { href: '/news', label: 'News', icon: '📰' },
         { href: '/weekly', label: 'Next Week', icon: '📅' },
         { href: '/ai-trading', label: 'AI Trading', icon: '🤖' },
         { href: '/swing-trading', label: 'Swing Trading', icon: '📈' },

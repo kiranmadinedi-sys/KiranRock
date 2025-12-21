@@ -197,10 +197,40 @@ const getTransactionHistory = async (userId) => {
     }
 };
 
+/**
+ * Clear all portfolio data - reset everything to zero
+ */
+const clearAllPortfolio = async (userId) => {
+    try {
+        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
+        const userIndex = users.findIndex(u => u.id === userId);
+        
+        if (userIndex === -1) {
+            throw new Error('User not found');
+        }
+        
+        // Reset trading account to zero
+        users[userIndex].tradingAccount = {
+            balance: 0,
+            totalDeposited: 0,
+            totalWithdrawn: 0,
+            deposits: [],
+            withdrawals: []
+        };
+        
+        await fs.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
+        return { success: true, message: 'Portfolio cleared successfully' };
+    } catch (error) {
+        console.error('Error clearing portfolio:', error);
+        throw error;
+    }
+};
+
 module.exports = {
     getTradingAccount,
     depositFunds,
     withdrawFunds,
     getTransactionHistory,
-    resetBalance
+    resetBalance,
+    clearAllPortfolio
 };

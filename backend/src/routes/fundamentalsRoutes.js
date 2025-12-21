@@ -1,13 +1,22 @@
 const express = require('express');
 const router = express.Router();
 const { getFundamentals } = require('../services/fundamentalsService');
-const { protect } = require('../middleware/authMiddleware');
+
+// Middleware to disable caching
+const noCache = (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
+  next();
+};
 
 /**
  * GET /api/fundamentals/:symbol
  * Fetches fundamental data for a stock
+ * No authentication required - public stock data
  */
-router.get('/:symbol', protect, async (req, res) => {
+router.get('/:symbol', noCache, async (req, res) => {
     try {
         const { symbol } = req.params;
         const fundamentals = await getFundamentals(symbol);

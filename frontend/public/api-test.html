@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>API URL Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .result {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin: 20px 0;
+        }
+        .success { color: #10b981; }
+        .error { color: #ef4444; }
+        h1 { color: #1f2937; }
+        pre {
+            background: #f3f4f6;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        button {
+            background: #3b82f6;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background: #2563eb;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔧 KiranRock Trading - API Configuration Test</h1>
+    
+    <div class="result">
+        <h2>Current Configuration:</h2>
+        <p><strong>Accessing from:</strong> <span id="hostname"></span></p>
+        <p><strong>Detected API URL:</strong> <span id="apiUrl"></span></p>
+        <p><strong>Expected Backend:</strong> <span id="expectedBackend"></span></p>
+    </div>
+
+    <div class="result">
+        <h2>Connection Test:</h2>
+        <button onclick="testConnection()">Test Backend Connection</button>
+        <div id="testResult"></div>
+    </div>
+
+    <script>
+        // Display current configuration
+        const hostname = window.location.hostname;
+        document.getElementById('hostname').textContent = hostname;
+        
+        // Determine API URL using same logic as frontend
+        let apiUrl;
+        if (hostname === '99.47.183.33' || hostname === '192.168.1.206') {
+            apiUrl = `http://${hostname}:3001`;
+        } else if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
+            apiUrl = `http://${hostname}:3001`;
+        } else {
+            apiUrl = 'http://localhost:3001';
+        }
+        
+        document.getElementById('apiUrl').textContent = apiUrl;
+        document.getElementById('expectedBackend').textContent = `${apiUrl}/api/auth/login`;
+
+        async function testConnection() {
+            const resultDiv = document.getElementById('testResult');
+            resultDiv.innerHTML = '<p>Testing connection...</p>';
+            
+            try {
+                const response = await fetch(`${apiUrl}/api/auth/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: 'test', password: 'test' })
+                });
+                
+                if (response.ok || response.status === 401) {
+                    resultDiv.innerHTML = `
+                        <p class="success">✅ Backend is reachable!</p>
+                        <p>Status: ${response.status} ${response.statusText}</p>
+                        <pre>${await response.text()}</pre>
+                    `;
+                } else {
+                    resultDiv.innerHTML = `
+                        <p class="error">⚠️ Backend responded with error</p>
+                        <p>Status: ${response.status} ${response.statusText}</p>
+                    `;
+                }
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <p class="error">❌ Cannot reach backend</p>
+                    <p>Error: ${error.message}</p>
+                    <p><strong>Troubleshooting:</strong></p>
+                    <ul>
+                        <li>Check if backend is running on port 3001</li>
+                        <li>Verify Windows Firewall allows port 3001</li>
+                        <li>Check router port forwarding (if accessing externally)</li>
+                        <li>Verify CORS configuration in backend</li>
+                    </ul>
+                `;
+            }
+        }
+
+        // Auto-test on page load
+        window.addEventListener('load', () => {
+            setTimeout(testConnection, 1000);
+        });
+    </script>
+</body>
+</html>

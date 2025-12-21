@@ -1,6 +1,6 @@
 {
-  "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
-  "timesCST": ["08:00", "10:00", "03:30"],
-  "timezone": "America/Chicago",
-  "description": "Send fresh weekly report to Telegram group at these times (CST) on weekdays."
+  "days": ["Monday", "Wednesday"],
+  "timesEST": ["06:00"],
+  "timezone": "America/New_York",
+  "description": "Send fresh weekly report to Telegram group at 6:00 AM EST on Monday and Wednesday. Also sends immediately on service startup."
 }

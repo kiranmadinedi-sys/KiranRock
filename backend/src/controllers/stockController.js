@@ -8,21 +8,14 @@ const getAvailableStocks = (req, res) => {
 };
 
 const searchStocks = async (req, res) => {
-    const { query } = req.query;
-    if (!query) {
-        return res.status(400).json({ message: 'Query parameter is required' });
+    const { q, query } = req.query;
+    const searchQuery = q || query;
+    if (!searchQuery) {
+        return res.status(400).json({ message: 'Query parameter (q or query) is required' });
     }
-    const symbols = await stockDataService.searchSymbols(query);
-    // Create a new array with only valid symbols
-    const cleanSymbols = [];
-    for (let i = 0; i < symbols.length; i++) {
-        const symbol = symbols[i];
-        if (symbol && typeof symbol === 'string' && symbol.trim() !== '') {
-            cleanSymbols.push(symbol);
-        }
-    }
-    console.log(`Clean symbols for "${query}":`, cleanSymbols);
-    res.json(cleanSymbols);
+    const results = await stockDataService.searchSymbols(searchQuery);
+    console.log(`Search results for "${searchQuery}":`, results.length, 'stocks found');
+    res.json(results);
 };
 
 const getStockData = async (req, res) => {

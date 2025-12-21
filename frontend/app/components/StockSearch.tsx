@@ -4,7 +4,14 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { debounce } from 'lodash';
 import { getAuthToken, handleAuthError } from '../utils/auth';
-import { API_BASE_URL } from '../config';
+import { getApiBaseUrl } from '../config';
+
+interface StockResult {
+    symbol: string;
+    name: string;
+    type: string;
+    exchange: string;
+}
 
 interface StockSearchProps {
     onSelectStock: (symbol: string) => void;
@@ -12,7 +19,7 @@ interface StockSearchProps {
 
 const StockSearch: React.FC<StockSearchProps> = ({ onSelectStock }) => {
     const [searchTerm, setSearchTerm] = useState('');
-    const [results, setResults] = useState<string[]>([]);
+    const [results, setResults] = useState<StockResult[]>([]);
     const [isLoading, setIsLoading] = useState(false);
   const [dropdownPosition, setDropdownPosition] = useState({ top: 0, left: 0, width: 0 });
   const [showDropdown, setShowDropdown] = useState(false);
@@ -66,7 +73,7 @@ const StockSearch: React.FC<StockSearchProps> = ({ onSelectStock }) => {
 
       try {
         // Make unauthenticated request since backend routes are currently unprotected
-        const response = await fetch(`${API_BASE_URL}/api/stocks/search?query=${encodeURIComponent(query)}`);
+        const response = await fetch(`${getApiBaseUrl()}/api/stocks/search?query=${encodeURIComponent(query)}`);
 
         if (response.ok) {
           const data = await response.json();
@@ -126,25 +133,28 @@ const StockSearch: React.FC<StockSearchProps> = ({ onSelectStock }) => {
             zIndex: 999999 
           }}
         >
-          {results.map((symbol) => (
+          {results.map((stock) => (
             <li
-              key={symbol}
+              key={stock.symbol}
               tabIndex={0}
               role="button"
               onMouseDown={(e) => {
                 // Use onMouseDown to ensure event fires before blur/hide
                 e.preventDefault();
-                handleSelect(symbol);
+                handleSelect(stock.symbol);
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                   e.preventDefault();
-                  handleSelect(symbol);
+                  handleSelect(stock.symbol);
                 }
               }}
-              className="p-3 cursor-pointer hover:bg-[var(--color-accent)] hover:text-white text-[var(--color-text-primary)] border-b border-[var(--color-border)] last:border-b-0 transition-all duration-150 font-medium focus:outline-none"
+              className="p-3 cursor-pointer hover:bg-[var(--color-accent)] hover:text-white text-[var(--color-text-primary)] border-b border-[var(--color-border)] last:border-b-0 transition-all duration-150 focus:outline-none"
             >
-              {symbol}
+              <div className="flex flex-col">
+                <span className="font-bold">{stock.symbol}</span>
+                <span className="text-sm opacity-75">{stock.name}</span>
+              </div>
             </li>
           ))}
         </ul>,

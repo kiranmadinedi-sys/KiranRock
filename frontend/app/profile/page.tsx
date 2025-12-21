@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Logo from '../components/Logo';
-import { API_BASE_URL } from '../config/apiConfig';
+import { getApiBaseUrl } from '../config';
 import ThemeToggle from '../components/ThemeToggle';
 
 interface UserProfile {
@@ -67,7 +67,7 @@ export default function ProfilePage() {
     const fetchProfile = async () => {
         setLoading(true);
         try {
-            const response = await fetch(`${API_BASE_URL}/api/profile`, {
+            const response = fetch(`${getApiBaseUrl()}/api/profile`, {
                 headers: { Authorization: `Bearer ${token}` }
             });
             if (response.ok) {
@@ -90,7 +90,7 @@ export default function ProfilePage() {
         e.preventDefault();
         setSaving(true);
         try {
-            const response = await fetch(`${API_BASE_URL}/api/profile`, {
+            const response = fetch(`${getApiBaseUrl()}/api/profile`, {
                 method: 'PUT',
                 headers: {
                     'Content-Type': 'application/json',
@@ -132,7 +132,7 @@ export default function ProfilePage() {
         
         setSaving(true);
         try {
-            const response = await fetch(`${API_BASE_URL}/api/profile/change-password`, {
+            const response = fetch(`${getApiBaseUrl()}/api/profile/change-password`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -162,7 +162,7 @@ export default function ProfilePage() {
     const handleToggleAITrading = async () => {
         setAiTradingLoading(true);
         try {
-            const response = await fetch(`${API_BASE_URL}/api/profile/ai-trading/toggle`, {
+            const response = fetch(`${getApiBaseUrl()}/api/profile/ai-trading/toggle`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',

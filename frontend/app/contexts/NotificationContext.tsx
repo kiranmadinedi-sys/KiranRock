@@ -1,7 +1,7 @@
 'use client';
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { getAuthToken, handleAuthError } from '../utils/auth';
-import { API_BASE_URL } from '../config';
+import { getApiBaseUrl } from '../config';
 
 interface NewsAlert {
     id: string;
@@ -54,14 +54,15 @@ export const NotificationProvider: React.FC<NotificationProviderProps> = ({ chil
             }
 
             console.log('Fetching alerts with token:', token.substring(0, 20) + '...');
-            const response = await fetch(`${API_BASE_URL}/api/news-alerts?limit=20`, {
+            const apiUrl = getApiBaseUrl();
+            const response = await fetch(`${apiUrl}/api/news-alerts?limit=20`, {
                 headers: { Authorization: `Bearer ${token}` }
             });
 
             if (response.status === 401) {
                 console.log('Auth failed, trying without auth for testing');
                 // Try without auth for testing
-                const testResponse = await fetch(`${API_BASE_URL}/api/news-alerts?limit=20`);
+                const testResponse = await fetch(`${apiUrl}/api/news-alerts?limit=20`);
                 if (testResponse.ok) {
                     const data = await testResponse.json();
                     console.log('Fetched alerts without auth:', data.alerts.length, 'alerts');
@@ -109,7 +110,7 @@ export const NotificationProvider: React.FC<NotificationProviderProps> = ({ chil
             const token = getAuthToken();
             if (!token) return;
 
-            const response = await fetch(`${API_BASE_URL}/api/news-alerts/${id}/read`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/news-alerts/${id}/read`, {
                 method: 'PUT',
                 headers: { Authorization: `Bearer ${token}` }
             });

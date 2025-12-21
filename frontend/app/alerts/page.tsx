@@ -1,10 +1,9 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import Link from 'next/link';
-import { API_BASE_URL } from '../components/../config/apiConfig';
-import Logo from '../components/Logo';
+import { getApiBaseUrl } from '../config';
+import AppHeader from '../components/AppHeader';
 import { debounce } from 'lodash';
 
 const AlertsPage = () => {
@@ -32,7 +31,7 @@ const AlertsPage = () => {
         if (!token) return;
         const fetchAlerts = async () => {
             try {
-                const response = await fetch(`${API_BASE_URL}/api/alerts`, {
+                const response = await fetch(`${getApiBaseUrl()}/api/alerts`, {
                     headers: { Authorization: `Bearer ${token}` },
                 });
                 if (response.ok) {
@@ -45,7 +44,7 @@ const AlertsPage = () => {
         };
         const fetchNewsAlerts = async () => {
             try {
-                const response = await fetch(`${API_BASE_URL}/api/news-alerts?limit=20`, {
+                const response = fetch(`${getApiBaseUrl()}/api/news-alerts?limit=20`, {
                     headers: { Authorization: `Bearer ${token}` },
                 });
                 if (response.ok) {
@@ -69,7 +68,7 @@ const AlertsPage = () => {
         }
         setIsSearching(true);
         try {
-            const response = await fetch(`${API_BASE_URL}/api/stocks/search?query=${query}`, {
+            const response = fetch(`${getApiBaseUrl()}/api/stocks/search?query=${query}`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
             if (response.ok) {
@@ -105,7 +104,7 @@ const AlertsPage = () => {
         }
         try {
             console.log(`[DIAGNOSTIC] Fetching price for ${symbol}...`);
-            const response = await fetch(`${API_BASE_URL}/api/stocks/price/${symbol}`, {
+            const response = fetch(`${getApiBaseUrl()}/api/stocks/price/${symbol}`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
             
@@ -146,7 +145,7 @@ const AlertsPage = () => {
         e.preventDefault();
         if (!token || !newAlert.symbol || !newAlert.targetPrice) return;
         try {
-            const response = await fetch(`${API_BASE_URL}/api/alerts`, {
+            const response = fetch(`${getApiBaseUrl()}/api/alerts`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -171,7 +170,7 @@ const AlertsPage = () => {
     const handleDeleteAlert = async (id: string) => {
         if (!token) return;
         try {
-            const response = await fetch(`${API_BASE_URL}/api/alerts/${id}`, {
+            const response = fetch(`${getApiBaseUrl()}/api/alerts/${id}`, {
                 method: 'DELETE',
                 headers: { Authorization: `Bearer ${token}` },
             });
@@ -194,32 +193,8 @@ const AlertsPage = () => {
     }
 
     return (
-        <div className="min-h-screen bg-gray-100">
-            <header className="bg-white shadow p-4 flex justify-between items-center sticky top-0 z-20">
-                <div className="flex items-center space-x-4">
-                    <Link href="/dashboard" className="flex items-center space-x-4 cursor-pointer hover:opacity-80 transition-opacity">
-                        <Logo />
-                        <h1 className="text-2xl font-bold text-gray-800">Stock Analysis</h1>
-                    </Link>
-                    <nav className="hidden md:flex items-center space-x-4 ml-6">
-                        <Link href="/dashboard" className="text-gray-600 font-semibold hover:text-blue-600">Dashboard</Link>
-                        <Link href="/alerts" className="text-gray-600 font-semibold hover:text-blue-600">Alerts</Link>
-                        <Link href="/portfolio" className="text-gray-600 font-semibold hover:text-blue-600">Portfolio</Link>
-                        <Link href="/weekly" className="text-gray-600 font-semibold hover:text-blue-600">📅 Next Week</Link>
-                        <Link href="/ai-trading" className="text-gray-600 font-semibold hover:text-blue-600">🤖 AI Trading</Link>
-                        <Link href="/swing-trading" className="text-gray-600 font-semibold hover:text-blue-600">📈 Swing</Link>
-                        <Link href="/backtest" className="text-gray-600 font-semibold hover:text-blue-600">📊 Backtest</Link>
-                    </nav>
-                </div>
-                <div className="flex items-center space-x-4">
-                    <button
-                        onClick={handleLogout}
-                        className="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded"
-                    >
-                        Logout
-                    </button>
-                </div>
-            </header>
+        <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-gray-100 dark:from-gray-900 dark:via-slate-900 dark:to-gray-900">
+            <AppHeader showSearch={false} />
             <main className="p-4 md:p-8">
                 <div className="max-w-4xl mx-auto bg-white p-6 rounded-lg shadow">
                     <h2 className="text-2xl font-semibold mb-4">News Alerts</h2>

@@ -49,6 +49,11 @@ function PortfolioPage() {
     // History & Performance
     const [tradeHistory, setTradeHistory] = useState([]);
     const [performanceData, setPerformanceData] = useState(null);
+    // Ledger data
+    const [ledgerData, setLedgerData] = useState(null);
+    const [ledgerTrades, setLedgerTrades] = useState<any[]>([]);
+    const [showLedgerTrades, setShowLedgerTrades] = useState(false);
+    const [downloadStatus, setDownloadStatus] = useState('');
     
     // Deposit Modal
     const [showDepositModal, setShowDepositModal] = useState(false);
@@ -142,11 +147,66 @@ function PortfolioPage() {
     const loadData = async () => {
         setLoading(true);
         try {
-            await Promise.all([fetchPortfolio(), fetchTradeHistory(), fetchPerformance()]);
+            await Promise.all([fetchPortfolio(), fetchTradeHistory(), fetchPerformance(), fetchLedger()]);
         } catch (error) {
             console.error('Failed to load data:', error);
         } finally {
             setLoading(false);
+        }
+    };
+
+    const fetchLedger = async () => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/trading/ledger`, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            if (response.ok) {
+                const data = await response.json();
+                setLedgerData(data);
+            }
+        } catch (err) {
+            console.error('Failed to fetch ledger:', err);
+        }
+    };
+
+    const fetchLedgerTrades = async () => {
+        try {
+            const response = await fetch(`${getApiBaseUrl()}/api/trading/ledger/trades?limit=500`, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            if (response.ok) {
+                const data = await response.json();
+                setLedgerTrades(data.trades || []);
+            }
+        } catch (err) {
+            console.error('Failed to fetch ledger trades:', err);
+        }
+    };
+
+    const downloadLedgerCSV = async () => {
+        if (!token) return alert('Not authenticated');
+        setDownloadStatus('Preparing download...');
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/trading/ledger/export`, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            if (!res.ok) throw new Error('Failed to fetch CSV');
+            const blob = await res.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            const filename = `ledger-${new Date().toISOString().slice(0,10)}.csv`;
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.URL.revokeObjectURL(url);
+            setDownloadStatus('Download started');
+            setTimeout(() => setDownloadStatus(''), 3000);
+        } catch (err) {
+            console.error('CSV download error:', err);
+            setDownloadStatus('Download failed');
+            setTimeout(() => setDownloadStatus(''), 3000);
         }
     };
 
@@ -397,6 +457,7 @@ function PortfolioPage() {
     const totalPortfolioValue = cashBalance + holdings.reduce((sum, h) => sum + (h.currentValue || 0), 0);
     const totalHoldingsValue = holdings.reduce((sum, h) => sum + (h.currentValue || 0), 0);
     const totalUnrealizedPL = holdings.reduce((sum, h) => sum + (h.unrealizedPL || 0), 0);
+    const totalRealizedPL = holdings.reduce((sum, h) => sum + (h.realizedPL || 0), 0);
 
     const chartData = {
         labels: ['Open', 'High', 'Low', 'Close'],
@@ -543,6 +604,94 @@ function PortfolioPage() {
                         <li>? <strong>Cash Reserve:</strong> No default reserve; users can set their own cash reserve percentage</li>
                     </ul>
                 </div>
+                {ledgerData && (
+                    <div className="mb-8 bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+                        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-3">Ledger Summary</h3>
+                        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 text-sm">
+                            <div className="p-3 bg-gray-50 dark:bg-gray-700/50 rounded">
+                                <div className="text-xs text-gray-500">Deposits</div>
+                                <div className="mt-1 font-bold text-gray-900">${ledgerData.totalDeposits.toFixed(2)}</div>
+                            </div>
+                            <div className="p-3 bg-gray-50 dark:bg-gray-700/50 rounded">
+                                <div className="text-xs text-gray-500">Withdrawals</div>
+                                <div className="mt-1 font-bold text-gray-900">${ledgerData.totalWithdrawals.toFixed(2)}</div>
+                            </div>
+                            <div className="p-3 bg-gray-50 dark:bg-gray-700/50 rounded">
+                                <div className="text-xs text-gray-500">Buys</div>
+                                <div className="mt-1 font-bold text-gray-900">${ledgerData.totalBuys.toFixed(2)}</div>
+                            </div>
+                            <div className="p-3 bg-gray-50 dark:bg-gray-700/50 rounded">
+                                <div className="text-xs text-gray-500">Sells</div>
+                                <div className="mt-1 font-bold text-gray-900">${ledgerData.totalSells.toFixed(2)}</div>
+                            </div>
+                            <div className="p-3 bg-gray-50 dark:bg-gray-700/50 rounded">
+                                <div className="text-xs text-gray-500">Commissions</div>
+                                <div className="mt-1 font-bold text-gray-900">${ledgerData.totalCommission.toFixed(2)}</div>
+                            </div>
+                        </div>
+                            <div className="mt-3 text-xs text-gray-500 flex items-center justify-between">
+                                <div>This breakdown helps reconcile cash balance against trades.</div>
+                                <div className="flex gap-2">
+                                    <button
+                                        onClick={async () => {
+                                            await fetchLedgerTrades();
+                                            setShowLedgerTrades(s => !s);
+                                        }}
+                                        className="px-3 py-1 bg-gray-200 dark:bg-gray-700 rounded text-sm"
+                                    >
+                                        {showLedgerTrades ? 'Hide Trades' : 'View Trades'}
+                                    </button>
+                                    <button
+                                        onClick={downloadLedgerCSV}
+                                        className="px-3 py-1 bg-blue-600 text-white rounded text-sm"
+                                    >
+                                        Export CSV
+                                    </button>
+                                    {downloadStatus && (
+                                        <div className="ml-3 text-xs text-gray-600 dark:text-gray-300">{downloadStatus}</div>
+                                    )}
+                                </div>
+                            </div>
+                    </div>
+                )}
+
+                    {showLedgerTrades && (
+                        <div className="mb-8 bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+                            <h4 className="text-md font-semibold mb-3">Ledger Trades</h4>
+                            <div className="overflow-x-auto">
+                                <table className="min-w-full text-sm">
+                                    <thead className="bg-gray-50 dark:bg-gray-700">
+                                        <tr>
+                                            <th className="px-3 py-2">Date</th>
+                                            <th className="px-3 py-2">Type</th>
+                                            <th className="px-3 py-2">Symbol</th>
+                                            <th className="px-3 py-2">Qty</th>
+                                            <th className="px-3 py-2">Price</th>
+                                            <th className="px-3 py-2">Total</th>
+                                            <th className="px-3 py-2">Comm</th>
+                                            <th className="px-3 py-2">By</th>
+                                            <th className="px-3 py-2">Notes</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {ledgerTrades.map(t => (
+                                            <tr key={t.id} className="border-b border-gray-100 dark:border-gray-700">
+                                                <td className="px-3 py-2">{new Date(t.trade_date).toLocaleString()}</td>
+                                                <td className="px-3 py-2">{t.action}</td>
+                                                <td className="px-3 py-2">{t.symbol}</td>
+                                                <td className="px-3 py-2">{t.quantity || ''}</td>
+                                                <td className="px-3 py-2">${(t.price || 0).toFixed(2)}</td>
+                                                <td className="px-3 py-2">${(t.total || 0).toFixed(2)}</td>
+                                                <td className="px-3 py-2">${(t.commission || 0).toFixed(2)}</td>
+                                                <td className="px-3 py-2">{t.executed_by}</td>
+                                                <td className="px-3 py-2">{t.notes || ''}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
                 <div className="mb-4 sm:mb-6">
                     <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white">Paper Trading Portfolio</h1>
                     <p className="mt-1 sm:mt-2 text-xs sm:text-sm text-gray-600 dark:text-gray-400">Practice trading with virtual money</p>
@@ -643,6 +792,7 @@ function PortfolioPage() {
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Current Price</th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Market Value</th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Unrealized P/L</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Realized P/L</th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">% Change</th>
                                                 </tr>
                                             </thead>
@@ -655,10 +805,13 @@ function PortfolioPage() {
                                                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${holding.currentPrice?.toFixed(2) || '0.00'}</td>
                                                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${holding.currentValue?.toFixed(2) || '0.00'}</td>
                                                         <td className={`px-6 py-4 whitespace-nowrap text-sm font-medium ${(holding.unrealizedPL || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                                            {(holding.unrealizedPL || 0) >= 0 ? '+' : ''}${holding.unrealizedPL?.toFixed(2) || '0.00'}
+                                                            {(holding.unrealizedPL || 0) >= 0 ? '+' : ''}${(holding.unrealizedPL || 0).toFixed(2)}
+                                                        </td>
+                                                        <td className={`px-6 py-4 whitespace-nowrap text-sm font-medium ${(holding.realizedPL || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                            {(holding.realizedPL || 0) >= 0 ? '+' : ''}${(holding.realizedPL || 0).toFixed(2)}
                                                         </td>
                                                         <td className={`px-6 py-4 whitespace-nowrap text-sm font-medium ${(holding.unrealizedPLPercent || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                                                            {(holding.unrealizedPLPercent || 0) >= 0 ? '+' : ''}${holding.unrealizedPLPercent?.toFixed(2) || '0.00'}%
+                                                            {(holding.unrealizedPLPercent || 0) >= 0 ? '+' : ''}${(holding.unrealizedPLPercent || 0).toFixed(2)}%
                                                         </td>
                                                     </tr>
                                                 ))}
@@ -679,7 +832,7 @@ function PortfolioPage() {
                                                         ${holdings.reduce((sum, h) => sum + (h.currentValue || 0), 0).toFixed(2)}
                                                     </td>
                                                     <td className={`px-6 py-4 text-sm font-bold ${totalUnrealizedPL >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                                                        {totalUnrealizedPL >= 0 ? '+' : ''}${totalUnrealizedPL.toFixed(2)}
+                                                        {totalRealizedPL >= 0 ? '+' : ''}${(totalRealizedPL || 0).toFixed(2)}
                                                     </td>
                                                     <td className={`px-6 py-4 text-sm font-bold ${totalUnrealizedPL >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
                                                         {totalHoldingsValue > 0 ? (

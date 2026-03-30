@@ -3,6 +3,8 @@ const yahooFinance = new YahooFinance();
 const tradingService = require('./tradingService');
 const tradingAccountService = require('./tradingAccountService');
 const portfolioTrackingService = require('./portfolioTrackingService');
+const { query } = require('../config/database');
+const { getNewsSentiment } = require('./newsSentimentService');
 
 /**
  * AI Trading Bot Service
@@ -34,31 +36,59 @@ const DEFAULT_STRATEGY_CONFIG = {
     volatilityThreshold: 0.25 // Reduce position if volatility > 25%
 };
 
-const fs = require('fs').promises;
-const path = require('path');
-const USERS_FILE = path.join(__dirname, '../../users.json');
-
 // Helper to get user-specific AI trading settings
 async function getUserStrategyConfig(userId) {
     try {
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const user = users.find(u => u.id === userId);
-        if (user && user.aiTradingSettings) {
+        const result = await query(
+            'SELECT ai_trading_settings FROM users WHERE id = $1',
+            [userId]
+        );
+        
+        if (result.rows.length > 0 && result.rows[0].ai_trading_settings) {
             return {
                 ...DEFAULT_STRATEGY_CONFIG,
-                ...user.aiTradingSettings
+                ...result.rows[0].ai_trading_settings
             };
         }
         return DEFAULT_STRATEGY_CONFIG;
     } catch (err) {
+        console.error('Error getting user strategy config:', err);
         return DEFAULT_STRATEGY_CONFIG;
     }
 }
 
 /**
- * Analyze stock and generate AI recommendation
+ * Convert a news sentiment score (-100..+100) into a rawScore impact (-0.4..+0.4).
+ * Boosted when X posts confirm the direction with high confidence,
+ * and when analyst consensus aligns.
  */
-async function analyzeStock(symbol, vixData = null) {
+function calcNewsSentimentImpact(sentimentData) {
+    if (!sentimentData || !sentimentData.sentiment) return 0;
+
+    const score = parseFloat(sentimentData.sentiment.score) || 0;
+    // Base impact: map -100..+100 → -0.4..+0.4
+    let impact = (score / 100) * 0.4;
+
+    // Boost when analyst consensus matches direction
+    const consensus = sentimentData.analystRatings?.consensus;
+    if (consensus === 'Strong Buy' && impact > 0) impact *= 1.25;
+    else if (consensus === 'Buy' && impact > 0) impact *= 1.1;
+    else if (consensus === 'Sell' && impact < 0) impact *= 1.25;
+
+    // Extra boost when X/social posts confirm with high confidence
+    const xCount = sentimentData.meta?.xPostCount || 0;
+    const confidence = sentimentData.sentiment.confidence;
+    if (xCount >= 3 && confidence === 'High') impact *= 1.15;
+    else if (xCount >= 1 && confidence === 'Medium') impact *= 1.05;
+
+    return Math.max(-0.4, Math.min(0.4, impact));
+}
+
+/**
+ * Analyze stock and generate AI recommendation.
+ * Combines price momentum, volume, VIX, and news/X sentiment.
+ */
+async function analyzeStock(symbol, vixData = null, preloadedSentiment = null) {
     try {
         // Use quoteSummary instead of quote
         const result = await yahooFinance.quoteSummary(symbol, {
@@ -95,8 +125,21 @@ async function analyzeStock(symbol, vixData = null) {
             }
         }
 
-        // Overall AI score (0-100) with better signal weighting
-        const rawScore = (momentumScore * 0.5) + (volumeScore * 0.3) + vixImpact;
+        // --- News + X sentiment impact ---
+        let sentimentData = preloadedSentiment || null;
+        let newsSentimentImpact = 0;
+        try {
+            if (!sentimentData) {
+                sentimentData = await getNewsSentiment(symbol);
+            }
+            newsSentimentImpact = calcNewsSentimentImpact(sentimentData);
+        } catch (e) {
+            console.warn(`[AI Bot] News sentiment unavailable for ${symbol}: ${e.message}`);
+        }
+
+        // Overall AI score: momentum 40% + volume 20% + news 25% + VIX up to ±0.4
+        // Formula keeps rawScore in roughly -1.5..+1.5; clamp to 0-100 aiScore
+        const rawScore = (momentumScore * 0.40) + (volumeScore * 0.20) + newsSentimentImpact + vixImpact;
         const aiScore = Math.round(Math.max(0, Math.min(100, (rawScore + 1) * 50)));
 
         // Enhanced chart signal with better thresholds
@@ -123,6 +166,16 @@ async function analyzeStock(symbol, vixData = null) {
             recommendation = 'SELL';
         }
 
+        // Build sentiment summary for response
+        const newsSentiment = sentimentData ? {
+            score: sentimentData.sentiment?.score ?? 0,
+            label: sentimentData.sentiment?.label ?? 'Neutral',
+            confidence: sentimentData.sentiment?.confidence ?? 'Low',
+            xPostCount: sentimentData.meta?.xPostCount || 0,
+            articleCount: sentimentData.meta?.articleCount || 0,
+            sources: sentimentData.meta?.sourceBreakdown || {}
+        } : null;
+
         return {
             symbol,
             price: currentPrice,
@@ -132,6 +185,8 @@ async function analyzeStock(symbol, vixData = null) {
             aiScore,
             vixImpact: vixImpact.toFixed(2),
             vix: vixData ? vixData.price : null,
+            newsSentimentImpact: newsSentimentImpact.toFixed(3),
+            newsSentiment,
             recommendation,
             chartSignal,
             confidence: Math.abs(aiScore - 50) / 50 * 100,
@@ -146,15 +201,24 @@ async function analyzeStock(symbol, vixData = null) {
 }
 
 /**
- * Generate AI-powered portfolio allocation
+ * Generate AI-powered portfolio allocation.
+ * Pre-fetches news sentiment for all candidate stocks in parallel.
  */
 async function generatePortfolioAllocation(userId, availableBalance) {
     const allocations = [];
     const strategyConfig = await getUserStrategyConfig(userId);
     const investmentAmount = availableBalance * (1 - strategyConfig.minCashReserve);
 
+    // Pre-fetch sentiment for all candidate symbols in parallel
+    const symbols = AI_RECOMMENDED_STOCKS.map(s => s.symbol);
+    const sentimentMap = {};
+    const sentimentResults = await Promise.allSettled(symbols.map(sym => getNewsSentiment(sym)));
+    sentimentResults.forEach((res, i) => {
+        sentimentMap[symbols[i]] = res.status === 'fulfilled' ? res.value : null;
+    });
+
     for (const stock of AI_RECOMMENDED_STOCKS) {
-        const analysis = await analyzeStock(stock.symbol);
+        const analysis = await analyzeStock(stock.symbol, null, sentimentMap[stock.symbol]);
 
         // Only buy stocks with strong signals (BUY or STRONG BUY)
         if (analysis && (analysis.recommendation === 'BUY' || analysis.recommendation === 'STRONG BUY') && analysis.aiScore >= 60) {
@@ -171,6 +235,8 @@ async function generatePortfolioAllocation(userId, availableBalance) {
                     recommendation: analysis.recommendation,
                     chartSignal: analysis.chartSignal,
                     buyStrength: analysis.buyStrength,
+                    newsSentiment: analysis.newsSentiment,
+                    newsSentimentImpact: analysis.newsSentimentImpact,
                     sector: stock.sector,
                     weight: stock.weight
                 });
@@ -242,7 +308,8 @@ async function initializeAIPortfolio(userId) {
 }
 
 /**
- * Rebalance portfolio based on AI recommendations
+ * Rebalance portfolio based on AI recommendations.
+ * Pre-fetches sentiment for all held symbols in parallel.
  */
 async function rebalancePortfolio(userId) {
     try {
@@ -258,11 +325,19 @@ async function rebalancePortfolio(userId) {
             return await initializeAIPortfolio(userId);
         }
 
+        // Pre-fetch sentiment for all held symbols in parallel
+        const heldSymbols = currentHoldings.map(h => h.symbol);
+        const sentimentMap = {};
+        const sentimentResults = await Promise.allSettled(heldSymbols.map(sym => getNewsSentiment(sym)));
+        sentimentResults.forEach((res, i) => {
+            sentimentMap[heldSymbols[i]] = res.status === 'fulfilled' ? res.value : null;
+        });
+
         const rebalanceActions = [];
 
         // Check each holding for rebalancing needs
         for (const holding of currentHoldings) {
-            const analysis = await analyzeStock(holding.symbol);
+            const analysis = await analyzeStock(holding.symbol, null, sentimentMap[holding.symbol]);
 
             if (!analysis) continue;
 
@@ -315,6 +390,25 @@ async function rebalancePortfolio(userId) {
                 continue;
             }
 
+            // --- News/X sentiment emergency sell ---
+            // If news sentiment is Very Negative with high confidence and AI score is bearish, sell half
+            const sent = analysis.newsSentiment;
+            const sentScore = parseFloat(sent?.score || 0);
+            if (sent && sentScore <= -30 && sent.confidence === 'High' && analysis.aiScore < 40) {
+                const sellQuantity = Math.floor(holding.quantity * 0.5);
+                if (sellQuantity > 0) {
+                    rebalanceActions.push({
+                        action: 'SELL',
+                        symbol: holding.symbol,
+                        quantity: sellQuantity,
+                        reason: `News Sentiment Alert: ${sent.label} (score ${sentScore}, ${sent.xPostCount} X posts)`,
+                        aiScore: analysis.aiScore,
+                        newsSentiment: sent.label
+                    });
+                    continue;
+                }
+            }
+
             // Check if position needs rebalancing
             const weightDrift = Math.abs(currentWeight - targetWeight);
             if (weightDrift > strategyConfig.rebalanceThreshold) {
@@ -357,7 +451,7 @@ async function rebalancePortfolio(userId) {
                     action: 'SELL',
                     symbol: holding.symbol,
                     quantity: holding.quantity,
-                    reason: `AI Strong Sell Signal (${analysis.aiScore}/100)`,
+                    reason: `AI Strong Sell Signal (score ${analysis.aiScore}/100, news: ${analysis.newsSentiment?.label || 'N/A'})`,
                     aiScore: analysis.aiScore
                 });
             }

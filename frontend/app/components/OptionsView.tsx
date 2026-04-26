@@ -54,9 +54,9 @@ export default function OptionsView({ symbol }: OptionsViewProps) {
             setLoading(true);
             setError(null);
             
-            try {
+                try {
                 const token = localStorage.getItem('token');
-                const response = fetch(`${getApiBaseUrl()}/api/options/${symbol}`, {
+                const response = await fetch(`${getApiBaseUrl()}/api/options/${symbol}`, {
                     headers: token ? { Authorization: `Bearer ${token}` } : {},
                 });
 

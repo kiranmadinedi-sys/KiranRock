@@ -1,22 +1,22 @@
 const alertService = require('../services/alertService');
 
-const getAlerts = (req, res) => {
-    const alerts = alertService.getAlertsByUserId(req.user.id);
+const getAlerts = async (req, res) => {
+    const alerts = await alertService.getAlertsByUserId(req.user.id);
     res.json(alerts);
 };
 
-const addAlert = (req, res) => {
+const addAlert = async (req, res) => {
     const { symbol, targetPrice } = req.body;
     if (!symbol || !targetPrice) {
         return res.status(400).json({ message: 'Symbol and target price are required' });
     }
-    const newAlert = alertService.addAlert(req.user.id, symbol, targetPrice);
+    const newAlert = await alertService.addAlert(req.user.id, symbol, targetPrice);
     res.status(201).json(newAlert);
 };
 
-const deleteAlert = (req, res) => {
+const deleteAlert = async (req, res) => {
     const { id } = req.params;
-    const success = alertService.deleteAlert(req.user.id, id);
+    const success = await alertService.deleteAlert(req.user.id, id);
     if (success) {
         res.status(204).send();
     } else {

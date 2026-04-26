@@ -47,6 +47,105 @@ const calculateRSI = (data, period = 14) => {
 };
 
 /**
+ * Simple RSI calculation from array of prices (returns single value)
+ * @param {array} prices - Array of closing prices
+ * @param {number} period - RSI period (default 14)
+ * @returns {number} Current RSI value
+ */
+const calculateSimpleRSI = (prices, period = 14) => {
+    if (prices.length < period + 1) return 50; // Neutral if not enough data
+    
+    let gains = 0;
+    let losses = 0;
+    
+    // Initial average gain/loss
+    for (let i = 1; i <= period; i++) {
+        const change = prices[i] - prices[i - 1];
+        if (change > 0) gains += change;
+        else losses -= change;
+    }
+    
+    let avgGain = gains / period;
+    let avgLoss = losses / period;
+    
+    // Calculate for remaining data
+    for (let i = period + 1; i < prices.length; i++) {
+        const change = prices[i] - prices[i - 1];
+        const gain = change > 0 ? change : 0;
+        const loss = change < 0 ? -change : 0;
+        
+        avgGain = (avgGain * (period - 1) + gain) / period;
+        avgLoss = (avgLoss * (period - 1) + loss) / period;
+    }
+    
+    return avgLoss === 0 ? 100 : 100 - (100 / (1 + avgGain / avgLoss));
+};
+
+/**
+ * Simple MACD calculation from array of prices (returns single object)
+ * @param {array} prices - Array of closing prices  
+ * @param {number} fastPeriod - Fast EMA period (default 12)
+ * @param {number} slowPeriod - Slow EMA period (default 26)
+ * @param {number} signalPeriod - Signal line period (default 9)
+ * @returns {object} MACD values {macdLine, signalLine, histogram}
+ */
+const calculateSimpleMACD = (prices, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) => {
+    if (prices.length < slowPeriod) {
+        return { macdLine: 0, signalLine: 0, histogram: 0 };
+    }
+    
+    // Calculate EMAs
+    const fastEMA = calculateEMA(prices, fastPeriod);
+    const slowEMA = calculateEMA(prices, slowPeriod);
+    const macdLine = fastEMA - slowEMA;
+    
+    // Calculate signal line (EMA of MACD line)
+    // For simplicity, use last signalPeriod MACD values
+    const macdHistory = [];
+    for (let i = slowPeriod; i < prices.length; i++) {
+        const tempPrices = prices.slice(0, i + 1);
+        const tempFast = calculateEMA(tempPrices, fastPeriod);
+        const tempSlow = calculateEMA(tempPrices, slowPeriod);
+        macdHistory.push(tempFast - tempSlow);
+    }
+    
+    const signalLine = calculateEMA(macdHistory, signalPeriod);
+    const histogram = macdLine - signalLine;
+    
+    return { macdLine, signalLine, histogram };
+};
+
+/**
+ * Simple ATR calculation from arrays of highs, lows, closes
+ * @param {array} highs - Array of high prices
+ * @param {array} lows - Array of low prices
+ * @param {array} closes - Array of closing prices
+ * @param {number} period - ATR period (default 14)
+ * @returns {number} Current ATR value
+ */
+const calculateSimpleATR = (highs, lows, closes, period = 14) => {
+    if (closes.length < period + 1) return 0;
+    
+    const trueRanges = [];
+    for (let i = 1; i < closes.length; i++) {
+        const high = highs[i];
+        const low = lows[i];
+        const prevClose = closes[i - 1];
+        
+        const tr = Math.max(
+            high - low,
+            Math.abs(high - prevClose),
+            Math.abs(low - prevClose)
+        );
+        trueRanges.push(tr);
+    }
+    
+    // Calculate ATR as simple moving average of true ranges
+    const recentTR = trueRanges.slice(-period);
+    return recentTR.reduce((sum, tr) => sum + tr, 0) / period;
+};
+
+/**
  * Calculate MACD (Moving Average Convergence Divergence)
  */
 const calculateMACD = (data, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) => {
@@ -343,14 +442,212 @@ const calculateATR = (data, period = 14) => {
     return atr;
 };
 
+/**
+ * Interpret RSI signal for trading decisions
+ * @param {number} rsi - RSI value (0-100)
+ * @returns {object} Signal interpretation with score adjustment
+ */
+const interpretRSI = (rsi) => {
+    if (rsi >= 70) {
+        return {
+            signal: 'OVERBOUGHT',
+            description: 'RSI indicates overbought conditions - potential sell',
+            scoreAdjustment: -15, // Negative for AI score
+            recommendation: 'SELL'
+        };
+    } else if (rsi <= 30) {
+        return {
+            signal: 'OVERSOLD',
+            description: 'RSI indicates oversold conditions - potential buy',
+            scoreAdjustment: 15, // Positive for AI score
+            recommendation: 'BUY'
+        };
+    } else if (rsi >= 60) {
+        return {
+            signal: 'BULLISH',
+            description: 'RSI trending higher but not overbought',
+            scoreAdjustment: 8,
+            recommendation: 'BUY'
+        };
+    } else if (rsi <= 40) {
+        return {
+            signal: 'BEARISH',
+            description: 'RSI trending lower but not oversold',
+            scoreAdjustment: -8,
+            recommendation: 'SELL'
+        };
+    } else {
+        return {
+            signal: 'NEUTRAL',
+            description: 'RSI in neutral range',
+            scoreAdjustment: 0,
+            recommendation: 'HOLD'
+        };
+    }
+};
+
+/**
+ * Interpret MACD signal for trading decisions
+ * @param {object} macd - MACD object with macdLine, signalLine, histogram
+ * @returns {object} Signal interpretation with score adjustment
+ */
+const interpretMACD = (macd) => {
+    const { macdLine, signalLine, histogram } = macd;
+    
+    // Bullish crossover (MACD crosses above signal line)
+    if (macdLine > signalLine && histogram > 0) {
+        if (histogram > 0.5) {
+            return {
+                signal: 'STRONG_BULLISH',
+                description: 'Strong bullish MACD crossover',
+                scoreAdjustment: 10,
+                recommendation: 'BUY'
+            };
+        }
+        return {
+            signal: 'BULLISH',
+            description: 'Bullish MACD crossover',
+            scoreAdjustment: 6,
+            recommendation: 'BUY'
+        };
+    }
+    
+    // Bearish crossover (MACD crosses below signal line)
+    if (macdLine < signalLine && histogram < 0) {
+        if (histogram < -0.5) {
+            return {
+                signal: 'STRONG_BEARISH',
+                description: 'Strong bearish MACD crossover',
+                scoreAdjustment: -10,
+                recommendation: 'SELL'
+            };
+        }
+        return {
+            signal: 'BEARISH',
+            description: 'Bearish MACD crossover',
+            scoreAdjustment: -6,
+            recommendation: 'SELL'
+        };
+    }
+    
+    // Neutral
+    return {
+        signal: 'NEUTRAL',
+        description: 'MACD showing no clear trend',
+        scoreAdjustment: 0,
+        recommendation: 'HOLD'
+    };
+};
+
+/**
+ * Calculate EMA (Exponential Moving Average)
+ * @param {array} data - Array of price data
+ * @param {number} period - EMA period
+ * @returns {number} Current EMA value
+ */
+const calculateEMA = (data, period) => {
+    if (data.length < period) return data[data.length - 1];
+    
+    const multiplier = 2 / (period + 1);
+    let ema = data.slice(0, period).reduce((sum, val) => sum + val, 0) / period;
+    
+    for (let i = period; i < data.length; i++) {
+        ema = (data[i] - ema) * multiplier + ema;
+    }
+    
+    return ema;
+};
+
+/**
+ * Calculate Bollinger Bands from array of prices
+ * @param {array} prices - Array of closing prices
+ * @param {number} period - SMA period (default 20)
+ * @param {number} multiplier - Std dev multiplier (default 2)
+ * @returns {object} { upper, middle, lower, width, percentB }
+ */
+const calculateBollingerBands = (prices, period = 20, multiplier = 2) => {
+    if (prices.length < period) {
+        const last = prices[prices.length - 1] || 0;
+        return { upper: last, middle: last, lower: last, width: 0, percentB: 0.5 };
+    }
+
+    const recentPrices = prices.slice(-period);
+    const sma = recentPrices.reduce((a, b) => a + b, 0) / period;
+    const variance = recentPrices.reduce((sum, p) => sum + Math.pow(p - sma, 2), 0) / period;
+    const stdDev = Math.sqrt(variance);
+
+    const upper = sma + multiplier * stdDev;
+    const lower = sma - multiplier * stdDev;
+    const currentPrice = prices[prices.length - 1];
+    const bandWidth = upper - lower;
+    const percentB = bandWidth > 0 ? (currentPrice - lower) / bandWidth : 0.5;
+    const width = sma > 0 ? bandWidth / sma : 0; // Normalized band width
+
+    return { upper, middle: sma, lower, width, percentB, stdDev };
+};
+
+/**
+ * Interpret Bollinger Bands for trading signal scoring
+ * @param {object} bb - Bollinger bands object from calculateBollingerBands
+ * @returns {object} { signal, scoreAdjustment, description }
+ */
+const interpretBollingerBands = (bb) => {
+    const { percentB, width } = bb;
+
+    // Squeeze (low width) = volatility contraction, breakout coming
+    if (width < 0.05) {
+        return { signal: 'SQUEEZE', scoreAdjustment: 3, description: 'Bollinger squeeze - breakout imminent' };
+    }
+    // Price near or below lower band = oversold / potential bounce
+    if (percentB < 0.05) {
+        return { signal: 'OVERSOLD', scoreAdjustment: 12, description: `Price at/below lower BB (percentB: ${percentB.toFixed(2)})` };
+    }
+    if (percentB < 0.20) {
+        return { signal: 'NEAR_LOWER', scoreAdjustment: 7, description: `Price near lower BB (percentB: ${percentB.toFixed(2)})` };
+    }
+    // Price near or above upper band = overbought
+    if (percentB > 0.95) {
+        return { signal: 'OVERBOUGHT', scoreAdjustment: -10, description: `Price at/above upper BB (percentB: ${percentB.toFixed(2)})` };
+    }
+    if (percentB > 0.80) {
+        return { signal: 'NEAR_UPPER', scoreAdjustment: -4, description: `Price near upper BB (percentB: ${percentB.toFixed(2)})` };
+    }
+    // Price in middle zone (40-60%) = neutral
+    if (percentB >= 0.40 && percentB <= 0.60) {
+        return { signal: 'NEUTRAL', scoreAdjustment: 0, description: 'Price in middle of Bollinger Bands' };
+    }
+    // Lower half but not extreme
+    if (percentB < 0.40) {
+        return { signal: 'MILD_OVERSOLD', scoreAdjustment: 3, description: `Price in lower half BB (percentB: ${percentB.toFixed(2)})` };
+    }
+    return { signal: 'MILD_OVERBOUGHT', scoreAdjustment: -2, description: `Price in upper half BB (percentB: ${percentB.toFixed(2)})` };
+};
+
 module.exports = {
+    // Original functions (for chart data with time/close objects)
     calculateRSI,
     calculateMACD,
+    calculateATR,
+
+    // Simple functions (for price arrays)
+    calculateSimpleRSI,
+    calculateSimpleMACD,
+    calculateSimpleATR,
+
+    // Bollinger Bands
+    calculateBollingerBands,
+    interpretBollingerBands,
+
+    // Interpretation and utility functions
+    calculateEMA,
+    interpretRSI,
+    interpretMACD,
+
+    // Pattern detection
     detectSupportResistance,
     detectRSIDivergence,
     calculateAverageVolume,
     detectVolumeSpikes,
     detectPatterns,
-    calculateRiskReward,
-    calculateATR
+    calculateRiskReward
 };

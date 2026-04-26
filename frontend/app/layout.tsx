@@ -3,6 +3,7 @@ import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import { NotificationProvider } from './contexts/NotificationContext';
 import { ThemeProvider } from './contexts/ThemeContext';
+import AuthGuard from './components/AuthGuard';
 
 const inter = Inter({ subsets: ['latin'] });
 
@@ -40,7 +41,9 @@ export default function RootLayout({
       <body className={`${inter.className} antialiased`}>
         <ThemeProvider>
           <NotificationProvider>
-            {children}
+            <AuthGuard>
+              {children}
+            </AuthGuard>
           </NotificationProvider>
         </ThemeProvider>
       </body>

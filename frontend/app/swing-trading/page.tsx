@@ -109,7 +109,7 @@ export default function SwingTradingPage() {
       const symbols = scanInput.split(',').map(s => s.trim().toUpperCase()).filter(s => s);
       const token = localStorage.getItem('token');
       
-  const response = fetch(`${getApiBaseUrl()}/api/swing-trading/scan`, {
+      const response = await fetch(`${getApiBaseUrl()}/api/swing-trading/scan`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,

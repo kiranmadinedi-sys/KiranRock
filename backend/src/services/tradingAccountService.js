@@ -3,55 +3,68 @@
  */
 const resetBalance = async (userId, amount) => {
     try {
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const userIndex = users.findIndex(u => u.id === userId);
-        if (userIndex === -1) {
-            throw new Error('User not found');
+        // Get or create trading account
+        let accountResult = await query(
+            'SELECT id FROM trading_accounts WHERE user_id = $1',
+            [userId]
+        );
+        
+        if (accountResult.rows.length === 0) {
+            // Create new trading account
+            await query(
+                'INSERT INTO trading_accounts (user_id, balance) VALUES ($1, $2)',
+                [userId, amount]
+            );
+        } else {
+            // Update existing balance
+            await query(
+                'UPDATE trading_accounts SET balance = $1, updated_at = NOW() WHERE user_id = $2',
+                [amount, userId]
+            );
         }
-        // Always ensure tradingAccount exists for the user
-        if (!users[userIndex].tradingAccount) {
-            users[userIndex].tradingAccount = {
-                balance: 0,
-                totalDeposited: 0,
-                totalWithdrawn: 0,
-                deposits: [],
-                withdrawals: []
-            };
+        
+        // Clear all previous deposit/withdrawal transactions
+        await query(
+            "DELETE FROM trades WHERE user_id = $1 AND symbol IN ('DEPOSIT', 'WITHDRAWAL')",
+            [userId]
+        );
+        
+        // Record new initial deposit if amount > 0
+        if (amount > 0) {
+            await query(
+                `INSERT INTO trades (user_id, symbol, action, quantity, price, total, trade_date, executed_by, notes) 
+                 VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8)`,
+                [userId, 'DEPOSIT', 'DEPOSIT', 1, amount, amount, 'SYSTEM', 'Balance reset']
+            );
         }
-        // Only reset the balance for the specific user making the request
-        users[userIndex].tradingAccount.balance = amount;
-        users[userIndex].tradingAccount.totalDeposited = amount;
-        users[userIndex].tradingAccount.totalWithdrawn = 0;
-        users[userIndex].tradingAccount.deposits = [];
-        users[userIndex].tradingAccount.withdrawals = [];
-        await fs.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
+        
         return { success: true, newBalance: amount };
     } catch (error) {
         console.error('Error resetting balance:', error);
         throw error;
     }
 };
-const fs = require('fs').promises;
-const path = require('path');
-
-const USERS_FILE = path.join(__dirname, '../../users.json');
+const { query } = require('../config/database');
 
 /**
  * Get trading account balance and info
  */
 const getTradingAccount = async (userId) => {
     try {
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const user = users.find(u => u.id === userId);
+        // Get trading account from database
+        const result = await query(
+            'SELECT id, user_id, balance, created_at, updated_at FROM trading_accounts WHERE user_id = $1',
+            [userId]
+        );
         
-        if (!user) {
-            throw new Error('User not found');
-        }
-        
-        // Initialize if doesn't exist
-        if (!user.tradingAccount) {
-            user.tradingAccount = {
-                balance: 100000,
+        if (result.rows.length === 0) {
+            // Create new trading account with default balance
+            const insertResult = await query(
+                'INSERT INTO trading_accounts (user_id, balance) VALUES ($1, $2) RETURNING id, user_id, balance, created_at, updated_at',
+                [userId, 100000]
+            );
+            return {
+                balance: insertResult.rows[0].balance,
                 totalDeposited: 100000,
                 totalWithdrawn: 0,
                 deposits: [],
@@ -59,7 +72,37 @@ const getTradingAccount = async (userId) => {
             };
         }
         
-        return user.tradingAccount;
+        const account = result.rows[0];
+        
+        // Get transaction history
+        const deposits = await query(
+            'SELECT total as amount, trade_date as timestamp FROM trades WHERE user_id = $1 AND symbol = $2 ORDER BY trade_date DESC',
+            [userId, 'DEPOSIT']
+        );
+        
+        const withdrawals = await query(
+            'SELECT total as amount, trade_date as timestamp FROM trades WHERE user_id = $1 AND symbol = $2 ORDER BY trade_date DESC',
+            [userId, 'WITHDRAWAL']
+        );
+        
+        const totalDeposited = deposits.rows.reduce((sum, d) => sum + parseFloat(d.amount), 0);
+        const totalWithdrawn = withdrawals.rows.reduce((sum, w) => sum + parseFloat(w.amount), 0);
+        
+        return {
+            balance: parseFloat(account.balance),
+            totalDeposited,
+            totalWithdrawn,
+            deposits: deposits.rows.map(d => ({
+                amount: parseFloat(d.amount),
+                timestamp: d.timestamp,
+                type: 'deposit'
+            })),
+            withdrawals: withdrawals.rows.map(w => ({
+                amount: parseFloat(w.amount),
+                timestamp: w.timestamp,
+                type: 'withdrawal'
+            }))
+        };
     } catch (error) {
         console.error('Error getting trading account:', error);
         throw error;
@@ -75,46 +118,48 @@ const depositFunds = async (userId, amount) => {
             throw new Error('Deposit amount must be positive');
         }
         
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const userIndex = users.findIndex(u => u.id === userId);
+        // Get or create trading account
+        let accountResult = await query(
+            'SELECT id, balance FROM trading_accounts WHERE user_id = $1',
+            [userId]
+        );
         
-        if (userIndex === -1) {
-            throw new Error('User not found');
+        if (accountResult.rows.length === 0) {
+            // Create new trading account
+            accountResult = await query(
+                'INSERT INTO trading_accounts (user_id, balance) VALUES ($1, $2) RETURNING id, balance',
+                [userId, 0]
+            );
         }
         
-        // Initialize trading account if needed
-        if (!users[userIndex].tradingAccount) {
-            users[userIndex].tradingAccount = {
-                balance: 0,
-                totalDeposited: 0,
-                totalWithdrawn: 0,
-                deposits: [],
-                withdrawals: []
-            };
-        }
+        const account = accountResult.rows[0];
+        const newBalance = parseFloat(account.balance) + amount;
         
-        const account = users[userIndex].tradingAccount;
+        // Update balance
+        await query(
+            'UPDATE trading_accounts SET balance = $1, updated_at = NOW() WHERE user_id = $2',
+            [newBalance, userId]
+        );
         
-        // Add deposit
-        const deposit = {
-            id: Date.now().toString(),
-            amount,
-            timestamp: new Date().toISOString(),
-            type: 'deposit'
-        };
+        // Record deposit transaction
+        const depositResult = await query(
+            `INSERT INTO trades (user_id, symbol, action, quantity, price, total, trade_date, executed_by, notes) 
+             VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8) 
+             RETURNING id, total as amount, trade_date as timestamp`,
+            [userId, 'DEPOSIT', 'DEPOSIT', 1, amount, amount, 'USER', 'Account deposit']
+        );
         
-        account.balance += amount;
-        account.totalDeposited += amount;
-        
-        if (!account.deposits) account.deposits = [];
-        account.deposits.push(deposit);
-        
-        await fs.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
+        const deposit = depositResult.rows[0];
         
         return {
             success: true,
-            transaction: deposit,
-            newBalance: account.balance
+            transaction: {
+                id: deposit.id.toString(),
+                amount: parseFloat(deposit.amount),
+                timestamp: deposit.timestamp,
+                type: 'deposit'
+            },
+            newBalance
         };
     } catch (error) {
         console.error('Error depositing funds:', error);
@@ -131,39 +176,50 @@ const withdrawFunds = async (userId, amount) => {
             throw new Error('Withdrawal amount must be positive');
         }
         
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const userIndex = users.findIndex(u => u.id === userId);
+        // Get trading account
+        const accountResult = await query(
+            'SELECT id, balance FROM trading_accounts WHERE user_id = $1',
+            [userId]
+        );
         
-        if (userIndex === -1) {
-            throw new Error('User not found');
+        if (accountResult.rows.length === 0) {
+            throw new Error('Trading account not found');
         }
         
-        const account = users[userIndex].tradingAccount;
+        const account = accountResult.rows[0];
+        const currentBalance = parseFloat(account.balance);
         
-        if (!account || account.balance < amount) {
+        if (currentBalance < amount) {
             throw new Error('Insufficient funds');
         }
         
-        // Add withdrawal
-        const withdrawal = {
-            id: Date.now().toString(),
-            amount,
-            timestamp: new Date().toISOString(),
-            type: 'withdrawal'
-        };
+        const newBalance = currentBalance - amount;
         
-        account.balance -= amount;
-        account.totalWithdrawn += amount;
+        // Update balance
+        await query(
+            'UPDATE trading_accounts SET balance = $1, updated_at = NOW() WHERE user_id = $2',
+            [newBalance, userId]
+        );
         
-        if (!account.withdrawals) account.withdrawals = [];
-        account.withdrawals.push(withdrawal);
+        // Record withdrawal transaction
+        const withdrawalResult = await query(
+            `INSERT INTO trades (user_id, symbol, action, quantity, price, total, trade_date, executed_by, notes) 
+             VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8) 
+             RETURNING id, total as amount, trade_date as timestamp`,
+            [userId, 'WITHDRAWAL', 'WITHDRAWAL', 1, amount, amount, 'USER', 'Account withdrawal']
+        );
         
-        await fs.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
+        const withdrawal = withdrawalResult.rows[0];
         
         return {
             success: true,
-            transaction: withdrawal,
-            newBalance: account.balance
+            transaction: {
+                id: withdrawal.id.toString(),
+                amount: parseFloat(withdrawal.amount),
+                timestamp: withdrawal.timestamp,
+                type: 'withdrawal'
+            },
+            newBalance
         };
     } catch (error) {
         console.error('Error withdrawing funds:', error);
@@ -176,21 +232,22 @@ const withdrawFunds = async (userId, amount) => {
  */
 const getTransactionHistory = async (userId) => {
     try {
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const user = users.find(u => u.id === userId);
-        
-        if (!user || !user.tradingAccount) {
-            return [];
-        }
-        
-        const deposits = user.tradingAccount.deposits || [];
-        const withdrawals = user.tradingAccount.withdrawals || [];
-        
-        const all = [...deposits, ...withdrawals].sort((a, b) => 
-            new Date(b.timestamp) - new Date(a.timestamp)
+        // Get all deposit and withdrawal transactions
+        const result = await query(
+            `SELECT id, total as amount, trade_date as timestamp, 
+                    CASE WHEN symbol = 'DEPOSIT' THEN 'deposit' ELSE 'withdrawal' END as type 
+             FROM trades 
+             WHERE user_id = $1 AND symbol IN ('DEPOSIT', 'WITHDRAWAL')
+             ORDER BY trade_date DESC`,
+            [userId]
         );
         
-        return all;
+        return result.rows.map(row => ({
+            id: row.id.toString(),
+            amount: parseFloat(row.amount),
+            timestamp: row.timestamp,
+            type: row.type
+        }));
     } catch (error) {
         console.error('Error getting transaction history:', error);
         throw error;
@@ -202,23 +259,24 @@ const getTransactionHistory = async (userId) => {
  */
 const clearAllPortfolio = async (userId) => {
     try {
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const userIndex = users.findIndex(u => u.id === userId);
+        // Reset trading account balance to zero
+        await query(
+            'UPDATE trading_accounts SET balance = $1, updated_at = NOW() WHERE user_id = $2',
+            [0, userId]
+        );
         
-        if (userIndex === -1) {
-            throw new Error('User not found');
-        }
+        // Clear all transactions
+        await query(
+            'DELETE FROM trades WHERE user_id = $1',
+            [userId]
+        );
         
-        // Reset trading account to zero
-        users[userIndex].tradingAccount = {
-            balance: 0,
-            totalDeposited: 0,
-            totalWithdrawn: 0,
-            deposits: [],
-            withdrawals: []
-        };
+        // Clear all holdings
+        await query(
+            'DELETE FROM holdings WHERE user_id = $1',
+            [userId]
+        );
         
-        await fs.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
         return { success: true, message: 'Portfolio cleared successfully' };
     } catch (error) {
         console.error('Error clearing portfolio:', error);

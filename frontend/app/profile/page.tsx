@@ -53,11 +53,11 @@ export default function ProfilePage() {
     useEffect(() => {
         const storedToken = localStorage.getItem('token');
         if (!storedToken) {
-            router.push('/login');
-        } else {
-            setToken(storedToken);
+            window.location.href = '/login';
+            return;
         }
-    }, [router]);
+        setToken(storedToken);
+    }, []);
 
     useEffect(() => {
         if (!token) return;
@@ -67,7 +67,7 @@ export default function ProfilePage() {
     const fetchProfile = async () => {
         setLoading(true);
         try {
-            const response = fetch(`${getApiBaseUrl()}/api/profile`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/profile`, {
                 headers: { Authorization: `Bearer ${token}` }
             });
             if (response.ok) {
@@ -78,11 +78,13 @@ export default function ProfilePage() {
                 setEmail(data.email || '');
                 setPhone(data.phone || '');
                 setAiTradingEnabled(data.aiTradingEnabled || false);
+                setAiTradingLoading(false); // Reset loading state
             }
         } catch (error) {
             console.error('Failed to fetch profile:', error);
         } finally {
             setLoading(false);
+            setAiTradingLoading(false); // Reset loading state
         }
     };
 
@@ -90,7 +92,7 @@ export default function ProfilePage() {
         e.preventDefault();
         setSaving(true);
         try {
-            const response = fetch(`${getApiBaseUrl()}/api/profile`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/profile`, {
                 method: 'PUT',
                 headers: {
                     'Content-Type': 'application/json',
@@ -132,7 +134,7 @@ export default function ProfilePage() {
         
         setSaving(true);
         try {
-            const response = fetch(`${getApiBaseUrl()}/api/profile/change-password`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/profile/change-password`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -160,9 +162,26 @@ export default function ProfilePage() {
     };
 
     const handleToggleAITrading = async () => {
+        if (aiTradingLoading) {
+            console.log('[AI Toggle] Already processing, ignoring click');
+            return;
+        }
+        
         setAiTradingLoading(true);
+        
+        // Safety timeout to reset loading state after 10 seconds
+        const timeoutId = setTimeout(() => {
+            console.error('[AI Toggle] Request timeout after 10 seconds');
+            setAiTradingLoading(false);
+            alert('Request timed out. Please try again.');
+        }, 10000);
+        
         try {
-            const response = fetch(`${getApiBaseUrl()}/api/profile/ai-trading/toggle`, {
+            console.log('[AI Toggle] Starting toggle request, current state:', aiTradingEnabled);
+            console.log('[AI Toggle] API URL:', getApiBaseUrl());
+            console.log('[AI Toggle] Token exists:', !!token);
+            
+            const response = await fetch(`${getApiBaseUrl()}/api/profile/ai-trading/toggle`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -171,26 +190,39 @@ export default function ProfilePage() {
                 body: JSON.stringify({ enabled: !aiTradingEnabled })
             });
             
+            console.log('[AI Toggle] Response status:', response.status);
+            console.log('[AI Toggle] Response ok:', response.ok);
+            
             const data = await response.json();
+            console.log('[AI Toggle] Response data:', data);
+            
+            clearTimeout(timeoutId);
             
             if (response.ok) {
                 setAiTradingEnabled(!aiTradingEnabled);
-                alert(data.message);
+                alert(data.message || 'AI Trading toggled successfully');
             } else {
-                alert(`Error: ${data.error}`);
+                console.error('[AI Toggle] Error response:', data);
+                alert(`Error: ${data.error || 'Unknown error occurred'}`);
             }
         } catch (error) {
-            console.error('Failed to toggle AI trading:', error);
-            alert('Failed to toggle AI trading');
+            clearTimeout(timeoutId);
+            console.error('[AI Toggle] Exception caught:', error);
+            alert(`Failed to toggle AI trading: ${error.message}`);
         } finally {
+            console.log('[AI Toggle] Resetting loading state');
             setAiTradingLoading(false);
         }
     };
 
     const handleLogout = () => {
         localStorage.removeItem('token');
-        setToken(null);
-        router.push('/login');
+        localStorage.removeItem('user');
+        // Clear cookie as well
+        document.cookie = 'token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+        // Set a flag to prevent immediate redirect on login page
+        sessionStorage.setItem('justLoggedOut', 'true');
+        window.location.replace('/login');
     };
 
     if (!token || loading) {

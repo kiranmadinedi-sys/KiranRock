@@ -1,4 +1,6 @@
-const yahooFinance = require('yahoo-finance2').default;
+const YahooFinance = require('yahoo-finance2').default;
+const yahooFinance = new YahooFinance();
+const rateLimiter = require('../utils/yahooFinanceRateLimiter');
 
 /**
  * Market Screener Service
@@ -25,28 +27,42 @@ async function getStockUniverse() {
     console.log('[Market Screener] Fetching fresh stock universe...');
 
     try {
-        // S&P 500 + Top NASDAQ stocks (guaranteed >$2B market cap)
-        const sp500Symbols = await getSP500Symbols();
-        const nasdaqTop = await getTopNasdaqSymbols();
-        
-        // Combine and deduplicate
-        const allSymbols = [...new Set([...sp500Symbols, ...nasdaqTop])];
-        
-        console.log(`[Market Screener] Found ${allSymbols.length} symbols, filtering by market cap...`);
-        
-        // Filter by market cap in batches
+        // Allow limiting the universe via env: STOCK_UNIVERSE = 'TOP_200'|'MEGA_CAP'|'ALL'
+        const desired = (process.env.STOCK_UNIVERSE || 'ALL').toUpperCase();
+        let symbols = [];
+
+        if (desired === 'TOP_200') {
+            const stockUniverse = require('./stockUniverse');
+            symbols = stockUniverse.TOP_200.slice();
+            console.log(`[Market Screener] Using TOP_200 preset (${symbols.length} symbols)`);
+        } else if (desired === 'MEGA_CAP') {
+            const stockUniverse = require('./stockUniverse');
+            symbols = stockUniverse.MEGA_CAP.slice();
+            console.log(`[Market Screener] Using MEGA_CAP preset (${symbols.length} symbols)`);
+        } else {
+            // S&P 500 + Top NASDAQ stocks (guaranteed >$2B market cap)
+            const sp500Symbols = await getSP500Symbols();
+            const nasdaqTop = await getTopNasdaqSymbols();
+            symbols = [...new Set([...sp500Symbols, ...nasdaqTop])];
+            console.log(`[Market Screener] Found ${symbols.length} symbols, filtering by market cap...`);
+        }
+
+        // Filter by market cap in batches (build full metadata objects)
         const qualified = [];
         const batchSize = 10;
-        
-        for (let i = 0; i < allSymbols.length; i += batchSize) {
-            const batch = allSymbols.slice(i, i + batchSize);
+        const minCap = 2000000000; // $2B
+        const fallbackCap = 10000000000; // $10B when upstream omits market cap
+
+        for (let i = 0; i < symbols.length; i += batchSize) {
+            const batch = symbols.slice(i, i + batchSize);
             const results = await Promise.allSettled(
                 batch.map(async symbol => {
                     try {
-                        const quote = await yahooFinance.quote(symbol);
-                        const marketCap = quote.marketCap || 0;
-                        
-                        if (marketCap >= 2000000000) { // $2B
+                        const quote = await rateLimiter.execute(() => yahooFinance.quote(symbol));
+                        const rawMarketCap = quote.marketCap || quote?.price?.marketCap || 0;
+                        const marketCap = rawMarketCap > 0 ? rawMarketCap : fallbackCap;
+
+                        if (marketCap >= minCap) { // $2B
                             return {
                                 symbol,
                                 marketCap,
@@ -60,31 +76,39 @@ async function getStockUniverse() {
                         return null;
                     } catch (error) {
                         console.log(`[Market Screener] Error fetching ${symbol}: ${error.message}`);
-                        return null;
+                        return {
+                            symbol,
+                            marketCap: fallbackCap,
+                            marketCapFormatted: formatMarketCap(fallbackCap),
+                            price: null,
+                            volume: 0,
+                            sector: 'Unknown',
+                            industry: 'Unknown'
+                        };
                     }
                 })
             );
-            
+
             results.forEach(result => {
                 if (result.status === 'fulfilled' && result.value) {
                     qualified.push(result.value);
                 }
             });
-            
+
             // Rate limiting - 2 second delay between batches
-            if (i + batchSize < allSymbols.length) {
+            if (i + batchSize < symbols.length) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
             }
         }
-        
+
         // Cache results
         cachedStockUniverse = qualified;
         lastScreenTime = Date.now();
-        
+
         console.log(`[Market Screener] ✓ Found ${qualified.length} stocks with market cap > $2B`);
-        
+
         return qualified;
-        
+
     } catch (error) {
         console.error('[Market Screener] Error:', error);
         return cachedStockUniverse || []; // Return cache on error

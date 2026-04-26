@@ -1,7 +1,7 @@
 const YahooFinance = require('yahoo-finance2').default;
+const yahooFinance = new YahooFinance();
 const axios = require('axios');
 const cheerio = require('cheerio');
-const yahooFinance = new YahooFinance();
 
 /**
  * Calculates the Relative Strength Index (RSI).

@@ -62,7 +62,7 @@ export default function ScenariosPage() {
       const results: ScenarioResult[] = [];
 
       for (const priceChange of scenarios) {
-  const response = fetch(`${getApiBaseUrl()}/api/scenarios/price-change`, {
+  const response = await fetch(`${getApiBaseUrl()}/api/scenarios/price-change`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -97,7 +97,7 @@ export default function ScenariosPage() {
     try {
       const token = localStorage.getItem('token');
       const option = buildOptionObject();
-  const response = fetch(`${getApiBaseUrl()}/api/scenarios/theta-decay`, {
+      const response = await fetch(`${getApiBaseUrl()}/api/scenarios/theta-decay`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -132,7 +132,7 @@ export default function ScenariosPage() {
     try {
       const token = localStorage.getItem('token');
       const option = buildOptionObject();
-  const response = fetch(`${getApiBaseUrl()}/api/scenarios/matrix`, {
+  const response = await fetch(`${getApiBaseUrl()}/api/scenarios/matrix`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -157,7 +157,7 @@ export default function ScenariosPage() {
       setMatrixResults(results);
       
       // Calculate risk metrics
-  const riskResp = fetch(`${getApiBaseUrl()}/api/scenarios/risk-metrics`, {
+  const riskResp = await fetch(`${getApiBaseUrl()}/api/scenarios/risk-metrics`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

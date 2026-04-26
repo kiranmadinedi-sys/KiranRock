@@ -1,6 +1,7 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const { fetchXSymbolNews, fetchXMarketNews, isXConfigured } = require('./xNewsService');
 
 // Cache file for news to avoid hitting rate limits
 const NEWS_CACHE_FILE = path.join(__dirname, '../storage/newsCache.json');
@@ -19,22 +20,41 @@ function readCache() {
     try {
         if (fs.existsSync(NEWS_CACHE_FILE)) {
             const data = fs.readFileSync(NEWS_CACHE_FILE, 'utf-8');
-            return JSON.parse(data);
+            const parsed = JSON.parse(data);
+            if (parsed && parsed.entries) {
+                return parsed;
+            }
+            if (parsed && Array.isArray(parsed.news)) {
+                return {
+                    entries: {
+                        ALL: {
+                            timestamp: parsed.timestamp || 0,
+                            news: parsed.news
+                        }
+                    }
+                };
+            }
         }
     } catch (error) {
         console.error('Error reading news cache:', error);
     }
-    return { timestamp: 0, news: [] };
+    return { entries: {} };
 }
 
 /**
  * Write news to cache
  */
-function writeCache(news) {
+function writeCache(scopeKey, news) {
     try {
-        fs.writeFileSync(NEWS_CACHE_FILE, JSON.stringify({
+        const existing = readCache();
+        const entries = existing.entries || {};
+        entries[scopeKey] = {
             timestamp: Date.now(),
             news
+        };
+
+        fs.writeFileSync(NEWS_CACHE_FILE, JSON.stringify({
+            entries
         }, null, 2));
     } catch (error) {
         console.error('Error writing news cache:', error);
@@ -44,8 +64,28 @@ function writeCache(news) {
 /**
  * Check if cache is valid
  */
-function isCacheValid(cache) {
-    return cache.timestamp && (Date.now() - cache.timestamp < CACHE_DURATION);
+function isCacheValid(entry) {
+    return entry && entry.timestamp && (Date.now() - entry.timestamp < CACHE_DURATION);
+}
+
+function buildScopeKey(tickers = null) {
+    if (!tickers || !Array.isArray(tickers) || tickers.length === 0) {
+        return 'ALL';
+    }
+
+    return tickers
+        .map(ticker => String(ticker || '').trim().toUpperCase())
+        .filter(Boolean)
+        .sort()
+        .join(',');
+}
+
+function getCacheEntry(cache, scopeKey) {
+    if (!cache || !cache.entries) {
+        return null;
+    }
+
+    return cache.entries[scopeKey] || null;
 }
 
 /**
@@ -371,6 +411,16 @@ async function aggregateAllNews(tickers = null) {
             });
         }
 
+        // Optional X/Twitter source
+        if (isXConfigured()) {
+            fetchPromises.push(fetchXMarketNews());
+            if (tickers && Array.isArray(tickers)) {
+                tickers.slice(0, 5).forEach(ticker => {
+                    fetchPromises.push(fetchXSymbolNews(ticker));
+                });
+            }
+        }
+
         // Fetch from paid APIs if configured
         fetchPromises.push(fetchAlphaVantageNews(tickers));
         fetchPromises.push(fetchFinnhubNews('general'));
@@ -423,12 +473,15 @@ async function aggregateAllNews(tickers = null) {
  * Get aggregated news with caching
  */
 async function getAggregatedNews(tickers = null, forceRefresh = false) {
+    const scopeKey = buildScopeKey(tickers);
+
     // Check cache first
     if (!forceRefresh) {
         const cache = readCache();
-        if (isCacheValid(cache) && cache.news.length > 0) {
+        const entry = getCacheEntry(cache, scopeKey);
+        if (isCacheValid(entry) && entry.news.length > 0) {
             console.log('[News Aggregation] Using cached data');
-            return cache.news;
+            return entry.news;
         }
     }
 
@@ -437,7 +490,7 @@ async function getAggregatedNews(tickers = null, forceRefresh = false) {
     
     // Cache it
     if (news.length > 0) {
-        writeCache(news);
+        writeCache(scopeKey, news);
     }
 
     return news;
@@ -485,5 +538,7 @@ module.exports = {
     fetchYahooMarketNews,
     fetchAlphaVantageNews,
     fetchFinnhubNews,
-    fetchNewsAPIMarketNews
+    fetchNewsAPIMarketNews,
+    fetchXSymbolNews,
+    fetchXMarketNews
 };

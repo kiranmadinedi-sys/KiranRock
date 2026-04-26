@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import StockSearch from './StockSearch';
 import ThemeToggle from './ThemeToggle';
+import { clearAuthToken } from '../utils/session';
 
 interface AppHeaderProps {
     onSelectStock?: (symbol: string) => void;
@@ -52,9 +53,12 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
     }, []);
 
     const handleLogout = () => {
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
-        router.push('/login');
+        clearAuthToken();
+        // Clear cookie as well
+        document.cookie = 'token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+        // Set a flag to prevent immediate redirect on login page
+        sessionStorage.setItem('justLoggedOut', 'true');
+        window.location.replace('/login');
     };
 
     const getMarketStatusColor = () => {
@@ -78,10 +82,12 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
     const navItems = [
         { href: '/dashboard', label: 'Dashboard', icon: '📊' },
         { href: '/portfolio', label: 'Portfolio', icon: '💼' },
+        { href: '/recommendations', label: 'Recommendations', icon: '🎯' },
         { href: '/alerts', label: 'Alerts', icon: '🔔' },
         { href: '/news', label: 'News', icon: '📰' },
         { href: '/weekly', label: 'Next Week', icon: '📅' },
         { href: '/ai-trading', label: 'AI Trading', icon: '🤖' },
+        { href: '/options-bot', label: 'Options Bot', icon: '🤖' },
         { href: '/swing-trading', label: 'Swing', icon: '📈' },
         { href: '/backtest', label: 'Backtest', icon: '📊' },
         { href: '/scalping', label: 'Scalping', icon: '⚡' },

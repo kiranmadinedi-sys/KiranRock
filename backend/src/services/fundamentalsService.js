@@ -1,5 +1,5 @@
-const YahooFinance = require('yahoo-finance2').default;
-const yahooFinance = new YahooFinance();
+const yfClient = require('../utils/yfClient');
+const rateLimiter = require('../utils/yahooFinanceRateLimiter');
 
 /**
  * Fetches fundamental data for a stock.
@@ -10,17 +10,20 @@ const getFundamentals = async (symbol) => {
     try {
         console.log(`Fetching fundamentals for ${symbol}...`);
         
-        const quoteSummary = await yahooFinance.quoteSummary(symbol, {
-            modules: [
-                'summaryDetail',
-                'defaultKeyStatistics',
-                'financialData',
-                'earningsHistory',
-                'earnings',
-                'price',
-                'recommendationTrend',
-                'assetProfile'
-            ]
+        // Apply rate limiting before each request; use yfClient.quoteSummary (with retry + cache)
+        const quoteSummary = await rateLimiter.execute(async () => {
+            return await yfClient.quoteSummary(symbol, {
+                modules: [
+                    'summaryDetail',
+                    'defaultKeyStatistics',
+                    'financialData',
+                    'earningsHistory',
+                    'earnings',
+                    'price',
+                    'recommendationTrend',
+                    'assetProfile'
+                ]
+            });
         });
 
         console.log(`Successfully fetched data for ${symbol}`);

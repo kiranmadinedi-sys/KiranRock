@@ -1,14 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   // Allow external access
-  experimental: {
-    // Enable external access from any host
-  },
-  // Server Actions are enabled by default in Next.js 14
-  serverActions: {
-    allowedOrigins: ['*'],
-    bodySizeLimit: '2mb',
-  },
+  experimental: {},
   // Suppress origin header warnings
   onDemandEntries: {
     maxInactiveAge: 25 * 1000,

@@ -1,5 +1,6 @@
 const axios = require('axios');
 const stockDataService = require('./stockDataService');
+const { logger } = require('../utils/logger');
 
 /**
  * Multi-Model AI Prediction Service
@@ -37,42 +38,144 @@ const MODELS = {
     }
 };
 
-const API_TIMEOUT = 5000; // 5 seconds per model
+// Per-model timeout (axios) + master ensemble timeout to prevent 20s waits
+const API_TIMEOUT = 5000;          // 5s per external model call
+const ENSEMBLE_TIMEOUT = 7000;     // 7s hard cap for the whole ensemble
+const PROVIDER_429_THRESHOLD = Number(process.env.AI_PROVIDER_429_THRESHOLD || 3);
+const PROVIDER_COOLDOWN_MS = Number(process.env.AI_PROVIDER_COOLDOWN_MS || 10 * 60 * 1000);
+const PROVIDER_LOG_THROTTLE_MS = Number(process.env.AI_PROVIDER_LOG_THROTTLE_MS || 60 * 1000);
+
+const providerState = {
+    FINBERT: {
+        consecutive429: 0,
+        cooldownUntil: 0,
+        lastSkipLogAt: 0,
+        lastErrorLogAt: 0
+    },
+    DISTILBERT: {
+        consecutive429: 0,
+        cooldownUntil: 0,
+        lastSkipLogAt: 0,
+        lastErrorLogAt: 0
+    }
+};
+
+function is429Error(error) {
+    const status = error?.response?.status;
+    if (status === 429) {
+        return true;
+    }
+
+    const message = String(error?.message || '').toLowerCase();
+    return message.includes('429') || message.includes('too many requests');
+}
+
+function shouldUseProvider(providerKey) {
+    const state = providerState[providerKey];
+    const now = Date.now();
+
+    if (state.cooldownUntil > now) {
+        if (now - state.lastSkipLogAt > PROVIDER_LOG_THROTTLE_MS) {
+            const waitSec = Math.ceil((state.cooldownUntil - now) / 1000);
+            logger.info(`[Multi-Model AI] ${providerKey} cooling down after 429 burst`, {
+                provider: providerKey,
+                waitSeconds: waitSec
+            });
+            state.lastSkipLogAt = now;
+        }
+        return false;
+    }
+
+    return true;
+}
+
+function markProviderSuccess(providerKey) {
+    const state = providerState[providerKey];
+    state.consecutive429 = 0;
+}
+
+function markProvider429(providerKey) {
+    const state = providerState[providerKey];
+    state.consecutive429 += 1;
+
+    if (state.consecutive429 >= PROVIDER_429_THRESHOLD) {
+        state.cooldownUntil = Date.now() + PROVIDER_COOLDOWN_MS;
+        state.consecutive429 = 0;
+
+        logger.warn(`[Multi-Model AI] ${providerKey} entered cooldown due to repeated 429`, {
+            provider: providerKey,
+            cooldownMs: PROVIDER_COOLDOWN_MS,
+            threshold: PROVIDER_429_THRESHOLD
+        });
+    }
+}
+
+function markProviderNon429Error(providerKey, error) {
+    const state = providerState[providerKey];
+    const now = Date.now();
+
+    if (now - state.lastErrorLogAt > PROVIDER_LOG_THROTTLE_MS) {
+        logger.warn(`[Multi-Model AI] ${providerKey} unavailable`, { error: error.message });
+        state.lastErrorLogAt = now;
+    }
+}
+
+/**
+ * Race a promise against a timeout, resolving to null on timeout
+ */
+function withTimeout(promise, ms) {
+    return Promise.race([
+        promise,
+        new Promise(resolve => setTimeout(() => resolve(null), ms))
+    ]);
+}
 
 /**
  * Main multi-model prediction function
- * Combines multiple AI models for robust predictions
+ * Combines multiple AI models for robust predictions.
+ * A single 7-second master timeout guards the entire ensemble so that
+ * slow/hanging external models can't block the caller indefinitely.
  */
 const getMultiModelPrediction = async (symbol, newsData = null) => {
     try {
-        console.log(`[Multi-Model AI] Starting ensemble prediction for ${symbol}...`);
-        
+        logger.info('[Multi-Model AI] Starting ensemble prediction', { symbol });
+
         // Get historical data
         const stockData = await stockDataService.getStockData(symbol, '1d');
         if (stockData.length < 20) {
             return getAgenticFallback(symbol, stockData);
         }
 
-        // Extract latest price data
-        const latestPrice = stockData[stockData.length - 1]?.close || 0;
-        const prices = stockData.map(d => d.close);
-        
-        // Parallel execution of all models
-        const [
-            finbertResult,
-            distilbertResult,
-            technicalAgentResult,
-            momentumAgentResult
-        ] = await Promise.allSettled([
-            callFinBERT(symbol, stockData, newsData),
-            callDistilBERT(symbol, stockData, newsData),
-            runTechnicalAgent(symbol, stockData),
-            runMomentumAgent(symbol, stockData)
-        ]);
+        // Run all four models in parallel, each with its own timeout via axios,
+        // and the whole block additionally guarded by a single master timeout.
+        const ensembleWork = async () => {
+            const [
+                finbertResult,
+                distilbertResult,
+                technicalAgentResult,
+                momentumAgentResult
+            ] = await Promise.allSettled([
+                callFinBERT(symbol, stockData, newsData),
+                callDistilBERT(symbol, stockData, newsData),
+                runTechnicalAgent(symbol, stockData),
+                runMomentumAgent(symbol, stockData)
+            ]);
+            return { finbertResult, distilbertResult, technicalAgentResult, momentumAgentResult };
+        };
+
+        const results = await withTimeout(ensembleWork(), ENSEMBLE_TIMEOUT);
+
+        // If the master timeout fired, fall back to local agents only
+        if (!results) {
+            logger.warn('[Multi-Model AI] Ensemble timeout — falling back to local agents', { symbol });
+            return getAgenticFallback(symbol, stockData, newsData);
+        }
+
+        const { finbertResult, distilbertResult, technicalAgentResult, momentumAgentResult } = results;
 
         // Collect successful predictions
         const predictions = [];
-        
+
         if (finbertResult.status === 'fulfilled' && finbertResult.value) {
             predictions.push({
                 model: MODELS.FINBERT.name,
@@ -81,7 +184,7 @@ const getMultiModelPrediction = async (symbol, newsData = null) => {
                 weight: MODELS.FINBERT.weight,
                 reasoning: finbertResult.value.reasoning
             });
-            console.log(`[Multi-Model AI] ✅ FinBERT: ${finbertResult.value.signal} (${finbertResult.value.confidence}%)`);
+            logger.info('[Multi-Model AI] FinBERT result', { symbol, signal: finbertResult.value.signal, confidence: finbertResult.value.confidence });
         }
 
         if (distilbertResult.status === 'fulfilled' && distilbertResult.value) {
@@ -92,7 +195,7 @@ const getMultiModelPrediction = async (symbol, newsData = null) => {
                 weight: MODELS.DISTILBERT.weight,
                 reasoning: distilbertResult.value.reasoning
             });
-            console.log(`[Multi-Model AI] ✅ DistilBERT: ${distilbertResult.value.signal} (${distilbertResult.value.confidence}%)`);
+            logger.info('[Multi-Model AI] DistilBERT result', { symbol, signal: distilbertResult.value.signal, confidence: distilbertResult.value.confidence });
         }
 
         if (technicalAgentResult.status === 'fulfilled') {
@@ -103,7 +206,7 @@ const getMultiModelPrediction = async (symbol, newsData = null) => {
                 weight: MODELS.TECHNICAL_AGENT.weight,
                 reasoning: technicalAgentResult.value.reasoning
             });
-            console.log(`[Multi-Model AI] ✅ Technical Agent: ${technicalAgentResult.value.signal} (${technicalAgentResult.value.confidence}%)`);
+            logger.info('[Multi-Model AI] Technical Agent result', { symbol, signal: technicalAgentResult.value.signal });
         }
 
         if (momentumAgentResult.status === 'fulfilled') {
@@ -114,12 +217,12 @@ const getMultiModelPrediction = async (symbol, newsData = null) => {
                 weight: MODELS.MOMENTUM_AGENT.weight,
                 reasoning: momentumAgentResult.value.reasoning
             });
-            console.log(`[Multi-Model AI] ✅ Momentum Agent: ${momentumAgentResult.value.signal} (${momentumAgentResult.value.confidence}%)`);
+            logger.info('[Multi-Model AI] Momentum Agent result', { symbol, signal: momentumAgentResult.value.signal });
         }
 
-        // If no models succeeded, use fallback
+        // If no models succeeded, use local fallback
         if (predictions.length === 0) {
-            console.log('[Multi-Model AI] ⚠️ All models failed, using fallback');
+            logger.warn('[Multi-Model AI] All external models failed, using local fallback', { symbol });
             return getAgenticFallback(symbol, stockData, newsData);
         }
 
@@ -138,7 +241,7 @@ const getMultiModelPrediction = async (symbol, newsData = null) => {
         };
 
     } catch (error) {
-        console.error(`[Multi-Model AI] Error for ${symbol}:`, error.message);
+        logger.error('[Multi-Model AI] Prediction error', { symbol, error: error.message });
         return getAgenticFallback(symbol, [], newsData);
     }
 };
@@ -147,6 +250,10 @@ const getMultiModelPrediction = async (symbol, newsData = null) => {
  * FinBERT Model - Financial sentiment analysis
  */
 const callFinBERT = async (symbol, stockData, newsData) => {
+    if (!shouldUseProvider('FINBERT')) {
+        return null;
+    }
+
     try {
         const analysisText = constructFinancialAnalysis(symbol, stockData, newsData);
         
@@ -163,6 +270,7 @@ const callFinBERT = async (symbol, stockData, newsData) => {
         );
 
         if (response.data && response.data[0]) {
+            markProviderSuccess('FINBERT');
             const result = response.data[0];
             const sentiment = result.find(item => item.label === 'positive') || 
                             result.find(item => item.label === 'negative') || 
@@ -183,7 +291,11 @@ const callFinBERT = async (symbol, stockData, newsData) => {
         
         return null;
     } catch (error) {
-        console.log(`[FinBERT] Error: ${error.message}`);
+        if (is429Error(error)) {
+            markProvider429('FINBERT');
+        } else {
+            markProviderNon429Error('FINBERT', error);
+        }
         return null;
     }
 };
@@ -192,6 +304,10 @@ const callFinBERT = async (symbol, stockData, newsData) => {
  * DistilBERT Model - General sentiment analysis
  */
 const callDistilBERT = async (symbol, stockData, newsData) => {
+    if (!shouldUseProvider('DISTILBERT')) {
+        return null;
+    }
+
     try {
         const analysisText = constructGeneralAnalysis(symbol, stockData, newsData);
         
@@ -205,6 +321,7 @@ const callDistilBERT = async (symbol, stockData, newsData) => {
         );
 
         if (response.data && response.data[0]) {
+            markProviderSuccess('DISTILBERT');
             const result = response.data[0];
             const sentiment = result.find(item => item.label === 'POSITIVE') || 
                             result.find(item => item.label === 'NEGATIVE') || 
@@ -225,7 +342,11 @@ const callDistilBERT = async (symbol, stockData, newsData) => {
         
         return null;
     } catch (error) {
-        console.log(`[DistilBERT] Error: ${error.message}`);
+        if (is429Error(error)) {
+            markProvider429('DISTILBERT');
+        } else {
+            markProviderNon429Error('DISTILBERT', error);
+        }
         return null;
     }
 };
@@ -311,7 +432,7 @@ const runTechnicalAgent = async (symbol, stockData) => {
         };
         
     } catch (error) {
-        console.error('[Technical Agent] Error:', error.message);
+        logger.error('[Multi-Model AI] Technical Agent error', { error: error.message });
         return {
             signal: 'Hold',
             confidence: 50,
@@ -384,7 +505,7 @@ const runMomentumAgent = async (symbol, stockData) => {
         };
         
     } catch (error) {
-        console.error('[Momentum Agent] Error:', error.message);
+        logger.error('[Multi-Model AI] Momentum Agent error', { error: error.message });
         return {
             signal: 'Hold',
             confidence: 50,

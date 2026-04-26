@@ -1,6 +1,7 @@
 const fs = require('fs').promises;
 const path = require('path');
 const bcrypt = require('bcryptjs');
+const { query } = require('../config/database');
 
 const USERS_FILE = path.join(__dirname, '../../users.json');
 
@@ -9,25 +10,45 @@ const USERS_FILE = path.join(__dirname, '../../users.json');
  */
 const getUserProfile = async (userId) => {
     try {
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const user = users.find(u => u.id === userId);
+        // Get user from PostgreSQL database
+        const userResult = await query(
+            'SELECT id, username, email, full_name, phone, created_at, ai_trading_enabled FROM users WHERE id = $1',
+            [userId]
+        );
         
-        if (!user) {
+        if (userResult.rows.length === 0) {
             throw new Error('User not found');
         }
+        
+        const user = userResult.rows[0];
+        
+        // Get trading account balance
+        const accountResult = await query(
+            'SELECT balance FROM trading_accounts WHERE user_id = $1',
+            [userId]
+        );
+        
+        const tradingAccount = accountResult.rows[0] || {
+            balance: 100000
+        };
+        
+        // Split full_name into firstName and lastName
+        const nameParts = (user.full_name || '').split(' ');
+        const firstName = nameParts[0] || '';
+        const lastName = nameParts.slice(1).join(' ') || '';
         
         return {
             id: user.id,
             username: user.username,
-            firstName: user.firstName || '',
-            lastName: user.lastName || '',
+            firstName: firstName,
+            lastName: lastName,
             email: user.email || '',
             phone: user.phone || '',
-            createdAt: user.createdAt || new Date().toISOString(),
-            aiTradingEnabled: user.aiTradingEnabled || false,
-            tradingAccount: user.tradingAccount || {
-                balance: 100000, // Default $100k paper money
-                totalDeposited: 100000,
+            createdAt: user.created_at,
+            aiTradingEnabled: user.ai_trading_enabled === true,
+            tradingAccount: {
+                balance: parseFloat(tradingAccount.balance),
+                totalDeposited: 0,
                 totalWithdrawn: 0
             }
         };
@@ -42,24 +63,14 @@ const getUserProfile = async (userId) => {
  */
 const updateUserProfile = async (userId, updates) => {
     try {
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const userIndex = users.findIndex(u => u.id === userId);
+        // Combine firstName and lastName into full_name
+        const fullName = [updates.firstName || '', updates.lastName || ''].filter(Boolean).join(' ');
         
-        if (userIndex === -1) {
-            throw new Error('User not found');
-        }
-        
-        // Update allowed fields only
-        const allowedFields = ['firstName', 'lastName', 'email', 'phone'];
-        allowedFields.forEach(field => {
-            if (updates[field] !== undefined) {
-                users[userIndex][field] = updates[field];
-            }
-        });
-        
-        users[userIndex].updatedAt = new Date().toISOString();
-        
-        await fs.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
+        // Update user in PostgreSQL
+        await query(
+            'UPDATE users SET full_name = $1, email = $2, phone = $3, updated_at = NOW() WHERE id = $4',
+            [fullName || null, updates.email || null, updates.phone || null, userId]
+        );
         
         return getUserProfile(userId);
     } catch (error) {
@@ -73,25 +84,32 @@ const updateUserProfile = async (userId, updates) => {
  */
 const changePassword = async (userId, currentPassword, newPassword) => {
     try {
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const userIndex = users.findIndex(u => u.id === userId);
+        // Get current password from PostgreSQL
+        const userResult = await query(
+            'SELECT password FROM users WHERE id = $1',
+            [userId]
+        );
         
-        if (userIndex === -1) {
+        if (userResult.rows.length === 0) {
             throw new Error('User not found');
         }
         
+        const user = userResult.rows[0];
+        
         // Verify current password
-        const isValid = await bcrypt.compare(currentPassword, users[userIndex].password);
+        const isValid = await bcrypt.compare(currentPassword, user.password);
         if (!isValid) {
             throw new Error('Current password is incorrect');
         }
         
         // Hash new password
         const hashedPassword = await bcrypt.hash(newPassword, 10);
-        users[userIndex].password = hashedPassword;
-        users[userIndex].passwordChangedAt = new Date().toISOString();
         
-        await fs.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
+        // Update password in PostgreSQL
+        await query(
+            'UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2',
+            [hashedPassword, userId]
+        );
         
         return { success: true, message: 'Password changed successfully' };
     } catch (error) {
@@ -135,26 +153,23 @@ const initializeTradingAccount = async (userId) => {
  */
 const toggleAITrading = async (userId, enabled) => {
     try {
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const userIndex = users.findIndex(u => u.id === userId);
+        // Update in PostgreSQL database
+        const result = await query(
+            'UPDATE users SET ai_trading_enabled = $1, updated_at = NOW() WHERE id = $2 RETURNING id, username, ai_trading_enabled, updated_at',
+            [enabled, userId]
+        );
         
-        if (userIndex === -1) {
+        if (result.rows.length === 0) {
             throw new Error('User not found');
         }
         
-        users[userIndex].aiTradingEnabled = enabled;
-        users[userIndex].aiTradingToggledAt = new Date().toISOString();
+        const user = result.rows[0];
         
-        // Initialize AI decision log if enabling for first time
-        if (enabled && !users[userIndex].aiDecisions) {
-            users[userIndex].aiDecisions = [];
-        }
-        
-        await fs.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
+        console.log(`[Profile] AI Trading ${enabled ? 'enabled' : 'disabled'} for user ${user.username} (${userId})`);
         
         return {
-            aiTradingEnabled: users[userIndex].aiTradingEnabled,
-            toggledAt: users[userIndex].aiTradingToggledAt
+            aiTradingEnabled: user.ai_trading_enabled,
+            toggledAt: user.updated_at
         };
     } catch (error) {
         console.error('Error toggling AI trading:', error);

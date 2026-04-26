@@ -464,7 +464,7 @@ const CandlestickChart: React.FC<CandlestickChartProps> = ({ symbol }) => {
           return {
             time: m.time,
             position: isBuy ? 'belowBar' : 'aboveBar',  // BUY below, SELL above for clarity
-            color: isBuy ? '#00E676' : '#FF1744',  // Bright green for buy, bright red for sell
+            color: isBuy ? '#00A651' : '#FF1744',  // Dark green for buy (more readable), bright red for sell
             shape: isBuy ? 'arrowUp' : 'arrowDown',  // Use arrows for clear direction
             text: label
           };
@@ -473,7 +473,7 @@ const CandlestickChart: React.FC<CandlestickChartProps> = ({ symbol }) => {
         console.log('[CandlestickChart] Setting', processedMarkers.length, 'markers on chart');
         console.log('[CandlestickChart] Processed markers:', JSON.stringify(processedMarkers, null, 2));
         addDebugLog('[CandlestickChart] Setting', processedMarkers.length, 'markers:', processedMarkers);
-        candlestickSeriesRef.current.setMarkers(processedMarkers);
+        candlestickSeriesRef.current.setMarkers(processedMarkers as any);
         console.log('[CandlestickChart] Markers set successfully! Total markers on series:', processedMarkers.length);
       } else {
         console.warn('[CandlestickChart] No markers to set. markers.length:', markers.length, 'series ready:', !!candlestickSeriesRef.current);

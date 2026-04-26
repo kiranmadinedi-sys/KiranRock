@@ -71,6 +71,36 @@ function PortfolioPage() {
     // Tab state
     const [activeTab, setActiveTab] = useState('overview');
 
+    // Format as YYYY-MM-DD (UTC) for concise display; full ISO in title
+    const formatDate = (iso) => {
+        try {
+            const d = new Date(iso);
+            if (isNaN(d)) return iso;
+            // return date-only in UTC
+            const yyyy = d.getUTCFullYear();
+            const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+            const dd = String(d.getUTCDate()).padStart(2, '0');
+            return `${yyyy}-${mm}-${dd}`;
+        } catch (e) {
+            return iso;
+        }
+    };
+
+    // Determine if a holding's price is stale (older than 5 minutes) or had a lookup error
+    const isPriceStale = (holding) => {
+        try {
+            if (holding.priceError) return true;
+            const last = holding.lastUpdated || holding.updatedAt || null;
+            if (!last) return true;
+            const d = new Date(last);
+            if (isNaN(d)) return true;
+            const ageMs = Date.now() - d.getTime();
+            return ageMs > (5 * 60 * 1000); // 5 minutes
+        } catch (e) {
+            return true;
+        }
+    };
+
     // AI Trading Settings State
     const [settingsLoading, setSettingsLoading] = useState(true);
     const [aiSettings, setAISettings] = useState({ stopLoss: 0.06, takeProfit: 0.3, minCashReserve: 0 });
@@ -788,6 +818,7 @@ function PortfolioPage() {
                                                 <tr>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Symbol</th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Quantity</th>
+                                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Bought</th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Avg Price</th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Current Price</th>
                                                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Market Value</th>
@@ -801,8 +832,14 @@ function PortfolioPage() {
                                                     <tr key={holding.symbol}>
                                                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">{holding.symbol}</td>
                                                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">{holding.quantity}</td>
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300" title={holding.firstBought || ''}>{holding.firstBought ? formatDate(holding.firstBought) : '-'}</td>
                                                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${holding.averagePrice?.toFixed(2) || '0.00'}</td>
-                                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${holding.currentPrice?.toFixed(2) || '0.00'}</td>
+                                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">
+                                                            ${holding.currentPrice?.toFixed(2) || '0.00'}
+                                                            {isPriceStale(holding) && (
+                                                                <span title="Price may be stale" className="ml-2 text-yellow-600" aria-hidden="true">⚠️</span>
+                                                            )}
+                                                        </td>
                                                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-300">${holding.currentValue?.toFixed(2) || '0.00'}</td>
                                                         <td className={`px-6 py-4 whitespace-nowrap text-sm font-medium ${(holding.unrealizedPL || 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                                                             {(holding.unrealizedPL || 0) >= 0 ? '+' : ''}${(holding.unrealizedPL || 0).toFixed(2)}

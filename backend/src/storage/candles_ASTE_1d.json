@@ -1,0 +1,569 @@
+[
+  {
+    "time": 1767589200,
+    "open": 44.6,
+    "high": 47.21,
+    "low": 44.345,
+    "close": 46.26,
+    "volume": 214751,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1767675600,
+    "open": 45.98,
+    "high": 47.59,
+    "low": 45.7459,
+    "close": 47.56,
+    "volume": 211003,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1767762000,
+    "open": 47.77,
+    "high": 47.77,
+    "low": 45.82,
+    "close": 46.22,
+    "volume": 118458,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1767848400,
+    "open": 45.99,
+    "high": 48.07,
+    "low": 45.735,
+    "close": 47.6,
+    "volume": 187365,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1767934800,
+    "open": 47.76,
+    "high": 48.09,
+    "low": 46.57,
+    "close": 47.49,
+    "volume": 150113,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1768194000,
+    "open": 47.43,
+    "high": 49.0056,
+    "low": 47.025,
+    "close": 48.54,
+    "volume": 152345,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1768280400,
+    "open": 48.65,
+    "high": 49.11,
+    "low": 47.87,
+    "close": 48.77,
+    "volume": 117955,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1768366800,
+    "open": 48.77,
+    "high": 48.84,
+    "low": 47.7034,
+    "close": 48.8,
+    "volume": 149672,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1768453200,
+    "open": 48.97,
+    "high": 50.09,
+    "low": 48.49,
+    "close": 49.03,
+    "volume": 187978,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1768539600,
+    "open": 49.02,
+    "high": 49.8,
+    "low": 48.59,
+    "close": 49.1,
+    "volume": 277841,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1768885200,
+    "open": 48.07,
+    "high": 48.425,
+    "low": 47.44,
+    "close": 47.74,
+    "volume": 106153,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1768971600,
+    "open": 48.4,
+    "high": 50.32,
+    "low": 48.14,
+    "close": 50.02,
+    "volume": 137151,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1769058000,
+    "open": 50.36,
+    "high": 50.92,
+    "low": 49.7,
+    "close": 49.79,
+    "volume": 206164,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1769144400,
+    "open": 49.55,
+    "high": 49.565,
+    "low": 47.29,
+    "close": 48.29,
+    "volume": 198751,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1769403600,
+    "open": 48.29,
+    "high": 48.925,
+    "low": 48.055,
+    "close": 48.33,
+    "volume": 117835,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1769490000,
+    "open": 48.52,
+    "high": 48.83,
+    "low": 47.82,
+    "close": 48.41,
+    "volume": 101114,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1769576400,
+    "open": 48.66,
+    "high": 48.855,
+    "low": 47.325,
+    "close": 47.65,
+    "volume": 103741,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1769662800,
+    "open": 48.01,
+    "high": 48.85,
+    "low": 47.4923,
+    "close": 48.42,
+    "volume": 141621,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1769749200,
+    "open": 47.75,
+    "high": 48.87,
+    "low": 47.675,
+    "close": 48.72,
+    "volume": 393148,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1770008400,
+    "open": 48.72,
+    "high": 50.99,
+    "low": 48.585,
+    "close": 50.85,
+    "volume": 180107,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1770094800,
+    "open": 50.94,
+    "high": 53,
+    "low": 50.495,
+    "close": 52.96,
+    "volume": 219408,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1770181200,
+    "open": 53.6,
+    "high": 54.99,
+    "low": 53.475,
+    "close": 54.46,
+    "volume": 262088,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1770267600,
+    "open": 54,
+    "high": 55.11,
+    "low": 53.645,
+    "close": 54.68,
+    "volume": 257886,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1770354000,
+    "open": 55.12,
+    "high": 57.88,
+    "low": 55.12,
+    "close": 57.43,
+    "volume": 263983,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1770613200,
+    "open": 57.43,
+    "high": 58.2,
+    "low": 56.505,
+    "close": 57.62,
+    "volume": 152655,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1770699600,
+    "open": 57.32,
+    "high": 57.71,
+    "low": 56.25,
+    "close": 56.35,
+    "volume": 226275,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1770786000,
+    "open": 57.1,
+    "high": 58.88,
+    "low": 56.66,
+    "close": 58,
+    "volume": 148375,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1770872400,
+    "open": 58.73,
+    "high": 59.99,
+    "low": 57.19,
+    "close": 57.24,
+    "volume": 148606,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1770958800,
+    "open": 57.14,
+    "high": 59.28,
+    "low": 56.72,
+    "close": 59.27,
+    "volume": 152045,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1771304400,
+    "open": 58.72,
+    "high": 59.68,
+    "low": 57.2801,
+    "close": 58.77,
+    "volume": 148631,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1771390800,
+    "open": 58.75,
+    "high": 59.41,
+    "low": 57.1,
+    "close": 57.58,
+    "volume": 215486,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1771477200,
+    "open": 57.65,
+    "high": 57.95,
+    "low": 57.1401,
+    "close": 57.44,
+    "volume": 182189,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1771563600,
+    "open": 57.64,
+    "high": 59.34,
+    "low": 57.39,
+    "close": 58.72,
+    "volume": 225335,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1771822800,
+    "open": 58.7,
+    "high": 58.95,
+    "low": 56.8,
+    "close": 57.9,
+    "volume": 115992,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1771909200,
+    "open": 58.04,
+    "high": 59.225,
+    "low": 57.81,
+    "close": 58.5,
+    "volume": 266320,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1771995600,
+    "open": 62.5,
+    "high": 64.35,
+    "low": 54.77,
+    "close": 61.31,
+    "volume": 567261,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1772082000,
+    "open": 61.94,
+    "high": 64.37,
+    "low": 61.3401,
+    "close": 62.34,
+    "volume": 392833,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1772168400,
+    "open": 61.37,
+    "high": 62.18,
+    "low": 60.01,
+    "close": 62.09,
+    "volume": 311683,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1772427600,
+    "open": 61.29,
+    "high": 64.125,
+    "low": 59.64,
+    "close": 63.93,
+    "volume": 271513,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1772514000,
+    "open": 61.57,
+    "high": 61.99,
+    "low": 60.03,
+    "close": 61.91,
+    "volume": 483600,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1772600400,
+    "open": 62.67,
+    "high": 63.6463,
+    "low": 61.59,
+    "close": 62.63,
+    "volume": 238364,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1772686800,
+    "open": 61.5,
+    "high": 62.525,
+    "low": 59.4,
+    "close": 60.52,
+    "volume": 201112,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1772773200,
+    "open": 58.6,
+    "high": 59.4,
+    "low": 57.2374,
+    "close": 57.87,
+    "volume": 225137,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1773028800,
+    "open": 56.43,
+    "high": 57.495,
+    "low": 54.37,
+    "close": 57.21,
+    "volume": 229429,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1773115200,
+    "open": 56.59,
+    "high": 59.58,
+    "low": 56.3917,
+    "close": 57.87,
+    "volume": 238713,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1773201600,
+    "open": 57.63,
+    "high": 57.745,
+    "low": 55.65,
+    "close": 56.25,
+    "volume": 293032,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1773288000,
+    "open": 55.31,
+    "high": 56.04,
+    "low": 53.31,
+    "close": 53.7,
+    "volume": 276719,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1773374400,
+    "open": 54.58,
+    "high": 54.82,
+    "low": 52.25,
+    "close": 52.88,
+    "volume": 287626,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1773633600,
+    "open": 53.87,
+    "high": 54.15,
+    "low": 52.42,
+    "close": 52.65,
+    "volume": 230868,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1773720000,
+    "open": 53.13,
+    "high": 53.89,
+    "low": 52.12,
+    "close": 53.11,
+    "volume": 229648,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1773806400,
+    "open": 52.98,
+    "high": 54.43,
+    "low": 52.76,
+    "close": 52.8,
+    "volume": 292617,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1773892800,
+    "open": 51.77,
+    "high": 52.315,
+    "low": 50.75,
+    "close": 51.505,
+    "volume": 172826,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1773979200,
+    "open": 51.76,
+    "high": 51.98,
+    "low": 49.32,
+    "close": 49.84,
+    "volume": 844124,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1774238400,
+    "open": 52.25,
+    "high": 53.29,
+    "low": 51.27,
+    "close": 52.54,
+    "volume": 216781,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1774324800,
+    "open": 51.75,
+    "high": 54.58,
+    "low": 51.75,
+    "close": 53.8,
+    "volume": 142114,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1774411200,
+    "open": 54.54,
+    "high": 55.2699,
+    "low": 53.64,
+    "close": 54.87,
+    "volume": 156857,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1774497600,
+    "open": 54.42,
+    "high": 54.715,
+    "low": 52.87,
+    "close": 53.1,
+    "volume": 171122,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1774584000,
+    "open": 52.61,
+    "high": 53.1199,
+    "low": 51.78,
+    "close": 52.14,
+    "volume": 127295,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1774843200,
+    "open": 52.93,
+    "high": 52.93,
+    "low": 51.19,
+    "close": 51.49,
+    "volume": 174518,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1774929600,
+    "open": 52.58,
+    "high": 54.025,
+    "low": 51.86,
+    "close": 53.84,
+    "volume": 192532,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1775016000,
+    "open": 54.36,
+    "high": 56.71,
+    "low": 54.33,
+    "close": 56.17,
+    "volume": 214000,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1775102400,
+    "open": 54.64,
+    "high": 55.45,
+    "low": 53.575,
+    "close": 55.06,
+    "volume": 143202,
+    "isExtendedHours": false
+  },
+  {
+    "time": 1775448000,
+    "open": 54.97,
+    "high": 55.535,
+    "low": 54.225,
+    "close": 55.25,
+    "volume": 138505,
+    "isExtendedHours": false
+  }
+]

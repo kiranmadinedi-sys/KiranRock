@@ -4,7 +4,17 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8520099950:AAFAAZr
 // Only initialize bot if token is valid
 let bot;
 if (TELEGRAM_BOT_TOKEN && TELEGRAM_BOT_TOKEN !== '<YOUR_TELEGRAM_BOT_TOKEN>') {
-    bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
+    // Configure bot with better timeout and connection options
+    bot = new TelegramBot(TELEGRAM_BOT_TOKEN, {
+        polling: false, // Disable polling to avoid connection issues
+        request: {
+            agentOptions: {
+                keepAlive: true,
+                keepAliveMsecs: 30000
+            },
+            timeout: 60000 // 60 second timeout for API requests
+        }
+    });
     console.log('✓ Telegram bot initialized (@KiranTradePro_bot)');
 } else {
     console.warn('⚠️  Telegram bot token not configured. Set TELEGRAM_BOT_TOKEN environment variable.');
@@ -27,7 +37,36 @@ async function sendTelegramMessage(phone, message, options = {}) {
     // In production, you should have a mapping of phone -> chat_id
     const chatId = await getChatIdByPhone(phone);
     if (!chatId) throw new Error('No Telegram chat ID found for this phone number');
-    return bot.sendMessage(chatId, message, options);
+    
+    // Retry logic with exponential backoff
+    const maxRetries = 3;
+    let lastError;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            return await bot.sendMessage(chatId, message, {
+                ...options,
+                disable_web_page_preview: true // Prevent preview loading issues
+            });
+        } catch (error) {
+            lastError = error;
+            console.error(`[Telegram] Send attempt ${attempt}/${maxRetries} failed:`, error.message);
+            
+            // Don't retry on permanent errors
+            if (error.response && error.response.statusCode === 403) {
+                throw new Error('Bot blocked by user or chat not found');
+            }
+            
+            // Exponential backoff before retry
+            if (attempt < maxRetries) {
+                const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+                console.log(`[Telegram] Retrying after ${backoffMs}ms...`);
+                await new Promise(resolve => setTimeout(resolve, backoffMs));
+            }
+        }
+    }
+    
+    throw lastError;
 }
 
 /**

@@ -59,7 +59,7 @@ export default function ScalpingPage() {
   const loadWatchlist = async () => {
     try {
       const token = localStorage.getItem('token');
-  const response = fetch(`${getApiBaseUrl()}/api/scalping/watchlist/recommended`, {
+  const response = await fetch(`${getApiBaseUrl()}/api/scalping/watchlist/recommended`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       const data = await response.json();
@@ -79,7 +79,7 @@ export default function ScalpingPage() {
     setLoading(true);
     try {
       const token = localStorage.getItem('token');
-      const response = fetch(`${getApiBaseUrl()}/api/scalping/${selectedSymbol}`, {
+      const response = await fetch(`${getApiBaseUrl()}/api/scalping/${selectedSymbol}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       const data = await response.json();
@@ -100,7 +100,7 @@ export default function ScalpingPage() {
     setScanning(true);
     try {
       const token = localStorage.getItem('token');
-  const response = fetch(`${getApiBaseUrl()}/api/scalping/scan`, {
+  const response = await fetch(`${getApiBaseUrl()}/api/scalping/scan`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -131,7 +131,7 @@ export default function ScalpingPage() {
     setCriteriaLoading(true);
     try {
       const token = localStorage.getItem('token');
-      const response = fetch(`${getApiBaseUrl()}/api/scalping/criteria/settings`, {
+      const response = await fetch(`${getApiBaseUrl()}/api/scalping/criteria/settings`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       const data = await response.json();

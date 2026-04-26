@@ -67,18 +67,25 @@ router.post('/change-password', async (req, res) => {
  */
 router.post('/ai-trading/toggle', async (req, res) => {
     try {
+        console.log('[Profile] AI Trading toggle request:', { userId: req.userId, body: req.body });
+        
         const { enabled } = req.body;
         
         if (typeof enabled !== 'boolean') {
+            console.error('[Profile] Invalid enabled value:', enabled);
             return res.status(400).json({ error: 'enabled must be a boolean value' });
         }
         
+        console.log('[Profile] Calling toggleAITrading with userId:', req.userId, 'enabled:', enabled);
         const result = await userProfileService.toggleAITrading(req.userId, enabled);
+        
+        console.log('[Profile] Toggle successful:', result);
         res.json({
             message: enabled ? 'AI Trading enabled successfully' : 'AI Trading disabled successfully',
             ...result
         });
     } catch (error) {
+        console.error('[Profile] Error toggling AI trading:', error);
         res.status(500).json({ error: error.message });
     }
 });

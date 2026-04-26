@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import StockSearch from './StockSearch';
 import ThemeToggle from './ThemeToggle';
+import { clearAuthToken } from '../utils/session';
 
 interface AppHeaderProps {
     onSelectStock?: (symbol: string) => void;
@@ -52,8 +53,7 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
     }, []);
 
     const handleLogout = () => {
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
+        clearAuthToken();
         router.push('/login');
     };
 

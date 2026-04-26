@@ -32,6 +32,18 @@ interface StockPrediction {
   analystRatings: any;
   sector: string;
   volatility: number;
+  riskAnalysis: {
+    riskScore: number;
+    riskFactors: string[];
+    riskLevel: string;
+  };
+  invalidationTriggers: Array<{
+    type: string;
+    level?: string;
+    description: string;
+  }>;
+  rewardRiskRatio: string;
+  tradeType: string;
 }
 
 interface MarketContext {
@@ -43,19 +55,59 @@ interface MarketContext {
     neutral: number;
   };
   topSectors: Array<{ sector: string; avgScore: number; count: number }>;
+  macroTrends: {
+    growthVsValue: string;
+    riskAppetite: string;
+    volatilityRegime: string;
+    momentumStrength: string;
+  };
+  sectorRotation: {
+    rotatingInto: string[];
+    rotatingOutOf: string[];
+    leadingSector: string;
+    laggingSector: string;
+  };
+  marketRegime: {
+    regime: string;
+    description: string;
+    recommendation: string;
+  };
   summary: string;
+}
+
+interface PerformanceStats {
+  totalPredictions: number;
+  hits: number;
+  misses: number;
+  hitRate: string;
+  avgActualMove: string;
+  avgPredictedMove: string;
+  avgConfidence: string;
+  avgHitReturn: string;
+  avgMissReturn: string;
+  tierPerformance: Array<{
+    tier: string;
+    count: number;
+    hits: number;
+    hitRate: string;
+    avgReturn: string;
+  }>;
+  weeksTracked: number;
 }
 
 export default function WeeklyPredictionsPage() {
   const router = useRouter();
   const [predictions, setPredictions] = useState<StockPrediction[]>([]);
   const [marketContext, setMarketContext] = useState<MarketContext | null>(null);
+  const [performance, setPerformance] = useState<PerformanceStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedTier, setSelectedTier] = useState<string>('all');
   const [selectedSector, setSelectedSector] = useState<string>('all');
+  const [selectedSignal, setSelectedSignal] = useState<string>('all');
+  const [selectedUniverse, setSelectedUniverse] = useState<string>('TOP_200');
   const [showDetails, setShowDetails] = useState<Record<string, boolean>>({});
   const [token, setToken] = useState<string | null>(null);
-  const [sortBy, setSortBy] = useState<'score' | 'confidence'>('score');
+  const [sortBy, setSortBy] = useState<'score' | 'confidence' | 'risk'>('score');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
   // Download CSV logic
@@ -103,18 +155,22 @@ export default function WeeklyPredictionsPage() {
   useEffect(() => {
     if (!token) return;
     fetchWeeklyPredictions();
-  }, [token]);
+  }, [token, selectedUniverse]); // Re-fetch when universe changes
 
   const fetchWeeklyPredictions = async () => {
     setLoading(true);
     try {
-      const response = await fetch(`${getApiBaseUrl()}/api/weekly/predictions?limit=50`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
+      const response = await fetch(
+        `${getApiBaseUrl()}/api/weekly/predictions?limit=100&minScore=50&universe=${selectedUniverse}`,
+        {
+          headers: { Authorization: `Bearer ${token}` }
+        }
+      );
       if (response.ok) {
         const data = await response.json();
         setPredictions(data.topPicks || []);
         setMarketContext(data.marketContext);
+        setPerformance(data.performance);
       } else {
         console.error('Failed to fetch predictions:', response.status);
       }
@@ -144,13 +200,26 @@ export default function WeeklyPredictionsPage() {
 
   const getSignalColor = (signal: string) => {
     switch (signal) {
+      case 'Strong Buy':
       case 'Buy': return 'text-green-600 dark:text-green-400';
       case 'Sell': return 'text-red-600 dark:text-red-400';
+      case 'Avoid': return 'text-orange-600 dark:text-orange-400';
       default: return 'text-yellow-600 dark:text-yellow-400';
     }
   };
 
-  const handleSort = (column: 'score' | 'confidence') => {
+  const getRiskColor = (riskLevel: string) => {
+    switch (riskLevel) {
+      case 'Very Low':
+      case 'Low': return 'text-green-500';
+      case 'Moderate': return 'text-yellow-500';
+      case 'High': return 'text-orange-500';
+      case 'Very High': return 'text-red-500';
+      default: return 'text-gray-500';
+    }
+  };
+
+  const handleSort = (column: 'score' | 'confidence' | 'risk') => {
     if (sortBy === column) {
       setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
     } else {
@@ -163,6 +232,7 @@ export default function WeeklyPredictionsPage() {
     .filter(pred => {
       if (selectedTier !== 'all' && pred.tier !== selectedTier) return false;
       if (selectedSector !== 'all' && pred.sector !== selectedSector) return false;
+      if (selectedSignal !== 'all' && pred.prediction.signal !== selectedSignal) return false;
       return true;
     })
     .sort((a, b) => {
@@ -171,6 +241,8 @@ export default function WeeklyPredictionsPage() {
         comparison = a.totalScore - b.totalScore;
       } else if (sortBy === 'confidence') {
         comparison = a.prediction.confidence - b.prediction.confidence;
+      } else if (sortBy === 'risk') {
+        comparison = (a.riskAnalysis?.riskScore || 50) - (b.riskAnalysis?.riskScore || 50);
       }
       return sortOrder === 'asc' ? comparison : -comparison;
     });
@@ -178,17 +250,22 @@ export default function WeeklyPredictionsPage() {
   const uniqueSectors = Array.from(new Set(predictions.map(p => p.sector))).sort();
 
   if (loading) {
+    const estimatedTime = selectedUniverse === 'ALL' ? '3-5 minutes' : 
+                         selectedUniverse === 'TOP_200' ? '60-90 seconds' : '15-20 seconds';
+    const stockCount = selectedUniverse === 'ALL' ? '800+' : 
+                      selectedUniverse === 'TOP_200' ? '200' : '50';
+    
     return (
       <div className="min-h-screen bg-[var(--color-bg-primary)] flex items-center justify-center">
         <div className="text-center">
           <div className="text-2xl font-bold text-[var(--color-text-primary)] mb-4">
-            🔮 Analyzing {predictions.length || 80}+ stocks...
+            🔮 Analyzing {stockCount} stocks...
           </div>
           <div className="text-[var(--color-text-secondary)]">
-            This may take 30-60 seconds
+            Estimated time: {estimatedTime}
           </div>
           <div className="mt-4 animate-pulse text-blue-500">
-            Running AI models, calculating scores, detecting patterns...
+            Running AI models, calculating risk scores, detecting patterns...
           </div>
         </div>
       </div>
@@ -211,14 +288,32 @@ export default function WeeklyPredictionsPage() {
               AI-powered analysis of {predictions.length}+ major stocks | Updated: {new Date().toLocaleDateString()}
             </p>
           </div>
-          <button
-            onClick={downloadCSV}
-            className="px-3 sm:px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-md font-semibold text-xs sm:text-sm shadow transition-colors whitespace-nowrap w-full lg:w-auto"
-            disabled={!filteredPredictions.length}
-            title={filteredPredictions.length ? 'Download CSV' : 'No data to download'}
-          >
-            ⬇️ Download CSV
-          </button>
+          <div className="flex gap-2 w-full lg:w-auto">
+            <select
+              value={selectedUniverse}
+              onChange={(e) => setSelectedUniverse(e.target.value)}
+              className="px-3 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded-md font-semibold text-xs sm:text-sm shadow transition-colors flex-1 lg:flex-none"
+            >
+              <option value="MEGA_CAP">⚡ Quick (50 stocks)</option>
+              <option value="TOP_200">📊 Balanced (200 stocks)</option>
+              <option value="ALL">🌐 All (800+ stocks)</option>
+            </select>
+            <button
+              onClick={() => router.push('/recommendations')}
+              className="px-3 sm:px-4 py-2 bg-indigo-500 hover:bg-indigo-600 text-white rounded-md font-semibold text-xs sm:text-sm shadow transition-colors whitespace-nowrap"
+              title="Get personalized recommendations"
+            >
+              🎯 Recommendations
+            </button>
+            <button
+              onClick={downloadCSV}
+              className="px-3 sm:px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-md font-semibold text-xs sm:text-sm shadow transition-colors whitespace-nowrap"
+              disabled={!filteredPredictions.length}
+              title={filteredPredictions.length ? 'Download CSV' : 'No data to download'}
+            >
+              ⬇️ CSV
+            </button>
+          </div>
         </div>
 
         {/* Market Context */}
@@ -269,6 +364,114 @@ export default function WeeklyPredictionsPage() {
           </div>
         )}
 
+        {/* Performance Tracking */}
+        {performance && (
+          <div className="bg-gradient-to-r from-blue-500/10 to-purple-500/10 border-2 border-blue-500/30 rounded-lg p-4 mb-6">
+            <h3 className="text-lg font-bold text-[var(--color-text-primary)] mb-3 flex items-center gap-2">
+              📊 Last 4 Weeks Performance
+            </h3>
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-4">
+              <div>
+                <div className="text-xs text-[var(--color-text-secondary)]">Hit Rate</div>
+                <div className="text-2xl font-bold text-green-500">{performance.hitRate}%</div>
+                <div className="text-xs text-[var(--color-text-secondary)]">{performance.hits}/{performance.totalPredictions}</div>
+              </div>
+              <div>
+                <div className="text-xs text-[var(--color-text-secondary)]">Avg Return (Hits)</div>
+                <div className="text-2xl font-bold text-green-500">+{performance.avgHitReturn}%</div>
+              </div>
+              <div>
+                <div className="text-xs text-[var(--color-text-secondary)]">Avg Return (Miss)</div>
+                <div className="text-2xl font-bold text-red-500">{performance.avgMissReturn}%</div>
+              </div>
+              <div>
+                <div className="text-xs text-[var(--color-text-secondary)]">Confidence</div>
+                <div className="text-2xl font-bold text-blue-500">{performance.avgConfidence}%</div>
+              </div>
+              {performance.tierPerformance && performance.tierPerformance[0] && (
+                <>
+                  <div>
+                    <div className="text-xs text-[var(--color-text-secondary)]">Tier A Hit Rate</div>
+                    <div className="text-xl font-bold text-green-500">
+                      {performance.tierPerformance.find(t => t.tier === 'A')?.hitRate || 'N/A'}%
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-[var(--color-text-secondary)]">Tier B Hit Rate</div>
+                    <div className="text-xl font-bold text-blue-500">
+                      {performance.tierPerformance.find(t => t.tier === 'B')?.hitRate || 'N/A'}%
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Macro Market Overlay */}
+        {marketContext?.macroTrends && (
+          <div className="bg-[var(--color-card)] border border-[var(--color-border)] rounded-lg p-4 mb-6">
+            <h3 className="text-lg font-bold text-[var(--color-text-primary)] mb-3 flex items-center gap-2">
+              🌍 Macro Market Context
+            </h3>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div>
+                <h4 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-2">Market Regime</h4>
+                <div className="bg-[var(--color-bg-tertiary)] rounded p-3">
+                  <div className="text-lg font-bold text-blue-500 mb-1">
+                    {marketContext.marketRegime.regime}
+                  </div>
+                  <div className="text-xs text-[var(--color-text-secondary)] mb-2">
+                    {marketContext.marketRegime.description}
+                  </div>
+                  <div className="text-xs text-green-500 font-semibold">
+                    💡 {marketContext.marketRegime.recommendation}
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <h4 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-2">Sector Rotation</h4>
+                <div className="bg-[var(--color-bg-tertiary)] rounded p-3">
+                  {marketContext.sectorRotation.rotatingInto.length > 0 && (
+                    <div className="mb-2">
+                      <div className="text-xs text-green-500 font-semibold">📈 Rotating Into:</div>
+                      <div className="text-xs text-[var(--color-text-primary)]">
+                        {marketContext.sectorRotation.rotatingInto.join(', ')}
+                      </div>
+                    </div>
+                  )}
+                  {marketContext.sectorRotation.rotatingOutOf.length > 0 && (
+                    <div>
+                      <div className="text-xs text-red-500 font-semibold">📉 Rotating Out:</div>
+                      <div className="text-xs text-[var(--color-text-primary)]">
+                        {marketContext.sectorRotation.rotatingOutOf.join(', ')}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <h4 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-2">Trends</h4>
+                <div className="bg-[var(--color-bg-tertiary)] rounded p-3 space-y-1 text-xs text-[var(--color-text-primary)]">
+                  <div>📊 {marketContext.macroTrends.growthVsValue}</div>
+                  <div>🎯 {marketContext.macroTrends.riskAppetite}</div>
+                  <div>📉 {marketContext.macroTrends.volatilityRegime}</div>
+                  <div>⚡ {marketContext.macroTrends.momentumStrength}</div>
+                </div>
+              </div>
+
+              <div>
+                <h4 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-2">Summary</h4>
+                <div className="bg-[var(--color-bg-tertiary)] rounded p-3 text-xs text-[var(--color-text-primary)]">
+                  {marketContext.summary}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Filters */}
         <div className="bg-[var(--color-card)] rounded-lg p-4 mb-6 border border-[var(--color-border)]">
           <div className="flex flex-wrap gap-4 items-center">
@@ -284,6 +487,21 @@ export default function WeeklyPredictionsPage() {
                 <option value="B">B - Good</option>
                 <option value="C">C - Fair</option>
                 <option value="D">D - Poor</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-sm text-[var(--color-text-secondary)] mr-2">Signal:</label>
+              <select
+                value={selectedSignal}
+                onChange={(e) => setSelectedSignal(e.target.value)}
+                className="px-3 py-1 rounded border border-[var(--color-border)] bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]"
+              >
+                <option value="all">All Signals</option>
+                <option value="Strong Buy">Strong Buy</option>
+                <option value="Buy">Buy</option>
+                <option value="Hold">Hold</option>
+                <option value="Avoid">Avoid</option>
               </select>
             </div>
 
@@ -330,6 +548,13 @@ export default function WeeklyPredictionsPage() {
                   >
                     Confidence {sortBy === 'confidence' && (sortOrder === 'asc' ? '↑' : '↓')}
                   </th>
+                  <th 
+                    className="px-4 py-3 text-left text-xs font-semibold text-[var(--color-text-secondary)] cursor-pointer hover:text-blue-500 select-none"
+                    onClick={() => handleSort('risk')}
+                  >
+                    Risk {sortBy === 'risk' && (sortOrder === 'asc' ? '↑' : '↓')}
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-[var(--color-text-secondary)]">Type</th>
                   <th className="px-4 py-3 text-left text-xs font-semibold text-[var(--color-text-secondary)]">Rationale</th>
                   <th className="px-4 py-3 text-left text-xs font-semibold text-[var(--color-text-secondary)]">Details</th>
                 </tr>

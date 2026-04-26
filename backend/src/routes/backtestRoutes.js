@@ -9,11 +9,21 @@ router.use(protect);
 /**
  * GET /api/backtest/report
  * Get AI bot backtest performance report
+ * Supports filtering by trade type (stocks or options)
  */
 router.get('/report', async (req, res) => {
     try {
         const userId = req.userId;
-        const report = await backtestService.getBacktestReport(userId);
+        const { type = 'stocks', dateRange = 'all', strategy = 'all' } = req.query;
+        
+        // Get appropriate report based on type
+        let report;
+        if (type === 'options') {
+            report = await backtestService.getOptionsBacktestReport(userId, { dateRange, strategy });
+        } else {
+            report = await backtestService.getBacktestReport(userId);
+        }
+        
         res.json(report);
     } catch (error) {
         console.error('[Backtest API] Error:', error);

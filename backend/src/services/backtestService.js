@@ -1,48 +1,74 @@
-const fs = require('fs').promises;
-const path = require('path');
-
-const USERS_FILE = path.join(__dirname, '../../users.json');
-
 /**
  * AI Trading Backtest Service
- * Analyze historical AI bot performance using actual trade data
+ * Analyze historical AI bot performance using actual PostgreSQL trade data
  */
 
+const { query } = require('../config/database');
+const YahooFinance = require('yahoo-finance2').default;
+const yahooFinance = new YahooFinance();
+
 /**
- * Get all trades for a user (both manual and AI trades)
+ * Get all trades for a user from PostgreSQL
  */
 async function getUserTrades(userId) {
     try {
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const user = users.find(u => u.id === userId);
-        
-        if (!user || !user.trades) {
-            return [];
-        }
-        
-        return user.trades;
+        const result = await query(
+            `SELECT id, symbol, action, quantity, price, total, commission,
+                    executed_by, ai_score, sector, trade_date AS timestamp
+             FROM trades
+             WHERE user_id = $1
+             ORDER BY trade_date ASC`,
+            [userId]
+        );
+        // Normalize field names to match old JSON schema expected by calculatePerformanceMetrics
+        return result.rows.map(r => ({
+            ...r,
+            type: r.action,      // calculatePerformanceMetrics uses t.type
+            quantity: parseInt(r.quantity),
+            price: parseFloat(r.price)
+        }));
     } catch (error) {
-        console.error('[Backtest] Error reading trades:', error);
+        console.error('[Backtest] Error reading trades from DB:', error);
         return [];
     }
 }
 
 /**
- * Get current portfolio holdings
+ * Get current portfolio holdings from PostgreSQL
  */
 async function getPortfolioHoldings(userId) {
     try {
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const user = users.find(u => u.id === userId);
-        
-        if (!user || !user.portfolio) {
-            return [];
-        }
-        
-        return user.portfolio;
+        const result = await query(
+            `SELECT symbol, quantity, average_price, current_price, market_value,
+                    gain_loss, gain_loss_percent, sector
+             FROM holdings
+             WHERE user_id = $1 AND quantity > 0
+             ORDER BY symbol`,
+            [userId]
+        );
+        return result.rows;
     } catch (error) {
-        console.error('[Backtest] Error reading portfolio:', error);
+        console.error('[Backtest] Error reading holdings from DB:', error);
         return [];
+    }
+}
+
+/**
+ * Fetch SPY returns over a date range for benchmark comparison
+ */
+async function getSPYBenchmarkReturn(startDate, endDate) {
+    try {
+        const chart = await yahooFinance.chart('SPY', {
+            period1: new Date(startDate).toISOString().split('T')[0],
+            period2: new Date(endDate).toISOString().split('T')[0],
+            interval: '1d'
+        });
+        const closes = chart.quotes.map(q => q.close).filter(Boolean);
+        if (closes.length < 2) return null;
+        const totalReturn = ((closes[closes.length - 1] - closes[0]) / closes[0]) * 100;
+        return parseFloat(totalReturn.toFixed(2));
+    } catch {
+        return null;
     }
 }
 
@@ -271,31 +297,52 @@ async function getBacktestReport(userId) {
         
         const symbolAnalysis = analyzeBySymbol(metrics.completedTrades);
         const equityCurve = generateEquityCurve(metrics.completedTrades);
-        
+
         // Best and worst trades
         const sortedTrades = [...metrics.completedTrades].sort((a, b) => b.profitLoss - a.profitLoss);
         const bestTrades = sortedTrades.slice(0, 5).map(t => ({
-            symbol: t.symbol,
-            profitLoss: t.profitLoss,
-            return: t.returnPercent,
-            buyPrice: t.buyPrice,
-            sellPrice: t.sellPrice,
-            quantity: t.quantity,
-            date: t.sellDate
+            symbol: t.symbol, profitLoss: t.profitLoss, return: t.returnPercent,
+            buyPrice: t.buyPrice, sellPrice: t.sellPrice, quantity: t.quantity, date: t.sellDate
         }));
         const worstTrades = sortedTrades.slice(-5).reverse().map(t => ({
-            symbol: t.symbol,
-            profitLoss: t.profitLoss,
-            return: t.returnPercent,
-            buyPrice: t.buyPrice,
-            sellPrice: t.sellPrice,
-            quantity: t.quantity,
-            date: t.sellDate
+            symbol: t.symbol, profitLoss: t.profitLoss, return: t.returnPercent,
+            buyPrice: t.buyPrice, sellPrice: t.sellPrice, quantity: t.quantity, date: t.sellDate
         }));
-        
+
+        // --- Calmar Ratio ---
+        // Calmar = Annualized Return / Max Drawdown
+        // Estimate annualized return from equity curve
+        const firstDate = metrics.completedTrades[0]?.buyDate;
+        const lastDate = metrics.completedTrades[metrics.completedTrades.length - 1]?.sellDate;
+        const holdingDays = firstDate && lastDate
+            ? Math.max(1, Math.ceil((new Date(lastDate) - new Date(firstDate)) / (1000 * 60 * 60 * 24)))
+            : 365;
+        const totalReturn = parseFloat(metrics.totalProfitLoss);
+        const annualizedReturn = totalReturn * (365 / holdingDays);
+        const maxDrawdownVal = parseFloat(metrics.maxDrawdown);
+        const calmarRatio = maxDrawdownVal > 0
+            ? parseFloat((annualizedReturn / maxDrawdownVal).toFixed(3))
+            : null;
+
+        // --- SPY Benchmark Comparison ---
+        const spyReturn = firstDate && lastDate
+            ? await getSPYBenchmarkReturn(firstDate, lastDate)
+            : null;
+
+        const enhancedMetrics = {
+            ...metrics,
+            calmarRatio,
+            annualizedReturn: parseFloat(annualizedReturn.toFixed(2)),
+            holdingPeriodDays: holdingDays,
+            spyBenchmarkReturn: spyReturn,
+            alphVsSPY: spyReturn !== null
+                ? parseFloat(((totalReturn / holdingDays * 365) - spyReturn).toFixed(2))
+                : null
+        };
+
         return {
             hasData: true,
-            metrics,
+            metrics: enhancedMetrics,
             symbolPerformance: symbolAnalysis,
             equityCurve,
             bestTrades,
@@ -303,8 +350,8 @@ async function getBacktestReport(userId) {
             totalTrades: trades.length,
             completedTrades: metrics.totalTrades,
             openPositions: portfolio.length,
-            firstTrade: trades[trades.length - 1]?.timestamp,
-            lastTrade: trades[0]?.timestamp
+            firstTrade: firstDate,
+            lastTrade: lastDate
         };
     } catch (error) {
         console.error('[Backtest] Error generating report:', error);
@@ -312,8 +359,192 @@ async function getBacktestReport(userId) {
     }
 }
 
+/**
+ * Get Options Bot backtest report
+ * Analyzes performance from options_trades table
+ */
+async function getOptionsBacktestReport(userId, filters = {}) {
+    try {
+        const { query } = require('../config/database');
+        const { dateRange = 'all', strategy = 'all' } = filters;
+        
+        // Build WHERE clause based on filters
+        let whereClause = 'WHERE user_id = $1 AND status = $2';
+        const params = [userId, 'CLOSED'];
+        
+        // Add date range filter
+        if (dateRange !== 'all') {
+            const daysAgo = {
+                '1m': 30,
+                '3m': 90,
+                '6m': 180,
+                '1y': 365
+            }[dateRange];
+            whereClause += ` AND exit_date >= NOW() - INTERVAL '${daysAgo} days'`;
+        }
+        
+        // Add strategy filter
+        if (strategy !== 'all') {
+            params.push(strategy);
+            whereClause += ` AND strategy = $${params.length}`;
+        }
+        
+        // Get completed options trades
+        const tradesResult = await query(
+            `SELECT * FROM options_trades ${whereClause} ORDER BY exit_date DESC`,
+            params
+        );
+        
+        const trades = tradesResult.rows;
+        
+        if (trades.length === 0) {
+            return {
+                hasData: false,
+                message: 'No completed options trades found. Enable Options Bot and wait for trades to complete.'
+            };
+        }
+        
+        // Calculate metrics
+        const wins = trades.filter(t => t.profit_loss > 0).length;
+        const losses = trades.filter(t => t.profit_loss < 0).length;
+        const totalPnL = trades.reduce((sum, t) => sum + parseFloat(t.profit_loss || 0), 0);
+        const totalWinAmount = trades.filter(t => t.profit_loss > 0).reduce((sum, t) => sum + parseFloat(t.profit_loss), 0);
+        const totalLossAmount = Math.abs(trades.filter(t => t.profit_loss < 0).reduce((sum, t) => sum + parseFloat(t.profit_loss), 0));
+        
+        const winRate = wins / trades.length * 100;
+        const avgWin = wins > 0 ? totalWinAmount / wins : 0;
+        const avgLoss = losses > 0 ? totalLossAmount / losses : 0;
+        const profitFactor = totalLossAmount > 0 ? totalWinAmount / totalLossAmount : 0;
+        
+        // Calculate hold times
+        const holdTimes = trades.map(t => {
+            const entry = new Date(t.entry_date);
+            const exit = new Date(t.exit_date);
+            return (exit - entry) / (1000 * 60 * 60 * 24);
+        });
+        const avgHoldDays = holdTimes.reduce((sum, d) => sum + d, 0) / holdTimes.length;
+        
+        // Calculate consecutive losses
+        let maxConsecutiveLosses = 0;
+        let currentStreak = 0;
+        trades.forEach(t => {
+            if (t.profit_loss < 0) {
+                currentStreak++;
+                maxConsecutiveLosses = Math.max(maxConsecutiveLosses, currentStreak);
+            } else {
+                currentStreak = 0;
+            }
+        });
+        
+        // Calculate Sharpe ratio (simplified)
+        const returns = trades.map(t => parseFloat(t.profit_loss || 0));
+        const avgReturn = returns.reduce((sum, r) => sum + r, 0) / returns.length;
+        const stdDev = Math.sqrt(returns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / returns.length);
+        const sharpeRatio = stdDev > 0 ? (avgReturn / stdDev) * Math.sqrt(252) : 0;
+        
+        // Calculate max drawdown
+        let peak = 0;
+        let maxDrawdown = 0;
+        let runningPnL = 0;
+        trades.forEach(t => {
+            runningPnL += parseFloat(t.profit_loss || 0);
+            peak = Math.max(peak, runningPnL);
+            const drawdown = ((peak - runningPnL) / peak) * 100;
+            maxDrawdown = Math.max(maxDrawdown, drawdown);
+        });
+        
+        // Equity curve
+        const equityCurve = [];
+        let equity = 10000; // Starting capital
+        trades.reverse().forEach(t => {
+            equity += parseFloat(t.profit_loss || 0);
+            equityCurve.push({
+                date: t.exit_date,
+                equity: equity
+            });
+        });
+        
+        // Symbol performance
+        const symbolMap = {};
+        trades.forEach(t => {
+            if (!symbolMap[t.symbol]) {
+                symbolMap[t.symbol] = { trades: 0, wins: 0, losses: 0, totalPnL: 0 };
+            }
+            symbolMap[t.symbol].trades++;
+            if (t.profit_loss > 0) symbolMap[t.symbol].wins++;
+            else symbolMap[t.symbol].losses++;
+            symbolMap[t.symbol].totalPnL += parseFloat(t.profit_loss || 0);
+        });
+        
+        const symbolPerformance = Object.keys(symbolMap).map(symbol => ({
+            symbol,
+            trades: symbolMap[symbol].trades,
+            wins: symbolMap[symbol].wins,
+            losses: symbolMap[symbol].losses,
+            winRate: ((symbolMap[symbol].wins / symbolMap[symbol].trades) * 100).toFixed(1),
+            totalReturn: 0,
+            totalProfitLoss: symbolMap[symbol].totalPnL,
+            avgReturn: (symbolMap[symbol].totalPnL / symbolMap[symbol].trades).toFixed(2)
+        }));
+        
+        return {
+            hasData: true,
+            metrics: {
+                totalDecisions: trades.length,
+                totalTrades: trades.length,
+                wins,
+                losses,
+                winRate: winRate.toFixed(1),
+                avgWin: avgWin.toFixed(2),
+                avgLoss: avgLoss.toFixed(2),
+                totalProfitLoss: totalPnL.toFixed(2),
+                profitFactor: profitFactor.toFixed(2),
+                sharpeRatio: sharpeRatio.toFixed(2),
+                maxDrawdown: maxDrawdown.toFixed(2),
+                avgHoldDays: avgHoldDays.toFixed(1),
+                maxConsecutiveLosses,
+                calmarRatio: maxDrawdown > 0 ? (totalPnL / maxDrawdown).toFixed(2) : '0.00',
+                sortinoRatio: sharpeRatio.toFixed(2), // Simplified
+                exposurePercent: '45' // Default - could calculate from position sizes
+            },
+            symbolPerformance,
+            equityCurve,
+            bestTrades: trades
+                .filter(t => t.profit_loss > 0)
+                .sort((a, b) => b.profit_loss - a.profit_loss)
+                .slice(0, 5)
+                .map(t => ({
+                    symbol: t.symbol,
+                    buyPrice: t.entry_price,
+                    sellPrice: t.exit_price,
+                    quantity: t.contracts,
+                    profitLoss: parseFloat(t.profit_loss),
+                    return: ((t.exit_price - t.entry_price) / t.entry_price * 100),
+                    date: t.exit_date
+                })),
+            worstTrades: trades
+                .filter(t => t.profit_loss < 0)
+                .sort((a, b) => a.profit_loss - b.profit_loss)
+                .slice(0, 5)
+                .map(t => ({
+                    symbol: t.symbol,
+                    buyPrice: t.entry_price,
+                    sellPrice: t.exit_price,
+                    quantity: t.contracts,
+                    profitLoss: parseFloat(t.profit_loss),
+                    return: ((t.exit_price - t.entry_price) / t.entry_price * 100),
+                    date: t.exit_date
+                }))
+        };
+    } catch (error) {
+        console.error('[Options Backtest] Error generating report:', error);
+        throw error;
+    }
+}
+
 module.exports = {
     getBacktestReport,
+    getOptionsBacktestReport,
     getUserTrades,
     calculatePerformanceMetrics
 };

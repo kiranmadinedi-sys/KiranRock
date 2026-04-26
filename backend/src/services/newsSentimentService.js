@@ -1,5 +1,132 @@
-const YahooFinance = require('yahoo-finance2').default;
-const yahooFinance = new YahooFinance();
+const fs = require('fs');
+const path = require('path');
+const yfClient = require('../utils/yfClient');
+const cacheService = require('./cacheService');
+const { fetchAlphaVantageNews } = require('./newsAggregationService');
+const { fetchXSymbolNews, isXConfigured } = require('./xNewsService');
+
+const NEWS_SENTIMENT_CACHE_FILE = path.join(__dirname, '../storage/newsSentimentCache.json');
+const NEWS_SENTIMENT_CACHE_MS = Math.max(5 * 60 * 1000, parseInt(process.env.NEWS_SENTIMENT_CACHE_MS || `${30 * 60 * 1000}`, 10));
+const NEWS_SENTIMENT_STALE_MS = Math.max(NEWS_SENTIMENT_CACHE_MS, parseInt(process.env.NEWS_SENTIMENT_STALE_MS || `${6 * 60 * 60 * 1000}`, 10));
+const NEWS_SENTIMENT_MAX_ARTICLES = Math.max(6, Math.min(20, parseInt(process.env.NEWS_SENTIMENT_MAX_ARTICLES || '12', 10)));
+
+function readPersistedCache() {
+    try {
+        if (fs.existsSync(NEWS_SENTIMENT_CACHE_FILE)) {
+            return JSON.parse(fs.readFileSync(NEWS_SENTIMENT_CACHE_FILE, 'utf8'));
+        }
+    } catch (error) {
+        console.error('Error reading news sentiment cache:', error.message);
+    }
+    return {};
+}
+
+function writePersistedCache(data) {
+    try {
+        fs.writeFileSync(NEWS_SENTIMENT_CACHE_FILE, JSON.stringify(data, null, 2));
+    } catch (error) {
+        console.error('Error writing news sentiment cache:', error.message);
+    }
+}
+
+function getPersistedCacheEntry(symbol) {
+    const cache = readPersistedCache();
+    return cache[symbol] || null;
+}
+
+function setPersistedCacheEntry(symbol, payload) {
+    const cache = readPersistedCache();
+    cache[symbol] = {
+        updatedAt: Date.now(),
+        payload
+    };
+    writePersistedCache(cache);
+}
+
+function normalizeYahooArticles(symbol, news) {
+    const items = news?.news || [];
+    return items.map(article => ({
+        symbol,
+        title: article.title,
+        summary: article.summary || '',
+        publisher: article.publisher || 'Yahoo Finance',
+        source: 'Yahoo Finance',
+        sourceType: 'news',
+        link: article.link,
+        publishedAt: article.providerPublishTime
+            ? new Date(article.providerPublishTime * 1000).toISOString()
+            : new Date().toISOString(),
+        weight: 1.0
+    }));
+}
+
+function normalizeAlphaVantageArticles(symbol, items = []) {
+    return items.map(article => ({
+        symbol,
+        title: article.headline,
+        summary: article.summary || '',
+        publisher: article.source || 'Alpha Vantage',
+        source: article.source || 'Alpha Vantage',
+        sourceType: 'news',
+        link: article.url,
+        publishedAt: article.published_at || new Date().toISOString(),
+        weight: 1.15,
+        providedSentiment: typeof article.sentiment === 'number' ? article.sentiment : null
+    }));
+}
+
+function normalizeXArticles(symbol, items = []) {
+    return items.map(article => ({
+        symbol,
+        title: article.headline || article.summary || 'X post',
+        summary: article.summary || article.headline || '',
+        publisher: article.publisher || 'X',
+        source: 'X',
+        sourceType: 'social',
+        link: article.url || article.link,
+        publishedAt: article.publishedAt || article.published_at || new Date().toISOString(),
+        engagement: article.engagement || 0,
+        weight: 0.65
+    }));
+}
+
+function deduplicateArticles(articles) {
+    const seen = new Set();
+    return articles.filter(article => {
+        const key = `${article.link || ''}|${String(article.title || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').slice(0, 120)}`;
+        if (seen.has(key)) {
+            return false;
+        }
+        seen.add(key);
+        return true;
+    });
+}
+
+function getArticleWeight(article) {
+    let weight = article.weight || 1;
+    const publishedAtMs = article.publishedAt ? new Date(article.publishedAt).getTime() : Date.now();
+    const ageHours = Number.isFinite(publishedAtMs) ? (Date.now() - publishedAtMs) / (1000 * 60 * 60) : 0;
+
+    if (ageHours <= 6) weight *= 1.15;
+    else if (ageHours <= 24) weight *= 1.05;
+    else if (ageHours > 72) weight *= 0.85;
+
+    if (article.sourceType === 'social' && article.engagement) {
+        weight *= Math.min(1.35, 0.85 + Math.log10(article.engagement + 1) * 0.15);
+    }
+
+    return Math.max(0.35, Math.min(1.5, weight));
+}
+
+function buildNeutralResult(message, meta = {}) {
+    return {
+        error: message,
+        articles: [],
+        sentiment: { score: 0, label: 'Neutral', confidence: 'Low', breakdown: {} },
+        summary: 'Sentiment data unavailable',
+        meta
+    };
+}
 
 /**
  * Fetches and analyzes news sentiment for a stock.
@@ -7,51 +134,136 @@ const yahooFinance = new YahooFinance();
  * @returns {Promise<Object>} News and sentiment analysis
  */
 const getNewsSentiment = async (symbol) => {
-    try {
-        // Fetch recent news
-        const news = await yahooFinance.search(symbol, { newsCount: 20 });
-        
-        if (!news || !news.news || news.news.length === 0) {
-            return {
-                error: 'No news available',
-                articles: [],
-                sentiment: { score: 0, label: 'Neutral', confidence: 'Low' }
-            };
-        }
+    const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+    const cacheKey = `news_sentiment_${normalizedSymbol}`;
+    const inMemory = cacheService.get(cacheKey);
+    if (inMemory) {
+        return {
+            ...inMemory,
+            meta: {
+                ...(inMemory.meta || {}),
+                cache: 'memory',
+                stale: false
+            }
+        };
+    }
 
-        // Analyze sentiment from headlines and summaries
-        const articles = news.news.map(article => ({
-            title: article.title,
-            publisher: article.publisher,
-            link: article.link,
-            publishedAt: new Date(article.providerPublishTime * 1000).toISOString(),
-            sentiment: analyzeSentiment(article.title + ' ' + (article.summary || ''))
+    const persisted = getPersistedCacheEntry(normalizedSymbol);
+    const persistedAge = persisted ? Date.now() - persisted.updatedAt : Number.POSITIVE_INFINITY;
+
+    if (persisted && persistedAge <= NEWS_SENTIMENT_CACHE_MS) {
+        cacheService.set(cacheKey, persisted.payload, NEWS_SENTIMENT_CACHE_MS);
+        return {
+            ...persisted.payload,
+            meta: {
+                ...(persisted.payload.meta || {}),
+                cache: 'disk',
+                stale: false
+            }
+        };
+    }
+
+    try {
+        const [news, alphaVantageNews, xNews] = await Promise.all([
+            yfClient.search(normalizedSymbol, { newsCount: 10 }).catch(() => null),
+            fetchAlphaVantageNews(normalizedSymbol).catch(() => []),
+            isXConfigured() ? fetchXSymbolNews(normalizedSymbol, { maxResults: 8 }).catch(() => []) : Promise.resolve([])
+        ]);
+
+        let articles = deduplicateArticles([
+            ...normalizeYahooArticles(normalizedSymbol, news),
+            ...normalizeAlphaVantageArticles(normalizedSymbol, alphaVantageNews),
+            ...normalizeXArticles(normalizedSymbol, xNews)
+        ]).map(article => ({
+            ...article,
+            weight: getArticleWeight(article),
+            sentiment: analyzeSentiment(`${article.title || ''} ${article.summary || ''}`)
         }));
+
+        articles.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+        articles = articles.slice(0, NEWS_SENTIMENT_MAX_ARTICLES);
+
+        if (articles.length === 0) {
+            if (persisted && persistedAge <= NEWS_SENTIMENT_STALE_MS) {
+                return {
+                    ...persisted.payload,
+                    meta: {
+                        ...(persisted.payload.meta || {}),
+                        cache: 'stale-disk',
+                        stale: true,
+                        staleReason: 'No fresh news available'
+                    }
+                };
+            }
+
+            return buildNeutralResult('No news available', {
+                symbol: normalizedSymbol,
+                xEnabled: isXConfigured(),
+                cache: 'miss',
+                stale: false
+            });
+        }
 
         // Calculate overall sentiment
         const overallSentiment = calculateOverallSentiment(articles);
         
         // Get analyst ratings if available
-        const analystRatings = await getAnalystRatings(symbol);
+        const analystRatings = await getAnalystRatings(normalizedSymbol);
         
         // Get historical sentiment trend
         const historicalSentiment = getHistoricalSentiment(articles);
 
-        return {
+        const sourceBreakdown = articles.reduce((acc, article) => {
+            const key = article.source || 'Unknown';
+            acc[key] = (acc[key] || 0) + 1;
+            return acc;
+        }, {});
+
+        const xPostCount = articles.filter(article => article.sourceType === 'social').length;
+
+        const result = {
             articles: articles.slice(0, 10),
             sentiment: overallSentiment,
             analystRatings,
             historicalSentiment,
-            summary: generateSentimentSummary(overallSentiment, analystRatings)
+            summary: generateSentimentSummary(overallSentiment, analystRatings, { xPostCount, sourceBreakdown }),
+            meta: {
+                symbol: normalizedSymbol,
+                articleCount: articles.length,
+                sourceBreakdown,
+                xEnabled: isXConfigured(),
+                xPostCount,
+                cache: 'fresh',
+                stale: false,
+                refreshedAt: new Date().toISOString()
+            }
         };
+
+        cacheService.set(cacheKey, result, NEWS_SENTIMENT_CACHE_MS);
+        setPersistedCacheEntry(normalizedSymbol, result);
+
+        return result;
     } catch (error) {
         console.error(`Error fetching news sentiment for ${symbol}:`, error.message);
-        return {
-            error: 'Unable to fetch news data',
-            articles: [],
-            sentiment: { score: 0, label: 'Neutral', confidence: 'Low' },
-            summary: 'Sentiment data unavailable'
-        };
+
+        if (persisted && persistedAge <= NEWS_SENTIMENT_STALE_MS) {
+            return {
+                ...persisted.payload,
+                meta: {
+                    ...(persisted.payload.meta || {}),
+                    cache: 'stale-disk',
+                    stale: true,
+                    staleReason: error.message
+                }
+            };
+        }
+
+        return buildNeutralResult('Unable to fetch news data', {
+            symbol: normalizedSymbol,
+            xEnabled: isXConfigured(),
+            cache: 'error',
+            stale: false
+        });
     }
 };
 
@@ -193,12 +405,18 @@ const calculateOverallSentiment = (articles) => {
         return { score: 0, label: 'Neutral', confidence: 'Low', breakdown: {} };
     }
 
-    const scores = articles.map(a => parseFloat(a.sentiment.score));
-    const avgScore = scores.reduce((a, b) => a + b, 0) / scores.length;
+    const weightedTotal = articles.reduce((sum, article) => {
+        const score = parseFloat(article.sentiment.score) || 0;
+        const weight = article.weight || 1;
+        return sum + (score * weight);
+    }, 0);
+    const totalWeight = articles.reduce((sum, article) => sum + (article.weight || 1), 0) || 1;
+    const avgScore = weightedTotal / totalWeight;
     
     const positive = articles.filter(a => a.sentiment.label.includes('Positive')).length;
     const negative = articles.filter(a => a.sentiment.label.includes('Negative')).length;
     const neutral = articles.length - positive - negative;
+    const uniqueSources = new Set(articles.map(article => article.source || 'Unknown')).size;
     
     let label = 'Neutral';
     if (avgScore > 20) label = 'Very Positive';
@@ -206,7 +424,9 @@ const calculateOverallSentiment = (articles) => {
     else if (avgScore < -20) label = 'Very Negative';
     else if (avgScore < -5) label = 'Negative';
     
-    const confidence = positive + negative > neutral ? 'High' : 'Medium';
+    let confidence = 'Low';
+    if (Math.abs(avgScore) >= 20 || totalWeight >= 8 || uniqueSources >= 3) confidence = 'High';
+    else if (positive + negative >= Math.max(2, neutral)) confidence = 'Medium';
     
     return {
         score: avgScore.toFixed(1),
@@ -216,7 +436,8 @@ const calculateOverallSentiment = (articles) => {
             positive: `${((positive / articles.length) * 100).toFixed(0)}%`,
             negative: `${((negative / articles.length) * 100).toFixed(0)}%`,
             neutral: `${((neutral / articles.length) * 100).toFixed(0)}%`
-        }
+        },
+        sourceCount: uniqueSources
     };
 };
 
@@ -225,8 +446,9 @@ const calculateOverallSentiment = (articles) => {
  */
 const getAnalystRatings = async (symbol) => {
     try {
-        const quoteSummary = await yahooFinance.quoteSummary(symbol, {
-            modules: ['recommendationTrend', 'financialData']
+        const quoteSummary = await yfClient.quoteSummary(symbol, {
+            modules: ['recommendationTrend', 'financialData'],
+            ttl: 60 * 60 * 1000
         });
 
         const recommendation = quoteSummary.financialData?.recommendationKey;
@@ -274,7 +496,7 @@ const deriveConsensus = (trend) => {
 /**
  * Generates sentiment summary with AI-based insights.
  */
-const generateSentimentSummary = (sentiment, analystRatings) => {
+const generateSentimentSummary = (sentiment, analystRatings, meta = {}) => {
     const sentimentText = sentiment.label;
     const analystText = analystRatings?.consensus || 'No analyst data';
     
@@ -300,6 +522,20 @@ const generateSentimentSummary = (sentiment, analystRatings) => {
         if (totalAnalysts > 0) {
             const buyPercent = ((analystRatings.strongBuy + analystRatings.buy) / totalAnalysts * 100).toFixed(0);
             summary += `${buyPercent}% recommend buy (${totalAnalysts} analysts).`;
+        }
+    }
+
+    if (meta.xPostCount) {
+        summary += `\n\n📣 Social signal: ${meta.xPostCount} recent X posts were blended into the score with reduced weight.`;
+    }
+
+    if (meta.sourceBreakdown) {
+        const sourceSummary = Object.entries(meta.sourceBreakdown)
+            .map(([source, count]) => `${source}: ${count}`)
+            .slice(0, 4)
+            .join(', ');
+        if (sourceSummary) {
+            summary += `\n\n🗞️ Sources used: ${sourceSummary}.`;
         }
     }
     

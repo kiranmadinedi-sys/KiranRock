@@ -44,7 +44,7 @@ const AlertsPage = () => {
         };
         const fetchNewsAlerts = async () => {
             try {
-                const response = fetch(`${getApiBaseUrl()}/api/news-alerts?limit=20`, {
+                const response = await fetch(`${getApiBaseUrl()}/api/news-alerts?limit=20`, {
                     headers: { Authorization: `Bearer ${token}` },
                 });
                 if (response.ok) {
@@ -67,8 +67,8 @@ const AlertsPage = () => {
             return;
         }
         setIsSearching(true);
-        try {
-            const response = fetch(`${getApiBaseUrl()}/api/stocks/search?query=${query}`, {
+            try {
+                const response = await fetch(`${getApiBaseUrl()}/api/stocks/search?query=${query}`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
             if (response.ok) {
@@ -102,16 +102,16 @@ const AlertsPage = () => {
             console.error("[DIAGNOSTIC] No token available. Aborting price fetch.");
             return;
         }
-        try {
-            console.log(`[DIAGNOSTIC] Fetching price for ${symbol}...`);
-            const response = fetch(`${getApiBaseUrl()}/api/stocks/price/${symbol}`, {
-                headers: { Authorization: `Bearer ${token}` },
-            });
-            
-            console.log('[DIAGNOSTIC] Raw API response:', response);
+            try {
+                console.log(`[DIAGNOSTIC] Fetching price for ${symbol}...`);
+                const response = await fetch(`${getApiBaseUrl()}/api/stocks/price/${symbol}`, {
+                    headers: { Authorization: `Bearer ${token}` },
+                });
 
-            if (response.ok) {
-                const data = await response.json();
+                console.log('[DIAGNOSTIC] Raw API response:', response);
+
+                if (response.ok) {
+                    const data = await response.json();
                 console.log('[DIAGNOSTIC] Parsed JSON data:', data);
 
                 if (data.price) {
@@ -145,7 +145,7 @@ const AlertsPage = () => {
         e.preventDefault();
         if (!token || !newAlert.symbol || !newAlert.targetPrice) return;
         try {
-            const response = fetch(`${getApiBaseUrl()}/api/alerts`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/alerts`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -170,7 +170,7 @@ const AlertsPage = () => {
     const handleDeleteAlert = async (id: string) => {
         if (!token) return;
         try {
-            const response = fetch(`${getApiBaseUrl()}/api/alerts/${id}`, {
+            const response = await fetch(`${getApiBaseUrl()}/api/alerts/${id}`, {
                 method: 'DELETE',
                 headers: { Authorization: `Bearer ${token}` },
             });

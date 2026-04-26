@@ -11,11 +11,17 @@
     "AAPL",
     "TSLA",
     "V",
-    "GOOG"
+    "GOOG",
+    "AMD",
+    "MRVL"
   ],
   "adbc9127-f105-447f-9489-93cce427aebc": [
     "AAPL",
     "V",
-    "PYPL"
+    "NVDA",
+    "GOOG"
+  ],
+  "ca632c53-8798-46f4-be94-29be0fede7f2": [
+    "V"
   ]
 }

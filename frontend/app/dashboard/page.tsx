@@ -18,6 +18,7 @@ import NewsSentimentView from '../components/NewsSentimentView';
 import VolumeAnalysisView from '../components/VolumeAnalysisView';
 import PatternDetectionView from '../components/PatternDetectionView';
 import MoneyFlowView from '../components/MoneyFlowView';
+import OptionsBotView from '../components/OptionsBotView';
 import OptionsView from '../components/OptionsView';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { getApiBaseUrl } from '../config';
@@ -31,6 +32,7 @@ interface SearchResult {
 
 export default function DashboardPage() {
     const router = useRouter();
+    const [authChecked, setAuthChecked] = useState(false);
     const [selectedStock, setSelectedStock] = useState('AAPL');
     const [symbols, setSymbols] = useState<string[]>([]);
     const [showAddModal, setShowAddModal] = useState(false);
@@ -41,7 +43,7 @@ export default function DashboardPage() {
     const [user, setUser] = useState<any>(null);
     const [latestSignal, setLatestSignal] = useState('Hold');
     const [token, setToken] = useState<string | null>(null);
-    const [activeTab, setActiveTab] = useState<'chart' | 'fundamentals' | 'news' | 'patterns' | 'moneyflow' | 'options'>('chart');
+    const [activeTab, setActiveTab] = useState<'chart' | 'fundamentals' | 'news' | 'patterns' | 'moneyflow' | 'options' | 'options-bot'>('chart');
     const [marketStatus, setMarketStatus] = useState<'open' | 'closed' | 'pre-market' | 'after-hours'>('closed');
     const [marketData, setMarketData] = useState({
         sp500: { value: 0, change: 0, changePercent: 0 },
@@ -207,17 +209,23 @@ export default function DashboardPage() {
         const storedUser = localStorage.getItem('user');
         
         if (!storedToken) {
-            router.push('/login');
-        } else {
-            setToken(storedToken);
-            if (storedUser) {
-                setUser(JSON.parse(storedUser));
-            }
-            
-            // Load user's watchlist
-            loadWatchlist(storedToken);
+            // Don't set authChecked, just redirect immediately
+            window.location.replace('/login');
+            return;
         }
-    }, [router]);
+        
+        setToken(storedToken);
+        if (storedUser) {
+            try {
+                setUser(JSON.parse(storedUser));
+            } catch (e) {
+                console.error('Failed to parse user data:', e);
+            }
+        }
+        
+        // Load user's watchlist - this will set authChecked when done
+        loadWatchlist(storedToken);
+    }, []);
     
     // Load user's watchlist
     const loadWatchlist = async (token: string) => {
@@ -240,6 +248,11 @@ export default function DashboardPage() {
                     setSymbols(defaultSymbols);
                     setSelectedStock(defaultSymbols[0]);
                 }
+            } else {
+                // Token might be invalid
+                const defaultSymbols = ['AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA'];
+                setSymbols(defaultSymbols);
+                setSelectedStock(defaultSymbols[0]);
             }
         } catch (error) {
             console.error('Error loading watchlist:', error);
@@ -247,6 +260,9 @@ export default function DashboardPage() {
             const defaultSymbols = ['AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA'];
             setSymbols(defaultSymbols);
             setSelectedStock(defaultSymbols[0]);
+        } finally {
+            // Mark auth as checked after watchlist attempt (success or failure)
+            setAuthChecked(true);
         }
     };
 
@@ -284,11 +300,21 @@ export default function DashboardPage() {
     useEffect(() => {
         const fetchMarketData = async () => {
             try {
-                // This would typically fetch from an API, for now using mock data
+                const apiUrl = getApiBaseUrl();
+                const savedToken = token || localStorage.getItem('token');
+                const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+                if (savedToken) headers['Authorization'] = `Bearer ${savedToken}`;
+
+                const [sp, nq, dj] = await Promise.all([
+                    fetch(`${apiUrl}/api/stocks/quote/%5EGSPC`, { headers }).then(r => r.ok ? r.json() : null),
+                    fetch(`${apiUrl}/api/stocks/quote/%5EIXIC`, { headers }).then(r => r.ok ? r.json() : null),
+                    fetch(`${apiUrl}/api/stocks/quote/%5EDJI`,  { headers }).then(r => r.ok ? r.json() : null),
+                ]);
+
                 setMarketData({
-                    sp500: { value: 4500.25, change: 15.30, changePercent: 0.34 },
-                    nasdaq: { value: 14250.80, change: -25.45, changePercent: -0.18 },
-                    dow: { value: 35600.50, change: 85.20, changePercent: 0.24 }
+                    sp500:  { value: sp?.regularMarketPrice  || sp?.price  || 0, change: sp?.regularMarketChange  || 0, changePercent: sp?.regularMarketChangePercent  || 0 },
+                    nasdaq: { value: nq?.regularMarketPrice  || nq?.price  || 0, change: nq?.regularMarketChange  || 0, changePercent: nq?.regularMarketChangePercent  || 0 },
+                    dow:    { value: dj?.regularMarketPrice  || dj?.price  || 0, change: dj?.regularMarketChange  || 0, changePercent: dj?.regularMarketChangePercent  || 0 },
                 });
             } catch (error) {
                 console.error('Error fetching market data:', error);
@@ -440,6 +466,15 @@ export default function DashboardPage() {
         );
     }
 
+    // Don't render until auth is checked
+    if (!authChecked) {
+        return (
+            <div className="min-h-screen bg-[var(--color-bg-primary)] flex items-center justify-center">
+                <div className="text-[var(--color-text-primary)]">Authenticating...</div>
+            </div>
+        );
+    }
+
     return (
         <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-gray-100 dark:from-gray-900 dark:via-slate-900 dark:to-gray-900 pb-20 lg:pb-8">
             <AppHeader showSearch={true} onSelectStock={handleSelectStock} symbols={symbols} />
@@ -487,27 +522,23 @@ export default function DashboardPage() {
                                 </div>
                             </div>
                             <div className="p-3 space-y-2">
-                                <div className="flex justify-between items-center p-2 sm:p-2.5 bg-gradient-to-r from-gray-50 to-gray-100 dark:from-gray-700 dark:to-gray-750 rounded-lg active:shadow-md transition-shadow touch-manipulation">
-                                    <span className="text-xs sm:text-sm font-semibold text-gray-700 dark:text-gray-300">S&P 500</span>
-                                    <div className="text-right">
-                                        <div className="text-xs sm:text-sm font-bold text-gray-900 dark:text-white">4,234.50</div>
-                                        <div className="text-[10px] sm:text-xs font-medium text-green-600 dark:text-green-400">▲ +0.8%</div>
+                                {[
+                                    { label: 'S&P 500', data: marketData.sp500 },
+                                    { label: 'NASDAQ',  data: marketData.nasdaq },
+                                    { label: 'DOW',     data: marketData.dow },
+                                ].map(({ label, data }) => (
+                                    <div key={label} className="flex justify-between items-center p-2 sm:p-2.5 bg-gradient-to-r from-gray-50 to-gray-100 dark:from-gray-700 dark:to-gray-750 rounded-lg active:shadow-md transition-shadow touch-manipulation">
+                                        <span className="text-xs sm:text-sm font-semibold text-gray-700 dark:text-gray-300">{label}</span>
+                                        <div className="text-right">
+                                            <div className="text-xs sm:text-sm font-bold text-gray-900 dark:text-white">
+                                                {data.value > 0 ? data.value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'}
+                                            </div>
+                                            <div className={`text-[10px] sm:text-xs font-medium ${data.changePercent >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                                                {data.changePercent >= 0 ? '▲' : '▼'} {data.changePercent >= 0 ? '+' : ''}{data.changePercent.toFixed(2)}%
+                                            </div>
+                                        </div>
                                     </div>
-                                </div>
-                                <div className="flex justify-between items-center p-2 sm:p-2.5 bg-gradient-to-r from-gray-50 to-gray-100 dark:from-gray-700 dark:to-gray-750 rounded-lg active:shadow-md transition-shadow touch-manipulation">
-                                    <span className="text-xs sm:text-sm font-semibold text-gray-700 dark:text-gray-300">NASDAQ</span>
-                                    <div className="text-right">
-                                        <div className="text-xs sm:text-sm font-bold text-gray-900 dark:text-white">12,845.20</div>
-                                        <div className="text-[10px] sm:text-xs font-medium text-green-600 dark:text-green-400">▲ +1.2%</div>
-                                    </div>
-                                </div>
-                                <div className="flex justify-between items-center p-2 sm:p-2.5 bg-gradient-to-r from-gray-50 to-gray-100 dark:from-gray-700 dark:to-gray-750 rounded-lg active:shadow-md transition-shadow touch-manipulation">
-                                    <span className="text-xs sm:text-sm font-semibold text-gray-700 dark:text-gray-300">DOW</span>
-                                    <div className="text-right">
-                                        <div className="text-xs sm:text-sm font-bold text-gray-900 dark:text-white">33,456.80</div>
-                                        <div className="text-[10px] sm:text-xs font-medium text-red-600 dark:text-red-400">▼ -0.3%</div>
-                                    </div>
-                                </div>
+                                ))}
                             </div>
                         </div>
                     </div>
@@ -560,6 +591,7 @@ export default function DashboardPage() {
                                         { id: 'news', label: 'News & Sentiment', icon: '📰' },
                                         { id: 'patterns', label: 'Patterns', icon: '📉' },
                                         { id: 'options', label: 'Options Chain', icon: '🎯' },
+                                        { id: 'options-bot', label: 'Options Bot', icon: '🤖' },
                                         { id: 'moneyflow', label: 'Money Flow', icon: '💰' },
                                     ].map((tab) => (
                                         <button
@@ -587,6 +619,7 @@ export default function DashboardPage() {
                                 {activeTab === 'news' && <NewsSentimentView symbol={selectedStock} />}
                                 {activeTab === 'patterns' && <PatternDetectionView symbol={selectedStock} />}
                                 {activeTab === 'options' && <OptionsView symbol={selectedStock} />}
+                                {activeTab === 'options-bot' && <OptionsBotView />}
                                 {activeTab === 'moneyflow' && <MoneyFlowView symbol={selectedStock} />}
                             </div>
                         </div>

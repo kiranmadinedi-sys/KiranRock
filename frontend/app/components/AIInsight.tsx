@@ -19,7 +19,7 @@ const AIInsight: React.FC<AIInsightProps> = ({ signal, symbol }) => {
       setLoading(true);
       const token = localStorage.getItem('token');
       try {
-  const response = fetch(`${getApiBaseUrl()}/api/ai/prediction/${symbol}`, {
+        const response = await fetch(`${getApiBaseUrl()}/api/ai/prediction/${symbol}`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         if (response.ok) {

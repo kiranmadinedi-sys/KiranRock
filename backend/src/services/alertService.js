@@ -1,73 +1,62 @@
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
+const { query } = require('../config/database');
 
-const usersFilePath = path.join(__dirname, '..', '..', 'users.json');
-
-const readUsers = () => {
-    if (!fs.existsSync(usersFilePath)) {
-        return [];
-    }
-    const data = fs.readFileSync(usersFilePath, 'utf8');
-    if (!data) {
-        return [];
-    }
+const getAlertsByUserId = async (userId) => {
     try {
-        return JSON.parse(data);
+        const result = await query(
+            'SELECT id, symbol, target_price as "targetPrice", created_at as "createdAt", triggered FROM alerts WHERE user_id = $1 ORDER BY created_at DESC',
+            [userId]
+        );
+        
+        return result.rows.map(alert => ({
+            id: alert.id.toString(),
+            symbol: alert.symbol,
+            targetPrice: parseFloat(alert.targetPrice),
+            createdAt: alert.createdAt,
+            triggered: alert.triggered
+        }));
     } catch (error) {
-        console.error('Error parsing users.json:', error);
-        return []; // Return empty array on parsing error
+        console.error('Error getting alerts:', error);
+        return [];
     }
 };
 
-const writeUsers = (users) => {
-    fs.writeFileSync(usersFilePath, JSON.stringify(users, null, 2));
-};
-
-const getAlertsByUserId = (userId) => {
-    const users = readUsers();
-    const user = users.find(u => u.id === userId);
-    return user ? user.alerts || [] : [];
-};
-
-const addAlert = (userId, symbol, targetPrice) => {
-    const users = readUsers();
-    const userIndex = users.findIndex(u => u.id === userId);
-    if (userIndex === -1) {
+const addAlert = async (userId, symbol, targetPrice) => {
+    try {
+        const result = await query(
+            'INSERT INTO alerts (user_id, symbol, target_price, created_at, triggered) VALUES ($1, $2, $3, NOW(), $4) RETURNING id, symbol, target_price as "targetPrice", created_at as "createdAt", triggered',
+            [userId, symbol.toUpperCase(), parseFloat(targetPrice), false]
+        );
+        
+        if (result.rows.length === 0) {
+            return null;
+        }
+        
+        const alert = result.rows[0];
+        return {
+            id: alert.id.toString(),
+            symbol: alert.symbol,
+            targetPrice: parseFloat(alert.targetPrice),
+            createdAt: alert.createdAt,
+            triggered: alert.triggered
+        };
+    } catch (error) {
+        console.error('Error adding alert:', error);
         return null;
     }
-
-    if (!users[userIndex].alerts) {
-        users[userIndex].alerts = [];
-    }
-
-    const newAlert = {
-        id: crypto.randomUUID(),
-        symbol,
-        targetPrice: parseFloat(targetPrice),
-        createdAt: new Date().toISOString(),
-    };
-
-    users[userIndex].alerts.push(newAlert);
-    writeUsers(users);
-    return newAlert;
 };
 
-const deleteAlert = (userId, alertId) => {
-    const users = readUsers();
-    const userIndex = users.findIndex(u => u.id === userId);
-    if (userIndex === -1) {
+const deleteAlert = async (userId, alertId) => {
+    try {
+        const result = await query(
+            'DELETE FROM alerts WHERE id = $1 AND user_id = $2 RETURNING id',
+            [alertId, userId]
+        );
+        
+        return result.rows.length > 0;
+    } catch (error) {
+        console.error('Error deleting alert:', error);
         return false;
     }
-
-    const alertIndex = users[userIndex].alerts.findIndex(a => a.id === alertId);
-    if (alertIndex === -1) {
-        return false;
-    }
-
-    users[userIndex].alerts.splice(alertIndex, 1);
-    writeUsers(users);
-    return true;
 };
 
 module.exports = { getAlertsByUserId, addAlert, deleteAlert };

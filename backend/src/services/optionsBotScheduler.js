@@ -52,7 +52,9 @@ function isMarketOpen() {
 async function getActiveOptionsBotUsers() {
     try {
         const result = await query(`
-            SELECT DISTINCT u.id, u.username, obc.* 
+            SELECT u.id, u.username,
+                   obc.enabled, obc.max_position_risk, obc.max_account_risk,
+                   obc.max_open_positions, obc.max_daily_loss
             FROM users u
             INNER JOIN options_bot_config obc ON u.id = obc.user_id
             WHERE obc.enabled = true

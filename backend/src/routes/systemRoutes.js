@@ -273,7 +273,7 @@ router.get('/trade-attribution', protect, async (req, res) => {
                   AND pnl IS NOT NULL
                   AND created_at >= NOW() - INTERVAL '${days} days'
                 GROUP BY 1 HAVING COUNT(*) >= 2
-                ORDER BY total_pnl DESC
+                ORDER BY SUM(pnl) DESC
             `, [userId || null]),
         ]);
 

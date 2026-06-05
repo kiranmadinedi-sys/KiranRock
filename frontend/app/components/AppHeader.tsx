@@ -1,11 +1,11 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import StockSearch from './StockSearch';
 import ThemeToggle from './ThemeToggle';
 import { clearAuthToken } from '../utils/session';
+import { useNotifications } from '../contexts/NotificationContext';
 
 interface AppHeaderProps {
     onSelectStock?: (symbol: string) => void;
@@ -15,10 +15,14 @@ interface AppHeaderProps {
 
 const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true, symbols = [] }) => {
     const pathname = usePathname();
-    const router = useRouter();
+    const { popupUnreadCount } = useNotifications();
     const [user, setUser] = useState<any>(null);
     const [marketStatus, setMarketStatus] = useState<'open' | 'closed' | 'pre-market' | 'after-hours'>('closed');
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+    const navigateTo = (href: string) => {
+        window.location.assign(href);
+    };
 
     useEffect(() => {
         const storedUser = localStorage.getItem('user');
@@ -80,19 +84,39 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
     };
 
     const navItems = [
-        { href: '/dashboard', label: 'Dashboard', icon: '📊' },
-        { href: '/portfolio', label: 'Portfolio', icon: '💼' },
-        { href: '/recommendations', label: 'Recommendations', icon: '🎯' },
-        { href: '/alerts', label: 'Alerts', icon: '🔔' },
-        { href: '/news', label: 'News', icon: '📰' },
-        { href: '/weekly', label: 'Next Week', icon: '📅' },
-        { href: '/ai-trading', label: 'AI Trading', icon: '🤖' },
-        { href: '/options-bot', label: 'Options Bot', icon: '🤖' },
-        { href: '/swing-trading', label: 'Swing', icon: '📈' },
-        { href: '/backtest', label: 'Backtest', icon: '📊' },
-        { href: '/scalping', label: 'Scalping', icon: '⚡' },
-        { href: '/scenarios', label: 'Scenarios', icon: '🎯' },
+        { href: '/dashboard',       label: 'Dashboard',  icon: '📊' },
+        { href: '/portfolio',       label: 'Portfolio',  icon: '💼' },
+        { href: '/performance',     label: 'Performance',icon: '📈' },
+        { href: '/recommendations', label: 'Picks',      icon: '🎯' },
+        { href: '/alerts',          label: 'Alerts',     icon: '🔔' },
+        { href: '/news',            label: 'News',       icon: '📰' },
+        { href: '/weekly',          label: 'Weekly',     icon: '📅' },
+        { href: '/ai-trading',      label: 'AI Bot',     icon: '🤖' },
+        { href: '/options-bot',     label: 'Options',    icon: '⚙️' },
+        { href: '/swing-trading',   label: 'Swing',      icon: '🔄' },
+        { href: '/backtest',        label: 'Backtest',   icon: '🧪' },
+        { href: '/scalping',        label: 'Scalping',   icon: '⚡' },
+        { href: '/scenarios',       label: 'Scenarios',  icon: '🗺️' },
+        { href: '/enquiry',         label: 'Enquiry',    icon: '💬' },
+        { href: '/localdata',       label: 'Data',       icon: '🗄️' },
+        { href: '/universe',        label: 'Universe',   icon: '🔭' },
+        { href: '/signals',         label: 'Signals',    icon: '⭐' },
+        { href: '/live-readiness',  label: 'SENTINEL',   icon: '🛡️' },
     ];
+
+    const renderBadge = (count: number) => {
+        if (!count) {
+            return null;
+        }
+
+        return (
+            <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-red-500 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
+                {count > 99 ? '99+' : count}
+            </span>
+        );
+    };
+
+    const getNavBadge = (href: string) => href === '/alerts' ? popupUnreadCount : 0;
 
     return (
         <>
@@ -121,6 +145,19 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
                                 <span className="hidden sm:inline">{getMarketStatusText()}</span>
                                 <span className="sm:hidden">{marketStatus === 'open' ? 'Open' : 'Closed'}</span>
                             </div>
+                            <button
+                                type="button"
+                                onClick={() => navigateTo('/alerts')}
+                                className="relative rounded-lg p-2 text-white hover:bg-gray-700 transition-colors"
+                                aria-label="Open alerts"
+                            >
+                                <span className="text-lg">🔔</span>
+                                {popupUnreadCount > 0 && (
+                                    <span className="absolute -right-1 -top-1 inline-flex min-w-5 items-center justify-center rounded-full bg-red-500 px-1 py-0.5 text-[10px] font-bold leading-none text-white">
+                                        {popupUnreadCount > 99 ? '99+' : popupUnreadCount}
+                                    </span>
+                                )}
+                            </button>
                         </div>
 
                         {/* Search Bar - Desktop */}
@@ -144,9 +181,9 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
                                     </div>
                                 </div>
                             )}
-                            <Link href="/profile" className="p-2 text-gray-400 hover:text-white hover:bg-gray-700 rounded-lg transition-colors" title="Settings">
+                            <button onClick={() => navigateTo('/profile')} className="p-2 text-gray-400 hover:text-white hover:bg-gray-700 rounded-lg transition-colors" title="Settings" type="button">
                                 ⚙️
-                            </Link>
+                            </button>
                             <ThemeToggle />
                             <button onClick={handleLogout} className="px-3 py-1.5 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors">
                                 Logout
@@ -174,20 +211,22 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
             {/* Desktop Navigation */}
             <nav className="hidden lg:block bg-gradient-to-r from-gray-800 to-gray-900 border-b border-gray-700 sticky top-14 sm:top-16 z-40">
                 <div className="max-w-full px-6">
-                    <div className="flex items-center gap-1 overflow-x-auto scrollbar-hide py-1">
+                    <div className="flex items-center justify-evenly py-1">
                         {navItems.map((item) => (
-                            <Link
+                            <button
                                 key={item.href}
-                                href={item.href}
-                                className={`flex items-center gap-2 px-4 py-2 text-sm font-semibold whitespace-nowrap transition-all rounded-t-lg border-b-2 ${
+                                type="button"
+                                onClick={() => navigateTo(item.href)}
+                                className={`flex items-center justify-center gap-1.5 px-2 py-1.5 text-xs sm:text-sm font-semibold whitespace-nowrap transition-all rounded-t-lg border-b-2 flex-1 ${
                                     pathname === item.href
                                         ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white border-blue-400'
                                         : 'text-gray-300 hover:text-white hover:bg-gray-700/50 border-transparent'
                                 }`}
                             >
                                 <span>{item.icon}</span>
-                                <span>{item.label}</span>
-                            </Link>
+                                <span className="hidden sm:inline">{item.label}</span>
+                                {renderBadge(getNavBadge(item.href))}
+                            </button>
                         ))}
                     </div>
                 </div>
@@ -197,18 +236,26 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
             <nav className="lg:hidden fixed bottom-0 left-0 right-0 bg-gray-900 border-t border-gray-700 z-50 safe-area-inset-bottom">
                 <div className="flex justify-around items-center h-16">
                     {navItems.slice(0, 5).map((item) => (
-                        <Link
+                        <button
                             key={item.href}
-                            href={item.href}
+                            type="button"
+                            onClick={() => navigateTo(item.href)}
                             className={`flex flex-col items-center justify-center flex-1 h-full gap-1 transition-colors touch-manipulation ${
                                 pathname === item.href
                                     ? 'text-blue-400 bg-gray-800'
                                     : 'text-gray-400 active:bg-gray-800'
                             }`}
                         >
-                            <span className="text-xl">{item.icon}</span>
+                            <span className="relative text-xl">
+                                {item.icon}
+                                {getNavBadge(item.href) > 0 && (
+                                    <span className="absolute -right-3 -top-2 inline-flex min-w-4 items-center justify-center rounded-full bg-red-500 px-1 py-0.5 text-[9px] font-bold leading-none text-white">
+                                        {getNavBadge(item.href) > 9 ? '9+' : getNavBadge(item.href)}
+                                    </span>
+                                )}
+                            </span>
                             <span className="text-[10px] font-medium">{item.label.split(' ')[0]}</span>
-                        </Link>
+                        </button>
                     ))}
                 </div>
             </nav>
@@ -263,10 +310,13 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
                             {/* All Navigation Links */}
                             <nav className="space-y-1 mb-6">
                                 {navItems.map((item) => (
-                                    <Link
+                                    <button
                                         key={item.href}
-                                        href={item.href}
-                                        onClick={() => setMobileMenuOpen(false)}
+                                        type="button"
+                                        onClick={() => {
+                                            setMobileMenuOpen(false);
+                                            navigateTo(item.href);
+                                        }}
                                         className={`flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-all touch-manipulation min-h-[44px] ${
                                             pathname === item.href
                                                 ? 'bg-blue-600 text-white'
@@ -275,20 +325,24 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
                                     >
                                         <span className="text-xl">{item.icon}</span>
                                         <span>{item.label}</span>
-                                    </Link>
+                                        {renderBadge(getNavBadge(item.href))}
+                                    </button>
                                 ))}
                             </nav>
 
                             {/* Bottom Actions */}
                             <div className="pt-4 border-t border-gray-700 space-y-3">
-                                <Link
-                                    href="/profile"
-                                    onClick={() => setMobileMenuOpen(false)}
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setMobileMenuOpen(false);
+                                        navigateTo('/profile');
+                                    }}
                                     className="flex items-center gap-3 px-4 py-3 text-gray-300 hover:bg-gray-800 hover:text-white rounded-lg transition-colors touch-manipulation min-h-[44px]"
                                 >
                                     <span className="text-xl">⚙️</span>
                                     <span>Settings</span>
-                                </Link>
+                                </button>
                                 <div className="flex items-center justify-between px-4 py-2">
                                     <span className="text-gray-300">Dark Mode</span>
                                     <ThemeToggle />

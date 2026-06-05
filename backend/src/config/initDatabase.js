@@ -257,10 +257,12 @@ async function initializeDatabase() {
             ON CONFLICT (id) DO NOTHING
         `);
         // DB-backed HALT_ALL fallback columns (added after initial table creation)
-        // Idempotent — ALTER TABLE IF NOT EXISTS column syntax (PostgreSQL 9.6+)
         await query(`ALTER TABLE system_controls ADD COLUMN IF NOT EXISTS halt_all_reason TEXT`);
         await query(`ALTER TABLE system_controls ADD COLUMN IF NOT EXISTS halt_all_set_at  TIMESTAMPTZ`);
         console.log('✓ Created system_controls table');
+
+        // holdings.created_at — required by positionReconciliationService SHADOW fix
+        await query(`ALTER TABLE holdings ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()`);
 
         await query(`
             CREATE TABLE IF NOT EXISTS worker_runtime_status (

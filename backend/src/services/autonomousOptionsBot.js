@@ -143,6 +143,12 @@ const DEFAULT_USER_BOT_CONFIG = {
 };
 
 async function getUserBotConfig(userId) {
+    // Guard: skip users not in the users table (e.g. probe/healthcheck accounts)
+    const userCheck = await query(`SELECT id FROM users WHERE id = $1`, [userId]);
+    if (userCheck.rows.length === 0) {
+        logger.warn('[OptionsBot] getUserBotConfig skipped — user not in users table', { userId });
+        return DEFAULT_USER_BOT_CONFIG;
+    }
     const result = await query(
         `INSERT INTO options_bot_config (
             user_id, enabled, scalping_enabled, swing_enabled, spreads_enabled, hedging_enabled,

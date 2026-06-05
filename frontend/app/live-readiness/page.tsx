@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import AppHeader from '../components/AppHeader';
-import { getApiBaseUrl } from '../utils/config';
+import { getApiBaseUrl } from '../config';
 
 interface Blockers {
     duplicateOrders: number;

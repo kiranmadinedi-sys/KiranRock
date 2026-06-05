@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import AppHeader from '../components/AppHeader';
+
 import { getApiBaseUrl } from '../config';
 
 interface NewsItem {
@@ -172,7 +172,7 @@ export default function NewsPage() {
 
   return (
     <>
-      <AppHeader showSearch={false} />
+
       <div className="min-h-screen bg-gray-900 text-white pt-32 pb-20">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           {/* TradingView-style Header */}

@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KiranRock Trading – AI Revolution</title>
+  <style>
+    body {
+      margin: 0; padding: 0;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: linear-gradient(135deg, #0f2027 0%, #2c5364 100%);
+      color: #fff;
+      min-height: 100vh;
+    }
+    .hero {
+      text-align: center;
+      padding: 48px 16px 24px 16px;
+      background: linear-gradient(120deg, #00cfff 0%, #005bea 100%);
+      color: #fff;
+      border-bottom-left-radius: 48px;
+      border-bottom-right-radius: 48px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+    }
+    .hero h1 {
+      font-size: 2.5em;
+      margin: 0 0 0.2em 0;
+      font-weight: 800;
+      letter-spacing: 1px;
+      text-shadow: 0 2px 16px #005bea88;
+    }
+    .hero p {
+      font-size: 1.3em;
+      margin: 0.5em 0 1.5em 0;
+      font-weight: 400;
+    }
+    .cta-btn {
+      background: #ffb300;
+      color: #101820;
+      font-size: 1.2em;
+      font-weight: bold;
+      padding: 16px 32px;
+      border: none;
+      border-radius: 32px;
+      box-shadow: 0 2px 12px #0003;
+      cursor: pointer;
+      margin-top: 1.5em;
+      transition: background 0.2s;
+    }
+    .cta-btn:hover {
+      background: #ff9100;
+    }
+    .voiceover-box {
+      background: #fff2;
+      border-radius: 18px;
+      margin: 2em auto 1em auto;
+      max-width: 420px;
+      padding: 18px 18px 8px 18px;
+      box-shadow: 0 2px 12px #0002;
+      text-align: center;
+    }
+    .voiceover-box label {
+      font-size: 1.1em;
+      font-weight: 600;
+      color: #ffb300;
+      display: block;
+      margin-bottom: 0.5em;
+    }
+    .features {
+      max-width: 700px;
+      margin: 2.5em auto 0 auto;
+      padding: 0 16px;
+    }
+    .features h2 {
+      color: #00cfff;
+      font-size: 1.5em;
+      margin-bottom: 0.5em;
+      text-align: center;
+    }
+    .features-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 18px;
+      justify-content: center;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    .features-list li {
+      background: #1a2636;
+      border-radius: 16px;
+      padding: 18px 22px;
+      min-width: 220px;
+      max-width: 320px;
+      flex: 1 1 220px;
+      font-size: 1.08em;
+      box-shadow: 0 2px 8px #0002;
+      text-align: left;
+    }
+    .countdown {
+      text-align: center;
+      margin: 2.5em 0 1.5em 0;
+      font-size: 1.2em;
+      color: #ffb300;
+      font-weight: bold;
+    }
+    .why-join {
+      max-width: 700px;
+      margin: 2em auto 0 auto;
+      padding: 0 16px;
+      text-align: center;
+    }
+    .why-join h2 {
+      color: #ffb300;
+      margin-bottom: 0.5em;
+    }
+    .why-join ul {
+      list-style: none;
+      padding: 0;
+      margin: 0 auto;
+      max-width: 500px;
+      text-align: left;
+    }
+    .why-join li {
+      margin: 0.7em 0;
+      font-size: 1.08em;
+      padding-left: 1.2em;
+      position: relative;
+    }
+    .why-join li:before {
+      content: '★';
+      color: #00cfff;
+      position: absolute;
+      left: 0;
+      font-size: 1.1em;
+    }
+    @media (max-width: 600px) {
+      .hero { padding: 32px 6px 18px 6px; }
+      .hero h1 { font-size: 1.3em; }
+      .features-list li, .why-join li { font-size: 0.98em; }
+      .features h2, .why-join h2 { font-size: 1.1em; }
+      .cta-btn { font-size: 1em; padding: 12px 8px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="hero">
+    <h1>Welcome to KiranRock Trading</h1>
+    <p>Unleash the Power of AI. Trade Smarter. Win Bigger.<br>Paper Trading Today. Live in 15 Days!</p>
+    <button class="cta-btn" onclick="window.location.href='mailto:info@kiranrock.com?subject=Early%20Access%20Request'">Get Early Access</button>
+  </div>
+  <div class="presentation-box" style="max-width:600px;margin:2em auto 1em auto;background:#fff2;border-radius:18px;box-shadow:0 2px 12px #0002;padding:18px 18px 8px 18px;text-align:center;">
+    <label style="font-size:1.1em;font-weight:600;color:#ffb300;display:block;margin-bottom:0.5em;">▶ Executive Pitch (Animated Male Avatar + Energetic Voice)</label>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:1em;">
+      <img id="avatarAnim" src="https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif" alt="Animated Male Avatar" style="width:120px;height:120px;border-radius:50%;box-shadow:0 2px 8px #0004;object-fit:cover;">
+      <button id="playPitchBtn" class="cta-btn" style="margin:0 auto 0.5em auto;max-width:320px;">Play Executive Pitch</button>
+    </div>
+    <div id="ttsStatus" style="font-size:1em;color:#00cfff;margin-top:0.5em;min-height:1.5em;"></div>
+    <div style="font-size:0.95em;color:#aaa;margin-top:0.5em;">(Listen to the energetic AI pitch and watch the animated avatar!)</div>
+  </div>
+  <div class="countdown" id="countdown"></div>
+  <div class="features">
+    <h2>How Does KiranRock AI Trading Work?</h2>
+    <ul class="features-list">
+      <li><b>5-Tier Market Universe:</b> AI scans ETFs, mega-caps, earnings-watch, mid-caps, and speculative stocks for the best opportunities.</li>
+      <li><b>Real-Time AI Analysis:</b> Every 5 minutes, the system analyzes live market data, technicals, and news to score and rank stocks.</li>
+      <li><b>Smart Filtering:</b> Only the highest-quality, high-momentum stocks pass through to the trade engine.</li>
+      <li><b>Risk Management:</b> Advanced controls protect your capital with stop-loss, sector limits, and dynamic position sizing.</li>
+      <li><b>Paper Trading Today:</b> Experience the full AI engine in simulation mode—no real money at risk.</li>
+      <li><b>Live Trading Launch:</b> In 15 days, we go live! Early users get exclusive offers and priority onboarding.</li>
+    </ul>
+    <div style="text-align:center;margin-top:1.5em;font-size:1.1em;color:#00cfff;">
+      <b>Watch the animated video above and listen to the energetic executive narration for the full experience!</b>
+    </div>
+  </div>
+  <div class="why-join">
+    <h2>Why Join Now?</h2>
+    <ul>
+      <li>AI-Powered Edge: Outperform the market with institutional-grade intelligence.</li>
+      <li>Fully Automated: No manual screening, no guesswork—let the AI do the heavy lifting.</li>
+      <li>Mobile-Ready: Monitor and control your trades from anywhere, anytime.</li>
+      <li>Transparent & Secure: See every trade, every decision, and full performance analytics.</li>
+      <li>Exclusive Offers: Early access users get priority onboarding and special benefits.</li>
+    </ul>
+  </div>
+  <script>
+    // Countdown to live trading (15 days from today)
+    function updateCountdown() {
+      const launchDate = new Date();
+      launchDate.setDate(launchDate.getDate() + 15);
+      const now = new Date();
+      const diff = launchDate - now;
+      if (diff <= 0) {
+        document.getElementById('countdown').textContent = '🚀 Live Trading is Now Open!';
+        return;
+      }
+      const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+      const hours = Math.floor((diff / (1000 * 60 * 60)) % 24);
+      const mins = Math.floor((diff / (1000 * 60)) % 60);
+      document.getElementById('countdown').textContent = `Live Trading Launches In: ${days} days, ${hours} hours, ${mins} minutes`;
+    }
+    setInterval(updateCountdown, 60000);
+    updateCountdown();
+
+    // --- Executive Pitch TTS with Animated Avatar ---
+    const pitchText = `Welcome to KiranRock Trading! Unleash the power of AI and trade smarter, win bigger. Our revolutionary 5-tier market universe scans ETFs, mega-caps, earnings-watch, mid-caps, and speculative stocks for the best opportunities. Every 5 minutes, our AI analyzes live market data, technicals, and news to score and rank stocks. Only the highest-quality, high-momentum stocks pass through to the trade engine. Advanced risk management protects your capital with stop-loss, sector limits, and dynamic position sizing. Experience the full AI engine in paper trading mode today—no real money at risk. In just 15 days, we go live! Early users get exclusive offers and priority onboarding. Join KiranRock Trading and experience the future of investing!`;
+
+    const playPitchBtn = document.getElementById('playPitchBtn');
+    const avatarAnim = document.getElementById('avatarAnim');
+    const ttsStatus = document.getElementById('ttsStatus');
+    let ttsUtterance = null;
+    let ttsActive = false;
+
+    function pickMaleVoice(voices) {
+      // Prefer energetic/enhanced male voices if available
+      const preferred = voices.filter(v => v.lang.startsWith('en') && v.name.match(/(Male|David|Matthew|Joey|Justin|English)/i) && v.gender !== 'female');
+      return preferred[0] || voices.find(v => v.lang.startsWith('en') && v.gender !== 'female') || voices[0];
+    }
+
+    playPitchBtn.onclick = function() {
+      if (ttsActive && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+        ttsStatus.textContent = 'Pitch stopped.';
+        avatarAnim.src = 'https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif';
+        ttsActive = false;
+        playPitchBtn.textContent = 'Play Executive Pitch';
+        return;
+      }
+      if (!window.speechSynthesis) {
+        ttsStatus.textContent = 'Sorry, your browser does not support speech synthesis.';
+        return;
+      }
+      ttsStatus.textContent = 'Playing executive pitch...';
+      playPitchBtn.textContent = 'Stop Pitch';
+      avatarAnim.src = 'https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif';
+      ttsActive = true;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.onvoiceschanged = null;
+      const voices = window.speechSynthesis.getVoices();
+      function startTTS() {
+        ttsUtterance = new SpeechSynthesisUtterance(pitchText);
+        const voice = pickMaleVoice(voices);
+        if (voice) ttsUtterance.voice = voice;
+        ttsUtterance.rate = 1.08;
+        ttsUtterance.pitch = 1.05;
+        ttsUtterance.onend = function() {
+          ttsStatus.textContent = 'Pitch complete.';
+          avatarAnim.src = 'https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif';
+          ttsActive = false;
+          playPitchBtn.textContent = 'Play Executive Pitch';
+        };
+        ttsUtterance.onerror = function() {
+          ttsStatus.textContent = 'Error playing pitch.';
+          avatarAnim.src = 'https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif';
+          ttsActive = false;
+          playPitchBtn.textContent = 'Play Executive Pitch';
+        };
+        avatarAnim.src = 'https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif';
+        window.speechSynthesis.speak(ttsUtterance);
+      }
+      if (voices.length > 0) {
+        startTTS();
+      } else {
+        window.speechSynthesis.onvoiceschanged = function() {
+          startTTS();
+        };
+      }
+    };
+  </script>
+</body>
+</html>

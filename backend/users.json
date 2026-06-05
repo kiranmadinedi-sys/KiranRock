@@ -31,14 +31,14 @@
     ],
     "portfolio": [],
     "tradingAccount": {
-      "balance": 6713.4081,
-      "totalDeposited": 10000,
+      "balance": 100000,
+      "totalDeposited": 100000,
       "totalWithdrawn": 0,
       "deposits": [
         {
-          "id": "1765817124895",
-          "amount": 10000,
-          "timestamp": "2025-12-15T16:45:24.895Z",
+          "id": "1766388500678",
+          "amount": 100000,
+          "timestamp": "2025-12-22T07:28:20.678Z",
           "type": "deposit"
         }
       ],
@@ -364,45 +364,169 @@
         "totalCost": 639.64,
         "timestamp": "2025-12-15T16:46:09.858Z",
         "status": "executed"
-      }
-    ],
-    "holdings": [
-      {
-        "symbol": "NVDA",
-        "quantity": 5,
-        "averagePrice": 177.52,
-        "firstPurchaseDate": "2025-12-15T16:46:09.500Z",
-        "lastUpdated": "2025-12-15T16:46:09.500Z"
       },
       {
-        "symbol": "TSLA",
-        "quantity": 1,
-        "averagePrice": 477.16,
-        "firstPurchaseDate": "2025-12-15T16:46:09.595Z",
-        "lastUpdated": "2025-12-15T16:46:09.595Z"
-      },
-      {
-        "symbol": "META",
-        "quantity": 1,
-        "averagePrice": 649.335,
-        "firstPurchaseDate": "2025-12-15T16:46:09.679Z",
-        "lastUpdated": "2025-12-15T16:46:09.679Z"
-      },
-      {
-        "symbol": "AMD",
+        "id": "trade_1766300835070_piqvjc4a8",
+        "symbol": "AAPL",
+        "type": "BUY",
         "quantity": 3,
-        "averagePrice": 210.9523,
-        "firstPurchaseDate": "2025-12-15T16:46:09.763Z",
-        "lastUpdated": "2025-12-15T16:46:09.763Z"
+        "price": 273.67,
+        "totalCost": 821.01,
+        "timestamp": "2025-12-21T07:07:15.070Z",
+        "status": "executed"
       },
       {
-        "symbol": "JPM",
+        "id": "trade_1766300835222_fcfd44423",
+        "symbol": "MSFT",
+        "type": "BUY",
         "quantity": 2,
-        "averagePrice": 319.82,
-        "firstPurchaseDate": "2025-12-15T16:46:09.858Z",
-        "lastUpdated": "2025-12-15T16:46:09.858Z"
+        "price": 485.92,
+        "totalCost": 971.84,
+        "timestamp": "2025-12-21T07:07:15.222Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1766300835311_m32etqsjr",
+        "symbol": "GOOGL",
+        "type": "BUY",
+        "quantity": 2,
+        "price": 307.16,
+        "totalCost": 614.32,
+        "timestamp": "2025-12-21T07:07:15.311Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1766300835396_dqauujmht",
+        "symbol": "NVDA",
+        "type": "BUY",
+        "quantity": 3,
+        "price": 180.99,
+        "totalCost": 542.97,
+        "timestamp": "2025-12-21T07:07:15.396Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1766300835473_0zx3wgapr",
+        "symbol": "AMZN",
+        "type": "BUY",
+        "quantity": 2,
+        "price": 227.35,
+        "totalCost": 454.7,
+        "timestamp": "2025-12-21T07:07:15.473Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1766300835551_dvkdfl0jk",
+        "symbol": "AMD",
+        "type": "BUY",
+        "quantity": 2,
+        "price": 213.43,
+        "totalCost": 426.86,
+        "timestamp": "2025-12-21T07:07:15.551Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1766300835629_o2g79xqlu",
+        "symbol": "NFLX",
+        "type": "BUY",
+        "quantity": 5,
+        "price": 94.39,
+        "totalCost": 471.95,
+        "timestamp": "2025-12-21T07:07:15.629Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1766300835706_f5bnn42rs",
+        "symbol": "JPM",
+        "type": "BUY",
+        "quantity": 1,
+        "price": 317.21,
+        "totalCost": 317.21,
+        "timestamp": "2025-12-21T07:07:15.706Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1766388391827_codb771xk",
+        "symbol": "AAPL",
+        "type": "BUY",
+        "quantity": 6,
+        "price": 273.67,
+        "totalCost": 1642.02,
+        "timestamp": "2025-12-22T07:26:31.827Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1766388391847_lr4jcp2a6",
+        "symbol": "MSFT",
+        "type": "BUY",
+        "quantity": 3,
+        "price": 485.92,
+        "totalCost": 1457.76,
+        "timestamp": "2025-12-22T07:26:31.847Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1766388391925_uwnvfkrk7",
+        "symbol": "GOOGL",
+        "type": "BUY",
+        "quantity": 4,
+        "price": 307.16,
+        "totalCost": 1228.64,
+        "timestamp": "2025-12-22T07:26:31.925Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1766388391942_nqwy8ij33",
+        "symbol": "NVDA",
+        "type": "BUY",
+        "quantity": 6,
+        "price": 180.99,
+        "totalCost": 1085.94,
+        "timestamp": "2025-12-22T07:26:31.942Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1766388392020_j2yqy48t8",
+        "symbol": "AMZN",
+        "type": "BUY",
+        "quantity": 5,
+        "price": 227.35,
+        "totalCost": 1136.75,
+        "timestamp": "2025-12-22T07:26:32.020Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1766388392200_55mny682e",
+        "symbol": "AMD",
+        "type": "BUY",
+        "quantity": 3,
+        "price": 213.43,
+        "totalCost": 640.29,
+        "timestamp": "2025-12-22T07:26:32.200Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1766388392288_iosm9w2ip",
+        "symbol": "NFLX",
+        "type": "BUY",
+        "quantity": 10,
+        "price": 94.39,
+        "totalCost": 943.9,
+        "timestamp": "2025-12-22T07:26:32.288Z",
+        "status": "executed"
+      },
+      {
+        "id": "trade_1766388392304_o5vj5iunc",
+        "symbol": "JPM",
+        "type": "BUY",
+        "quantity": 2,
+        "price": 317.21,
+        "totalCost": 634.42,
+        "timestamp": "2025-12-22T07:26:32.304Z",
+        "status": "executed"
       }
     ],
+    "holdings": [],
     "firstName": "Kiran",
     "lastName": "Madinedi",
     "email": "kiran.madinedi@gmail.com",
@@ -411,9 +535,12 @@
     "aiTradingSettings": {
       "stopLoss": 0.06,
       "takeProfit": 0.4,
-      "minCashReserve": 0
+      "minCashReserve": 0.02
     },
-    "tradeHistory": []
+    "tradeHistory": [],
+    "aiTradingEnabled": true,
+    "aiTradingToggledAt": "2025-12-22T06:23:36.454Z",
+    "aiDecisions": []
   },
   {
     "id": "b6e15e2e-60f1-41f0-8747-e8ea65748e1a",

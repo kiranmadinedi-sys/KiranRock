@@ -3,7 +3,7 @@
 import { getApiBaseUrl } from '../config';
 
 import { useState } from 'react';
-import AppHeader from '../components/AppHeader';
+
 
 interface EMAAnalysis {
   signal: string;
@@ -109,7 +109,7 @@ export default function SwingTradingPage() {
       const symbols = scanInput.split(',').map(s => s.trim().toUpperCase()).filter(s => s);
       const token = localStorage.getItem('token');
       
-  const response = fetch(`${getApiBaseUrl()}/api/swing-trading/scan`, {
+      const response = await fetch(`${getApiBaseUrl()}/api/swing-trading/scan`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -144,7 +144,7 @@ export default function SwingTradingPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-gray-100 dark:from-gray-900 dark:via-slate-900 dark:to-gray-900">
-      <AppHeader showSearch={false} />
+
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-8">
         {error && (

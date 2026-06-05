@@ -3,7 +3,7 @@
 import { getApiBaseUrl } from '../config';
 
 import { useState, useEffect } from 'react';
-import AppHeader from '../components/AppHeader';
+
 import StockSearch from '../components/StockSearch';
 
 interface ScalpingOpportunity {
@@ -59,7 +59,7 @@ export default function ScalpingPage() {
   const loadWatchlist = async () => {
     try {
       const token = localStorage.getItem('token');
-  const response = fetch(`${getApiBaseUrl()}/api/scalping/watchlist/recommended`, {
+  const response = await fetch(`${getApiBaseUrl()}/api/scalping/watchlist/recommended`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       const data = await response.json();
@@ -79,7 +79,7 @@ export default function ScalpingPage() {
     setLoading(true);
     try {
       const token = localStorage.getItem('token');
-      const response = fetch(`${getApiBaseUrl()}/api/scalping/${selectedSymbol}`, {
+      const response = await fetch(`${getApiBaseUrl()}/api/scalping/${selectedSymbol}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       const data = await response.json();
@@ -100,7 +100,7 @@ export default function ScalpingPage() {
     setScanning(true);
     try {
       const token = localStorage.getItem('token');
-  const response = fetch(`${getApiBaseUrl()}/api/scalping/scan`, {
+  const response = await fetch(`${getApiBaseUrl()}/api/scalping/scan`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -131,7 +131,7 @@ export default function ScalpingPage() {
     setCriteriaLoading(true);
     try {
       const token = localStorage.getItem('token');
-      const response = fetch(`${getApiBaseUrl()}/api/scalping/criteria/settings`, {
+      const response = await fetch(`${getApiBaseUrl()}/api/scalping/criteria/settings`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       const data = await response.json();
@@ -151,7 +151,7 @@ export default function ScalpingPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-gray-100 dark:from-gray-900 dark:via-slate-900 dark:to-gray-900">
-      <AppHeader showSearch={false} />
+
       <div className="max-w-7xl mx-auto px-4 sm:px-6">
         {/* Scalping Criteria Section */}
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 mb-6">

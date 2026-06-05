@@ -23,7 +23,7 @@ Write-Host "  ✓ Email OTP Verification Enabled" -ForegroundColor Gray
 $emailUser = "tradeagent0007@gmail.com"
 $emailPassword = "uclt gvvp vemy opib"
 
-$backendCommand = "cd `"$backendPath`"; `$env:TELEGRAM_BOT_TOKEN = '8520099950:AAFAAZrQCEK9B6wARjpoYDiqP3zNsaMz52Q'; `$env:TELEGRAM_CHAT_ID = '8574952938'; `$env:EMAIL_USER = '$emailUser'; `$env:EMAIL_PASSWORD = '$emailPassword'; npm start"
+$backendCommand = "cd `"$backendPath`"; `$env:TELEGRAM_BOT_TOKEN = '$env:TELEGRAM_BOT_TOKEN'; `$env:TELEGRAM_CHAT_ID = '$env:TELEGRAM_CHAT_ID'; `$env:EMAIL_USER = '$emailUser'; `$env:EMAIL_PASSWORD = '$emailPassword'; npm start"
 Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCommand
 
 # Wait 3 seconds for backend to initialize

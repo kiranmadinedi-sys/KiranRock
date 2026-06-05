@@ -1,0 +1,116 @@
+/**
+ * PULSE — Gemini News Analyst (PANTHEON agent)
+ *
+ * Uses Google Gemini to analyze news headlines for a stock and return a
+ * structured sentiment score.  When GEMINI_API_KEY is absent the service
+ * returns null so every caller falls back to the existing basic sentiment.
+ *
+ * Set in .env:
+ *   GEMINI_API_KEY=your_key_here
+ *   GEMINI_MODEL=gemini-2.0-flash-lite   (optional, default shown)
+ */
+
+const axios        = require('axios');
+const cacheService = require('./cacheService');
+const { logger }   = require('../utils/logger');
+
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_MODEL   = process.env.GEMINI_MODEL   || 'gemini-2.0-flash-lite';
+const GEMINI_URL     = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+const CACHE_TTL      = 2 * 60 * 60 * 1000; // 2 hours — reduces daily quota burn significantly
+
+if (!GEMINI_API_KEY) {
+    logger.warn('[PULSE/Gemini] GEMINI_API_KEY not configured — Gemini sentiment disabled, system uses basic fallback');
+}
+
+// Global rate limiter: max 1 request per 1.5 seconds to stay well within 30 RPM free tier
+let _lastCallTime = 0;
+async function _throttle() {
+    const now = Date.now();
+    const gap = 1500 - (now - _lastCallTime);
+    if (gap > 0) await new Promise(r => setTimeout(r, gap));
+    _lastCallTime = Date.now();
+}
+
+async function _callGemini(prompt) {
+    await _throttle();
+    const resp = await axios.post(
+        `${GEMINI_URL}?key=${GEMINI_API_KEY}`,
+        {
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { temperature: 0.1, maxOutputTokens: 120 }
+        },
+        { timeout: 12000 }
+    );
+    return resp;
+}
+
+/**
+ * Analyse recent news headlines for a stock symbol using Gemini.
+ *
+ * @param {string}   symbol    - Ticker symbol, e.g. 'NVDA'
+ * @param {string[]} headlines - Array of recent headline strings (max 10 used)
+ * @returns {Promise<{score:number, label:string, thesis:string}|null>}
+ *   score 0-100 (50=neutral), label Bullish|Neutral|Bearish, thesis one-liner
+ *   Returns null when API key is absent or call fails — callers must handle null.
+ */
+async function analyzeHeadlines(symbol, headlines = []) {
+    if (!GEMINI_API_KEY) return null;
+
+    const cacheKey = `gemini_pulse_${symbol}`;
+    const cached   = cacheService.get(cacheKey);
+    if (cached) return cached;
+
+    const headlineBlock = headlines.length > 0
+        ? headlines.slice(0, 10).map((h, i) => `${i + 1}. ${h}`).join('\n')
+        : '(No recent headlines available — provide general market sentiment)';
+
+    const prompt =
+        `You are PULSE, a financial sentiment analyst for PANTHEON trading system.\n` +
+        `Analyse these news items for ${symbol} stock.\n\n` +
+        `HEADLINES:\n${headlineBlock}\n\n` +
+        `Reply with ONLY a valid JSON object, no markdown fences:\n` +
+        `{"score":<0-100>,"label":"<Bullish|Neutral|Bearish>","thesis":"<1 sentence>"}\n\n` +
+        `Score guide: 70-100=Bullish, 40-69=Neutral, 0-39=Bearish`;
+
+    // Retry once on 429 (rate limit burst) with a 5-second back-off
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            const resp = await _callGemini(prompt);
+
+            const raw     = resp.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            const cleaned = raw.replace(/```json|```/g, '').trim();
+            const parsed  = JSON.parse(cleaned);
+
+            const result = {
+                score:  Math.max(0, Math.min(100, Number(parsed.score) || 50)),
+                label:  ['Bullish', 'Neutral', 'Bearish'].includes(parsed.label) ? parsed.label : 'Neutral',
+                thesis: String(parsed.thesis || '').slice(0, 200)
+            };
+
+            cacheService.set(cacheKey, result, CACHE_TTL);
+            logger.info(`[PULSE/Gemini] ${symbol}: score=${result.score} ${result.label}`);
+            return result;
+
+        } catch (err) {
+            const status = err.response?.status;
+            if (status === 429 && attempt === 1) {
+                logger.warn(`[PULSE/Gemini] ${symbol} rate-limited (429) — waiting 5s before retry`);
+                await new Promise(r => setTimeout(r, 5000));
+                continue;
+            }
+            if (status === 429) {
+                logger.warn(`[PULSE/Gemini] ${symbol} quota exhausted — returning null (will retry after cache TTL)`);
+            } else {
+                logger.warn(`[PULSE/Gemini] ${symbol} failed: ${status || err.message}`);
+            }
+            return null;
+        }
+    }
+    return null;
+}
+
+module.exports = {
+    analyzeHeadlines,
+    isEnabled: () => !!GEMINI_API_KEY
+};

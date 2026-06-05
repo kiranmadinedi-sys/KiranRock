@@ -1,10 +1,9 @@
-const fs = require('fs').promises;
-const path = require('path');
+const { query } = require('../config/database');
 const aiTradingBotService = require('./aiTradingBotService');
-const tradingService = require('./tradingService');
+const brokerService = require('./brokerService');
+const tradingServiceDB = require('./tradingServiceDB');
 const userProfileService = require('./userProfileService');
 
-const USERS_FILE = path.join(__dirname, '../../users.json');
 const CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
 
 let schedulerInterval = null;
@@ -16,18 +15,28 @@ async function runAutomatedTrading() {
     console.log(`[AI Scheduler] Running automated trading check at ${new Date().toISOString()}`);
     
     try {
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
+        // Get all users with AI trading enabled
+        const result = await query(
+            'SELECT id, username FROM users WHERE ai_trading_enabled = true',
+            []
+        );
+        
+        const users = result.rows;
         
         for (const user of users) {
-            if (!user.aiTradingEnabled) {
-                continue; // Skip users with AI trading disabled
-            }
-            
             console.log(`[AI Scheduler] Checking AI trading for user: ${user.username}`);
             
             try {
+                // Check if user has holdings
+                const holdingsResult = await query(
+                    'SELECT COUNT(*) as count FROM holdings WHERE user_id = $1',
+                    [user.id]
+                );
+                
+                const holdingCount = parseInt(holdingsResult.rows[0].count);
+                
                 // Auto-initialize if enabled but no holdings
-                if (!user.holdings || user.holdings.length === 0) {
+                if (holdingCount === 0) {
                     console.log(`[AI Scheduler] Auto-initializing portfolio for ${user.username}`);
                     await autoInitializePortfolio(user.id);
                 }
@@ -75,34 +84,40 @@ async function autoInitializePortfolio(userId) {
  */
 async function checkStopLossAndTakeProfit(userId) {
     try {
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const user = users.find(u => u.id === userId);
+        // Get all holdings for user
+        const holdingsResult = await query(
+            'SELECT id, symbol, quantity, average_price, peak_price FROM holdings WHERE user_id = $1',
+            [userId]
+        );
         
-        if (!user || !user.holdings) {
+        if (holdingsResult.rows.length === 0) {
             return;
         }
         
         const TRAILING_STOP_PERCENT = 0.10; // Trail by 10% from peak
         const TAKE_PROFIT = 0.30; // +30%
-        let userModified = false;
         
-        for (const holding of user.holdings) {
+        for (const holding of holdingsResult.rows) {
             try {
                 // Get current price
-                const currentPrice = await tradingService.getCurrentPrice(holding.symbol);
+                const currentPrice = await tradingServiceDB.getCurrentPrice(holding.symbol);
                 if (!currentPrice) continue;
                 
-                const purchasePrice = holding.averagePrice;
+                const purchasePrice = parseFloat(holding.average_price);
+                let peakPrice = holding.peak_price ? parseFloat(holding.peak_price) : purchasePrice;
                 
-                // Initialize or update peak price (highest price since purchase)
-                if (!holding.peakPrice || currentPrice > holding.peakPrice) {
-                    holding.peakPrice = currentPrice;
-                    userModified = true;
+                // Update peak price if current price is higher
+                if (currentPrice > peakPrice) {
+                    peakPrice = currentPrice;
+                    await query(
+                        'UPDATE holdings SET peak_price = $1, updated_at = NOW() WHERE id = $2',
+                        [peakPrice, holding.id]
+                    );
                     console.log(`[AI Scheduler] Updated peak price for ${holding.symbol}: $${currentPrice.toFixed(2)}`);
                 }
                 
                 // Calculate trailing stop price (10% below peak)
-                const trailingStopPrice = holding.peakPrice * (1 - TRAILING_STOP_PERCENT);
+                const trailingStopPrice = peakPrice * (1 - TRAILING_STOP_PERCENT);
                 
                 // Calculate change from purchase price
                 const changePercent = (currentPrice - purchasePrice) / purchasePrice;
@@ -113,8 +128,8 @@ async function checkStopLossAndTakeProfit(userId) {
                 // Check trailing stop-loss (price dropped below trailing stop)
                 if (currentPrice <= trailingStopPrice) {
                     shouldSell = true;
-                    const dropFromPeak = ((currentPrice - holding.peakPrice) / holding.peakPrice * 100).toFixed(2);
-                    reason = `Trailing stop-loss triggered: dropped ${dropFromPeak}% from peak $${holding.peakPrice.toFixed(2)} to $${currentPrice.toFixed(2)}`;
+                    const dropFromPeak = ((currentPrice - peakPrice) / peakPrice * 100).toFixed(2);
+                    reason = `Trailing stop-loss triggered: dropped ${dropFromPeak}% from peak $${peakPrice.toFixed(2)} to $${currentPrice.toFixed(2)}`;
                 }
                 
                 // Check take-profit
@@ -126,34 +141,27 @@ async function checkStopLossAndTakeProfit(userId) {
                 if (shouldSell) {
                     console.log(`[AI Scheduler] ${reason} for ${holding.symbol} - Selling ${holding.quantity} shares`);
                     
-                    const result = await tradingService.executeSellOrder(userId, holding.symbol, holding.quantity);
+                    const quantity = parseInt(holding.quantity, 10);
+                    const result = await brokerService.sellMarket(userId, holding.symbol, quantity, {
+                        executedBy: 'AI_SCHEDULER',
+                        reason
+                    });
                     
                     await userProfileService.logAIDecision(userId, {
                         action: 'AUTO_SELL',
                         symbol: holding.symbol,
-                        quantity: holding.quantity,
-                        price: result.price,
+                        quantity,
+                        price: result.filledAvgPrice,
                         reason: reason,
                         purchasePrice: purchasePrice,
                         currentPrice: currentPrice,
-                        peakPrice: holding.peakPrice,
-                        profitLoss: result.profitLoss,
+                        peakPrice: peakPrice,
+                        profitLoss: (result.filledAvgPrice - purchasePrice) * quantity,
                         profitLossPercent: changePercent * 100
                     });
-                    
-                    userModified = false; // Holding will be removed by sell order
                 }
             } catch (error) {
                 console.error(`[AI Scheduler] Error checking ${holding.symbol}:`, error.message);
-            }
-        }
-        
-        // Save updated peak prices
-        if (userModified) {
-            const userIndex = users.findIndex(u => u.id === userId);
-            if (userIndex !== -1) {
-                users[userIndex] = user;
-                await fs.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
             }
         }
     } catch (error) {

@@ -10,6 +10,9 @@ export const isAuthenticated = (): boolean => {
 
 export const clearAuthToken = (): void => {
   localStorage.removeItem('token');
+  localStorage.removeItem('user');
+  localStorage.removeItem('lastActivity');
+  document.cookie = 'token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
 };
 
 export const handleAuthError = (status: number): void => {

@@ -32,7 +32,7 @@ export default function QuickStats({ symbol }: QuickStatsProps) {
         const fetchStats = async () => {
             try {
                 const token = localStorage.getItem('token');
-                const response = fetch(`${getApiBaseUrl()}/api/stocks/price/${symbol}`, {
+                const response = await fetch(`${getApiBaseUrl()}/api/stocks/price/${symbol}`, {
                     headers: { Authorization: `Bearer ${token}` },
                 });
 

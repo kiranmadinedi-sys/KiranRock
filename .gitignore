@@ -13,10 +13,14 @@ logs/
 .env
 .env.local
 .env.*.local
+backend/.env
 
 # Next.js
 .next/
 out/
+frontend/.next/
+frontend/out/
+frontend/tsconfig.tsbuildinfo
 
 # VS Code
 .vscode/
@@ -25,8 +29,12 @@ out/
 .DS_Store
 Thumbs.db
 
-# Backend storage (generated data)
-backend/storage/
+# Backend runtime caches and generated data
+backend/.yfcache/
+backend/newsAlerts.json
+backend/config/lastReportSent.json
+backend/src/config/cache/
+backend/src/storage/
 
 # Coverage
 coverage/
@@ -34,3 +42,34 @@ coverage/
 # Build artifacts
 build/
 dist/
+
+# Runtime / process state
+.startup-status/
+*.pid
+backend/claude_dynamic_analysis.pid
+
+# Temp log / output files (runtime-generated)
+backend/backfill_errors.txt
+backend/backfill_log.txt
+backend/backfill_loaded_tickers.txt
+backend/claude_analysis_error.txt
+backend/claude_analysis_output.txt
+backend/claude_dynamic_prompt.txt
+
+# Data exports / CSV dumps
+all_trades.csv
+*.csv
+
+# Binary docs (use .md equivalents in repo)
+*.doc
+*.docx
+
+# Generated docs
+_docgen/
+
+# Claude Code CLI settings (may contain local paths / tokens)
+.claude/
+.claudeignore
+
+# Backend local data directory
+backend/data/

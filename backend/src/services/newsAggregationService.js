@@ -1,6 +1,7 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const { fetchXSymbolNews, fetchXMarketNews, isXConfigured } = require('./xNewsService');
 
 // Cache file for news to avoid hitting rate limits
 const NEWS_CACHE_FILE = path.join(__dirname, '../storage/newsCache.json');
@@ -19,22 +20,41 @@ function readCache() {
     try {
         if (fs.existsSync(NEWS_CACHE_FILE)) {
             const data = fs.readFileSync(NEWS_CACHE_FILE, 'utf-8');
-            return JSON.parse(data);
+            const parsed = JSON.parse(data);
+            if (parsed && parsed.entries) {
+                return parsed;
+            }
+            if (parsed && Array.isArray(parsed.news)) {
+                return {
+                    entries: {
+                        ALL: {
+                            timestamp: parsed.timestamp || 0,
+                            news: parsed.news
+                        }
+                    }
+                };
+            }
         }
     } catch (error) {
         console.error('Error reading news cache:', error);
     }
-    return { timestamp: 0, news: [] };
+    return { entries: {} };
 }
 
 /**
  * Write news to cache
  */
-function writeCache(news) {
+function writeCache(scopeKey, news) {
     try {
-        fs.writeFileSync(NEWS_CACHE_FILE, JSON.stringify({
+        const existing = readCache();
+        const entries = existing.entries || {};
+        entries[scopeKey] = {
             timestamp: Date.now(),
             news
+        };
+
+        fs.writeFileSync(NEWS_CACHE_FILE, JSON.stringify({
+            entries
         }, null, 2));
     } catch (error) {
         console.error('Error writing news cache:', error);
@@ -44,12 +64,35 @@ function writeCache(news) {
 /**
  * Check if cache is valid
  */
-function isCacheValid(cache) {
-    return cache.timestamp && (Date.now() - cache.timestamp < CACHE_DURATION);
+function isCacheValid(entry) {
+    return entry && entry.timestamp && (Date.now() - entry.timestamp < CACHE_DURATION);
+}
+
+function buildScopeKey(tickers = null) {
+    if (!tickers || !Array.isArray(tickers) || tickers.length === 0) {
+        return 'ALL';
+    }
+
+    return tickers
+        .map(ticker => String(ticker || '').trim().toUpperCase())
+        .filter(Boolean)
+        .sort()
+        .join(',');
+}
+
+function getCacheEntry(cache, scopeKey) {
+    if (!cache || !cache.entries) {
+        return null;
+    }
+
+    return cache.entries[scopeKey] || null;
 }
 
 /**
- * Fetch news from Yahoo Finance for a specific ticker
+ * Fetch news from Yahoo Finance for a specific ticker.
+ * Only articles where the title or Yahoo's own relatedTickers field
+ * actually references the symbol are tagged with that ticker.
+ * Unrelated articles are returned as general market news (tickers: []).
  */
 async function fetchYahooNews(symbol) {
     try {
@@ -66,16 +109,30 @@ async function fetchYahooNews(symbol) {
         });
 
         if (response.data && response.data.news) {
-            return response.data.news.map(item => ({
-                headline: item.title,
-                source: item.publisher || 'Yahoo Finance',
-                published_at: new Date(item.providerPublishTime * 1000).toISOString(),
-                url: item.link,
-                tickers: [symbol],
-                category: 'company',
-                sentiment: 0, // Neutral by default
-                thumbnail: item.thumbnail?.resolutions?.[0]?.url || null
-            }));
+            const symUpper = symbol.toUpperCase();
+            const symLower = symbol.toLowerCase();
+            return response.data.news.map(item => {
+                const title = (item.title || '').toLowerCase();
+                // High confidence: Yahoo's own ticker list mentions the symbol
+                const inYahooTickers = Array.isArray(item.relatedTickers)
+                    && item.relatedTickers.some(t => t.toUpperCase() === symUpper);
+                // Medium confidence: title mentions the ticker by name or with $ prefix
+                const inTitle = title.includes('$' + symLower) || title.includes(symLower + ' stock')
+                    || title.includes(symLower + ' shares') || title.includes(symLower + ' earnings');
+                // Assign ticker only when we have real evidence; otherwise treat as market news
+                const tickers = (inYahooTickers || inTitle) ? [symbol] : [];
+                return {
+                    headline: item.title,
+                    source: item.publisher || 'Yahoo Finance',
+                    published_at: new Date(item.providerPublishTime * 1000).toISOString(),
+                    url: item.link,
+                    tickers,
+                    tickerConfidence: inYahooTickers ? 'high' : inTitle ? 'medium' : 'none',
+                    category: tickers.length ? 'company' : 'macro',
+                    sentiment: 0, // Neutral by default
+                    thumbnail: item.thumbnail?.resolutions?.[0]?.url || null
+                };
+            });
         }
     } catch (error) {
         console.error(`Error fetching Yahoo Finance news for ${symbol}:`, error.message);
@@ -287,6 +344,15 @@ async function fetchFinnhubNews(category = 'general') {
 function calculateMarketImpact(newsItem) {
     let impact = 1; // Default medium impact
 
+    // X/Twitter posts: boost by engagement (viral posts move markets)
+    if (newsItem.source === 'X' && newsItem.engagement) {
+        if (newsItem.engagement > 5000)      impact = 5;
+        else if (newsItem.engagement > 1000) impact = 4;
+        else if (newsItem.engagement > 100)  impact = 3;
+        else                                 impact = 2;
+        return impact;
+    }
+
     // High impact categories
     if (newsItem.category === 'macro' || newsItem.category === 'rates') {
         impact = 3;
@@ -371,6 +437,19 @@ async function aggregateAllNews(tickers = null) {
             });
         }
 
+        // X/Twitter — single market-wide search per cycle to stay within free tier (1 req/15 min)
+        if (isXConfigured()) {
+            fetchPromises.push(
+                fetchXMarketNews().then(posts =>
+                    posts.map(p => ({
+                        ...p,
+                        category: p.tickers && p.tickers.length > 0 ? 'company' : 'macro',
+                        tickers: p.tickers || []
+                    }))
+                ).catch(() => [])
+            );
+        }
+
         // Fetch from paid APIs if configured
         fetchPromises.push(fetchAlphaVantageNews(tickers));
         fetchPromises.push(fetchFinnhubNews('general'));
@@ -423,12 +502,15 @@ async function aggregateAllNews(tickers = null) {
  * Get aggregated news with caching
  */
 async function getAggregatedNews(tickers = null, forceRefresh = false) {
+    const scopeKey = buildScopeKey(tickers);
+
     // Check cache first
     if (!forceRefresh) {
         const cache = readCache();
-        if (isCacheValid(cache) && cache.news.length > 0) {
+        const entry = getCacheEntry(cache, scopeKey);
+        if (isCacheValid(entry) && entry.news.length > 0) {
             console.log('[News Aggregation] Using cached data');
-            return cache.news;
+            return entry.news;
         }
     }
 
@@ -437,7 +519,7 @@ async function getAggregatedNews(tickers = null, forceRefresh = false) {
     
     // Cache it
     if (news.length > 0) {
-        writeCache(news);
+        writeCache(scopeKey, news);
     }
 
     return news;
@@ -485,5 +567,7 @@ module.exports = {
     fetchYahooMarketNews,
     fetchAlphaVantageNews,
     fetchFinnhubNews,
-    fetchNewsAPIMarketNews
+    fetchNewsAPIMarketNews,
+    fetchXSymbolNews,
+    fetchXMarketNews
 };

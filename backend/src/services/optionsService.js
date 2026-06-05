@@ -1,4 +1,142 @@
-const yahooFinance = require('yahoo-finance2').default;
+const fs = require('fs');
+const path = require('path');
+const dataProvider = require('./dataProvider');
+const YahooFinance = require('yahoo-finance2').default;
+const yahooFinance = new YahooFinance();
+const { query } = require('../config/database');
+
+const optionsCacheDir = path.join(__dirname, '..', 'storage', 'options-cache');
+const optionsCacheMaxAgeMs = Math.max(60 * 60 * 1000, Number(process.env.OPTIONS_CACHE_MAX_AGE_MS) || (6 * 60 * 60 * 1000));
+
+function getOptionsCacheFilePath(symbol) {
+    const safeSymbol = String(symbol || '').replace(/[^A-Za-z0-9_.-]/g, '_').toUpperCase();
+    return path.join(optionsCacheDir, `${safeSymbol}.json`);
+}
+
+async function ensureOptionsCacheDir() {
+    try {
+        await fs.promises.mkdir(optionsCacheDir, { recursive: true });
+    } catch (error) {
+        // Ignore cache directory failures and continue without persistent cache.
+    }
+}
+
+async function saveOptionsSnapshot(symbol, payload) {
+    if (!payload || !Array.isArray(payload.options) || payload.options.length === 0) {
+        return;
+    }
+
+    try {
+        await ensureOptionsCacheDir();
+        await fs.promises.writeFile(
+            getOptionsCacheFilePath(symbol),
+            JSON.stringify({ cachedAt: new Date().toISOString(), payload }, null, 2),
+            'utf8'
+        );
+    } catch (error) {
+        console.warn(`[Options] Failed to persist options cache for ${symbol}:`, error.message);
+    }
+}
+
+async function loadOptionsSnapshot(symbol) {
+    try {
+        const raw = await fs.promises.readFile(getOptionsCacheFilePath(symbol), 'utf8');
+        const parsed = JSON.parse(raw);
+        const cachedAt = parsed?.cachedAt ? new Date(parsed.cachedAt) : null;
+        const ageMs = cachedAt ? Date.now() - cachedAt.getTime() : Number.POSITIVE_INFINITY;
+
+        if (!parsed?.payload || !Array.isArray(parsed.payload.options) || parsed.payload.options.length === 0) {
+            return null;
+        }
+
+        if (!Number.isFinite(ageMs) || ageMs > optionsCacheMaxAgeMs) {
+            return null;
+        }
+
+        return {
+            ...parsed.payload,
+            cache: {
+                source: 'file-fallback',
+                cachedAt: parsed.cachedAt,
+                ageMs
+            }
+        };
+    } catch (error) {
+        return null;
+    }
+}
+
+// === DB CACHE LAYER ===
+
+async function loadOptionsFromDB(symbol, maxAgeMs = optionsCacheMaxAgeMs) {
+    try {
+        const result = await query(
+            'SELECT * FROM options_chain_cache WHERE symbol = $1',
+            [String(symbol).toUpperCase()]
+        );
+        if (result.rows.length === 0) return null;
+
+        const row = result.rows[0];
+        const ageMs = Date.now() - new Date(row.fetched_at).getTime();
+        if (ageMs > maxAgeMs) return null;
+
+        const options = Array.isArray(row.payload) ? row.payload : [];
+        if (options.length === 0) return null;
+
+        return {
+            symbol: row.symbol,
+            stockPrice: row.stock_price ? parseFloat(row.stock_price) : null,
+            optionsCount: options.length,
+            options,
+            cache: { source: 'db-cache', cachedAt: row.fetched_at, ageMs }
+        };
+    } catch (error) {
+        console.warn(`[Options] DB cache read failed for ${symbol}:`, error.message);
+        return null;
+    }
+}
+
+async function saveOptionsToDB(symbol, payload) {
+    if (!payload || !Array.isArray(payload.options) || payload.options.length === 0) return;
+    try {
+        await query(
+            `INSERT INTO options_chain_cache (symbol, fetched_at, stock_price, options_count, payload, source)
+             VALUES ($1, NOW(), $2, $3, $4::jsonb, 'yahoo')
+             ON CONFLICT (symbol) DO UPDATE SET
+               fetched_at    = NOW(),
+               stock_price   = EXCLUDED.stock_price,
+               options_count = EXCLUDED.options_count,
+               payload       = EXCLUDED.payload,
+               source        = EXCLUDED.source`,
+            [
+                String(symbol).toUpperCase(),
+                payload.stockPrice ?? null,
+                payload.options.length,
+                JSON.stringify(payload.options)
+            ]
+        );
+    } catch (error) {
+        console.warn(`[Options] DB cache write failed for ${symbol}:`, error.message);
+    }
+}
+
+// === FILE + DB FALLBACK ===
+
+async function buildCachedFallbackResponse(symbol, stockPrice, reason) {
+    // DB cache first — faster, more reliable, populated by pre-market job
+    const dbCached = await loadOptionsFromDB(symbol);
+    if (dbCached) {
+        console.warn(`[Options] Using DB-cached options for ${symbol}: ${reason}`);
+        return { ...dbCached, stockPrice: stockPrice ?? dbCached.stockPrice ?? null, warning: reason };
+    }
+
+    // File cache as last resort
+    const fileCached = await loadOptionsSnapshot(symbol);
+    if (!fileCached) return null;
+
+    console.warn(`[Options] Using file-cached options snapshot for ${symbol}: ${reason}`);
+    return { ...fileCached, stockPrice: stockPrice ?? fileCached.stockPrice ?? null, warning: reason };
+}
 
 /**
  * Options Data Service
@@ -17,12 +155,58 @@ const yahooFinance = require('yahoo-finance2').default;
  */
 async function getOptionsChain(symbol) {
     try {
-        const options = await yahooFinance.options(symbol);
+        const options = await dataProvider.getOptionsChain(symbol);
         return options;
     } catch (error) {
         console.error(`[Options] Error fetching options chain for ${symbol}:`, error.message);
         throw error;
     }
+}
+
+function normalizeOptionContract({ symbol, stockPrice, strikePrice, expirationDate, daysToExpiration, optionType, bid, ask, lastPrice, volume, openInterest, impliedVolatility, providedGreeks }) {
+    const fallbackVolatility = impliedVolatility || 0.3;
+    const calculatedGreeks = calculateGreeks({
+        stockPrice,
+        strikePrice,
+        daysToExpiration,
+        volatility: fallbackVolatility,
+        optionType
+    });
+
+    const mergedGreeks = {
+        delta: providedGreeks?.delta ?? calculatedGreeks.delta,
+        gamma: providedGreeks?.gamma ?? calculatedGreeks.gamma,
+        theta: providedGreeks?.theta ?? calculatedGreeks.theta,
+        vega: providedGreeks?.vega ?? calculatedGreeks.vega,
+        impliedVolatility: parseFloat((providedGreeks?.impliedVolatility ?? fallbackVolatility ?? 0).toFixed(4)),
+        theoreticalPrice: providedGreeks?.theoreticalPrice ?? calculatedGreeks.theoreticalPrice,
+        intrinsicValue: providedGreeks?.intrinsicValue ?? calculatedGreeks.intrinsicValue,
+        timeValue: providedGreeks?.timeValue ?? calculatedGreeks.timeValue
+    };
+
+    return {
+        symbol,
+        type: optionType,
+        optionType,
+        strike: strikePrice,
+        expiration: expirationDate,
+        expirationDate,
+        daysToExpiration,
+        bid: bid || 0,
+        ask: ask || 0,
+        lastPrice: lastPrice || 0,
+        volume: volume || 0,
+        openInterest: openInterest || 0,
+        impliedVolatility: impliedVolatility || fallbackVolatility,
+        greeks: mergedGreeks,
+        delta: mergedGreeks.delta,
+        gamma: mergedGreeks.gamma,
+        theta: mergedGreeks.theta,
+        vega: mergedGreeks.vega,
+        theoreticalPrice: mergedGreeks.theoreticalPrice,
+        intrinsicValue: mergedGreeks.intrinsicValue,
+        timeValue: mergedGreeks.timeValue
+    };
 }
 
 /**
@@ -238,29 +422,96 @@ async function getOptionsWithGreeks(symbol, marketCap = null) {
         
         const optionsChain = await getOptionsChain(symbol);
         
-        // Check if options data is available
-        if (!optionsChain || !optionsChain.expirationDates || optionsChain.expirationDates.length === 0) {
+        const quote = await dataProvider.getQuote(symbol);
+        const stockPrice = quote?.price || quote?.regularMarketPrice || null;
+        const historicVolatility = stockPrice && quote?.high52w && quote?.low52w
+            ? Math.max(0.1, (quote.high52w - quote.low52w) / stockPrice)
+            : 0.3;
+
+        if (!optionsChain) {
             console.warn(`[Options] No options data available for ${symbol}`);
+            const cachedFallback = await buildCachedFallbackResponse(symbol, stockPrice, 'Using cached options snapshot because live options chain is unavailable');
+            if (cachedFallback) {
+                return cachedFallback;
+            }
             return {
                 symbol,
-                stockPrice: null,
+                stockPrice,
                 error: 'No options data available for this symbol',
                 options: []
             };
         }
         
-        const quote = await yahooFinance.quote(symbol);
-        const stockPrice = quote.regularMarketPrice || quote.regularMarketPrice;
-        
-        // Default volatility if not available
-        const historicVolatility = quote.fiftyTwoWeekRange 
-            ? (quote.fiftyTwoWeekHigh - quote.fiftyTwoWeekLow) / quote.regularMarketPrice
-            : 0.3;
-        
         const optionsWithGreeks = [];
+
+        if (Array.isArray(optionsChain.results) && optionsChain.results.length > 0) {
+            for (const contract of optionsChain.results) {
+                const details = contract.details || {};
+                const expirationDate = details.expiration_date;
+                const strikePrice = Number(details.strike_price);
+                const optionType = String(details.contract_type || '').toLowerCase() === 'put' ? 'put' : 'call';
+                const daysToExpiration = Math.max(1, Math.ceil((new Date(expirationDate) - new Date()) / (1000 * 60 * 60 * 24)));
+
+                if (!expirationDate || !strikePrice || daysToExpiration < 7 || daysToExpiration > 60) {
+                    continue;
+                }
+
+                optionsWithGreeks.push(normalizeOptionContract({
+                    symbol,
+                    stockPrice,
+                    strikePrice,
+                    expirationDate,
+                    daysToExpiration,
+                    optionType,
+                    bid: Number(contract.last_quote?.bid || contract.quote?.bid || 0),
+                    ask: Number(contract.last_quote?.ask || contract.quote?.ask || 0),
+                    lastPrice: Number(contract.last_trade?.price || contract.day?.close || 0),
+                    volume: Number(contract.day?.volume || 0),
+                    openInterest: Number(contract.open_interest || 0),
+                    impliedVolatility: Number(contract.implied_volatility || historicVolatility || 0.3),
+                    providedGreeks: contract.greeks ? {
+                        delta: Number(contract.greeks.delta),
+                        gamma: Number(contract.greeks.gamma),
+                        theta: Number(contract.greeks.theta),
+                        vega: Number(contract.greeks.vega),
+                        impliedVolatility: Number(contract.implied_volatility || historicVolatility || 0.3)
+                    } : null
+                }));
+            }
+
+            return {
+                symbol,
+                stockPrice,
+                optionsCount: optionsWithGreeks.length,
+                options: optionsWithGreeks
+            };
+        }
+
+        // Check if Yahoo-style options data is available
+        if (!optionsChain.expirationDates || optionsChain.expirationDates.length === 0) {
+            console.warn(`[Options] No Yahoo-style options data available for ${symbol}`);
+            const cachedFallback = await buildCachedFallbackResponse(symbol, stockPrice, 'Using cached options snapshot because live Yahoo options expirations are unavailable');
+            if (cachedFallback) {
+                return cachedFallback;
+            }
+            return {
+                symbol,
+                stockPrice,
+                error: 'No options data available for this symbol',
+                options: []
+            };
+        }
         
-        // Process each expiration date
-        for (const exp of optionsChain.expirationDates || []) {
+        const candidateExpirations = (optionsChain.expirationDates || [])
+            .filter((exp) => {
+                const expirationDate = new Date(exp);
+                const daysToExpiration = Math.ceil((expirationDate - new Date()) / (1000 * 60 * 60 * 24));
+                return daysToExpiration >= 7 && daysToExpiration <= 60;
+            })
+            .slice(0, 4);
+
+        // Process a focused set of expirations to avoid provider rate limits.
+        for (const exp of candidateExpirations) {
             const expirationDate = new Date(exp);
             const daysToExpiration = Math.max(1, Math.ceil((expirationDate - new Date()) / (1000 * 60 * 60 * 24)));
             
@@ -269,65 +520,67 @@ async function getOptionsWithGreeks(symbol, marketCap = null) {
             
             // Process calls
             for (const call of chainData.calls || []) {
-                const greeks = calculateGreeks({
+                optionsWithGreeks.push(normalizeOptionContract({
+                    symbol,
                     stockPrice,
                     strikePrice: call.strike,
+                    expirationDate: expirationDate.toISOString().split('T')[0],
                     daysToExpiration,
-                    volatility: call.impliedVolatility || historicVolatility,
-                    optionType: 'call'
-                });
-                
-                optionsWithGreeks.push({
-                    symbol,
-                    type: 'call',
-                    strike: call.strike,
-                    expiration: expirationDate.toISOString().split('T')[0],
-                    daysToExpiration,
-                    bid: call.bid,
-                    ask: call.ask,
-                    lastPrice: call.lastPrice,
-                    volume: call.volume,
-                    openInterest: call.openInterest,
-                    impliedVolatility: call.impliedVolatility,
-                    ...greeks
-                });
+                    optionType: 'call',
+                    bid: call.bid || 0,
+                    ask: call.ask || 0,
+                    lastPrice: call.lastPrice || 0,
+                    volume: call.volume || 0,
+                    openInterest: call.openInterest || 0,
+                    impliedVolatility: call.impliedVolatility || historicVolatility
+                }));
             }
             
             // Process puts
             for (const put of chainData.puts || []) {
-                const greeks = calculateGreeks({
+                optionsWithGreeks.push(normalizeOptionContract({
+                    symbol,
                     stockPrice,
                     strikePrice: put.strike,
+                    expirationDate: expirationDate.toISOString().split('T')[0],
                     daysToExpiration,
-                    volatility: put.impliedVolatility || historicVolatility,
-                    optionType: 'put'
-                });
-                
-                optionsWithGreeks.push({
-                    symbol,
-                    type: 'put',
-                    strike: put.strike,
-                    expiration: expirationDate.toISOString().split('T')[0],
-                    daysToExpiration,
-                    bid: put.bid,
-                    ask: put.ask,
-                    lastPrice: put.lastPrice,
-                    volume: put.volume,
-                    openInterest: put.openInterest,
-                    impliedVolatility: put.impliedVolatility,
-                    ...greeks
-                });
+                    optionType: 'put',
+                    bid: put.bid || 0,
+                    ask: put.ask || 0,
+                    lastPrice: put.lastPrice || 0,
+                    volume: put.volume || 0,
+                    openInterest: put.openInterest || 0,
+                    impliedVolatility: put.impliedVolatility || historicVolatility
+                }));
             }
         }
-        
-        return {
+
+        if (optionsWithGreeks.length === 0) {
+            const cachedFallback = await buildCachedFallbackResponse(symbol, stockPrice, 'Using cached options snapshot because no contracts passed live normalization filters');
+            if (cachedFallback) {
+                return cachedFallback;
+            }
+        }
+
+        const payload = {
             symbol,
             stockPrice,
             optionsCount: optionsWithGreeks.length,
             options: optionsWithGreeks
         };
+
+        // Save to both DB (primary) and file (fallback)
+        await Promise.all([
+            saveOptionsToDB(symbol, payload),
+            saveOptionsSnapshot(symbol, payload)
+        ]);
+        return payload;
     } catch (error) {
         console.error(`[Options] Error getting options with Greeks for ${symbol}:`, error.message);
+        const cachedFallback = await buildCachedFallbackResponse(symbol, null, `Using cached options snapshot after live fetch failure: ${error.message}`);
+        if (cachedFallback) {
+            return cachedFallback;
+        }
         // Return graceful error response instead of throwing
         return {
             symbol,

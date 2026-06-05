@@ -9,7 +9,7 @@ const cacheService = require('./cacheService');
  */
 const calculateEMA = (data, period) => {
     const ema = [];
-    if (data.length < period) {
+    if (!data || data.length < period) {
         return ema;
     }
     const multiplier = 2 / (period + 1);
@@ -83,16 +83,20 @@ const getHistoricalSignals = async (symbol, shortPeriod = 5, longPeriod = 15, in
             let confidence = Math.min(100, Math.max(0, crossoverStrength * 10 + 50));
             // VIX impact: if VIX is high (>20), reduce buy confidence
             if (vix !== null && vix > 20) confidence -= 20;
-            signals.push({
-                time: data[dataIndex].time,
-                position: 'belowBar',
-                color: '#00c805', // Robinhood green
-                shape: 'arrowUp',
-                text: 'Buy @ ' + data[dataIndex].close.toFixed(2) + (vix !== null ? ` (VIX ${vix})` : ''),
-                strength: crossoverStrength,
-                confidence: confidence.toFixed(1),
-                vix
-            });
+            
+            // FILTER: Only add signals with 75%+ confidence to avoid whipsaw/false signals
+            if (confidence >= 75) {
+                signals.push({
+                    time: data[dataIndex].time,
+                    position: 'belowBar',
+                    color: '#00c805', // Robinhood green
+                    shape: 'arrowUp',
+                    text: 'Buy @ ' + data[dataIndex].close.toFixed(2) + (vix !== null ? ` (VIX ${vix})` : ''),
+                    strength: crossoverStrength,
+                    confidence: confidence.toFixed(1),
+                    vix
+                });
+            }
         }
         // Sell signal: short-term EMA crosses below long-term EMA
         else if (prevEmaShort >= prevEmaLong && currentEmaShort < currentEmaLong) {
@@ -101,16 +105,20 @@ const getHistoricalSignals = async (symbol, shortPeriod = 5, longPeriod = 15, in
             let confidence = Math.min(100, Math.max(0, crossoverStrength * 10 + 50));
             // VIX impact: if VIX is high (>25), increase sell confidence
             if (vix !== null && vix > 25) confidence += 20;
-            signals.push({
-                time: data[dataIndex].time,
-                position: 'aboveBar',
-                color: '#ff5000', // Robinhood red
-                shape: 'arrowDown',
-                text: 'Sell @ ' + data[dataIndex].close.toFixed(2) + (vix !== null ? ` (VIX ${vix})` : ''),
-                strength: crossoverStrength,
-                confidence: confidence.toFixed(1),
-                vix
-            });
+            
+            // FILTER: Only add signals with 75%+ confidence to avoid whipsaw/false signals
+            if (confidence >= 75) {
+                signals.push({
+                    time: data[dataIndex].time,
+                    position: 'aboveBar',
+                    color: '#ff5000', // Robinhood red
+                    shape: 'arrowDown',
+                    text: 'Sell @ ' + data[dataIndex].close.toFixed(2) + (vix !== null ? ` (VIX ${vix})` : ''),
+                    strength: crossoverStrength,
+                    confidence: confidence.toFixed(1),
+                    vix
+                });
+            }
         }
     }
     

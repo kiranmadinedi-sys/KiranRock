@@ -1,14 +1,13 @@
-'use client';
-
-import { useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { cookies } from 'next/headers';
+import { redirect } from 'next/navigation';
 
 export default function HomePage() {
-    const router = useRouter();
-
-    useEffect(() => {
-        router.push('/login');
-    }, [router]);
-
-    return null; // Or a loading spinner
+    // Check for auth token cookie (adjust name if needed)
+    const cookieStore = cookies();
+    const token = cookieStore.get('token');
+    if (token && token.value) {
+        redirect('/dashboard');
+    } else {
+        redirect('/login');
+    }
 }

@@ -10,7 +10,13 @@
  */
 
 const TelegramBot = require('node-telegram-bot-api');
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8520099950:AAFAAZrQCEK9B6wARjpoYDiqP3zNsaMz52Q';
+
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+
+if (!TELEGRAM_BOT_TOKEN) {
+  console.error('TELEGRAM_BOT_TOKEN is not set. Export it before running this script.');
+  process.exit(1);
+}
 
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
 

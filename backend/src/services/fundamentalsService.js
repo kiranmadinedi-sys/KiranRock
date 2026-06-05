@@ -1,26 +1,75 @@
-const YahooFinance = require('yahoo-finance2').default;
-const yahooFinance = new YahooFinance();
+const yfClient = require('../utils/yfClient');
+const rateLimiter = require('../utils/yahooFinanceRateLimiter');
+
+function buildFallbackFundamentals(symbol) {
+    return {
+        error: false,
+        metrics: {
+            peRatio: '28.50',
+            pegRatio: '1.85',
+            eps: '6.42',
+            revenueGrowth: '15.2%',
+            profitMargin: '26.5%',
+            returnOnEquity: '45.8%',
+            marketCap: '$3.45T',
+            dividend: '$0.96',
+            dividendYield: '0.42%'
+        },
+        sector: getSectorFromSymbol(symbol),
+        industry: 'Unknown',
+        marketCap: 3450000000000,
+        valuation: {
+            status: 'Fair Value',
+            description: `PEG ratio suggests fair valuation for ${symbol}.`,
+            signal: 'Neutral'
+        },
+        growth: {
+            status: 'Moderate Growth',
+            description: 'Revenue growing at healthy pace.',
+            signal: 'Bullish'
+        },
+        recommendation: {
+            rating: 'Buy',
+            confidence: 'Medium',
+            rationale: 'Positive fundamentals with room for appreciation.'
+        }
+    };
+}
 
 /**
  * Fetches fundamental data for a stock.
  * @param {string} symbol - Stock symbol
  * @returns {Promise<Object>} Fundamental metrics
  */
-const getFundamentals = async (symbol) => {
+const getFundamentals = async (symbol, options = {}) => {
     try {
+        const executionProfile = String(options.executionProfile || 'default').toLowerCase();
+        if (executionProfile === 'warmup' || options.lightweight) {
+            return {
+                ...buildFallbackFundamentals(symbol),
+                meta: {
+                    source: 'lightweight-fallback',
+                    executionProfile
+                }
+            };
+        }
+
         console.log(`Fetching fundamentals for ${symbol}...`);
         
-        const quoteSummary = await yahooFinance.quoteSummary(symbol, {
-            modules: [
-                'summaryDetail',
-                'defaultKeyStatistics',
-                'financialData',
-                'earningsHistory',
-                'earnings',
-                'price',
-                'recommendationTrend',
-                'assetProfile'
-            ]
+        // Apply rate limiting before each request; use yfClient.quoteSummary (with retry + cache)
+        const quoteSummary = await rateLimiter.execute(async () => {
+            return await yfClient.quoteSummary(symbol, {
+                modules: [
+                    'summaryDetail',
+                    'defaultKeyStatistics',
+                    'financialData',
+                    'earningsHistory',
+                    'earnings',
+                    'price',
+                    'recommendationTrend',
+                    'assetProfile'
+                ]
+            });
         });
 
         console.log(`Successfully fetched data for ${symbol}`);
@@ -52,6 +101,8 @@ const getFundamentals = async (symbol) => {
         // Growth assessment
         const growth = assessGrowth(revenueGrowth, earnings);
 
+        const currentPriceNum = priceData.regularMarketPrice || null;
+
         return {
             metrics: {
                 peRatio: pe ? pe.toFixed(2) : 'N/A',
@@ -64,9 +115,11 @@ const getFundamentals = async (symbol) => {
                 dividend: summary.dividendRate ? `$${summary.dividendRate.toFixed(2)}` : 'None',
                 dividendYield: summary.dividendYield ? `${(summary.dividendYield * 100).toFixed(2)}%` : 'N/A'
             },
-            sector: priceData.sector || quoteSummary.assetProfile?.sector || 'Unknown',
-            industry: priceData.industry || quoteSummary.assetProfile?.industry || 'Unknown',
+            sector: quoteSummary.assetProfile?.sector || priceData.sector || 'Unknown',
+            industry: quoteSummary.assetProfile?.industry || priceData.industry || 'Unknown',
             marketCap: summary.marketCap || null,
+            currentPrice: currentPriceNum,
+            earningsGrowth: financial.earningsGrowth || null,
             analystRatings,
             priceTargets,
             valuation,
@@ -76,40 +129,8 @@ const getFundamentals = async (symbol) => {
     } catch (error) {
         console.error(`Error fetching fundamentals for ${symbol}:`, error.message);
         console.error('Full error:', error);
-        
-        // Return sample data if API fails (for demo purposes)
-        return {
-            error: false, // Don't show error, show demo data instead
-            metrics: {
-                peRatio: '28.50',
-                pegRatio: '1.85',
-                eps: '6.42',
-                revenueGrowth: '15.2%',
-                profitMargin: '26.5%',
-                returnOnEquity: '45.8%',
-                marketCap: '$3.45T',
-                dividend: '$0.96',
-                dividendYield: '0.42%'
-            },
-            sector: getSectorFromSymbol(symbol),
-            industry: 'Unknown',
-            marketCap: 3450000000000,
-            valuation: {
-                status: 'Fair Value',
-                description: `PEG ratio suggests fair valuation for ${symbol}.`,
-                signal: 'Neutral'
-            },
-            growth: {
-                status: 'Moderate Growth',
-                description: 'Revenue growing at healthy pace.',
-                signal: 'Bullish'
-            },
-            recommendation: {
-                rating: 'Buy',
-                confidence: 'Medium',
-                rationale: 'Positive fundamentals with room for appreciation.'
-            }
-        };
+
+        return buildFallbackFundamentals(symbol);
     }
 };
 
@@ -345,38 +366,142 @@ const formatMarketCap = (marketCap) => {
  */
 const getSectorFromSymbol = (symbol) => {
     const sectorMap = {
-        'AAPL': 'Technology',
-        'MSFT': 'Technology',
-        'GOOGL': 'Technology',
-        'GOOG': 'Technology',
-        'AMZN': 'Consumer Cyclical',
-        'TSLA': 'Consumer Cyclical',
-        'META': 'Technology',
-        'NVDA': 'Technology',
-        'JPM': 'Financial Services',
-        'V': 'Financial Services',
-        'WMT': 'Consumer Defensive',
-        'PG': 'Consumer Defensive',
-        'JNJ': 'Healthcare',
-        'UNH': 'Healthcare',
-        'XOM': 'Energy',
-        'CVX': 'Energy',
-        'BAC': 'Financial Services',
-        'MA': 'Financial Services',
-        'PFE': 'Healthcare',
-        'ABBV': 'Healthcare',
-        'KO': 'Consumer Defensive',
-        'PEP': 'Consumer Defensive',
-        'DIS': 'Communication Services',
-        'NFLX': 'Communication Services',
-        'ADBE': 'Technology',
-        'CRM': 'Technology',
-        'ORCL': 'Technology',
-        'CSCO': 'Technology',
-        'INTC': 'Technology',
-        'AMD': 'Technology',
-        'T': 'Communication Services',
-        'VZ': 'Communication Services'
+        // Mega Cap Tech
+        'AAPL':'Technology','MSFT':'Technology','GOOGL':'Technology','GOOG':'Technology',
+        'META':'Technology','NVDA':'Technology','NFLX':'Communication Services',
+        'AMZN':'Consumer Cyclical','TSLA':'Consumer Cyclical',
+        // Large Cap Tech / Software
+        'AMD':'Technology','ADBE':'Technology','CRM':'Technology','ORCL':'Technology',
+        'INTC':'Technology','CSCO':'Technology','AVGO':'Technology','QCOM':'Technology',
+        'TXN':'Technology','INTU':'Technology','NOW':'Technology','PANW':'Technology',
+        'CRWD':'Technology','ZS':'Technology','DDOG':'Technology','NET':'Technology',
+        'SNOW':'Technology','PLTR':'Technology','TEAM':'Technology','WDAY':'Technology',
+        'FTNT':'Technology','OKTA':'Technology','MDB':'Technology','DOCU':'Technology',
+        'ZM':'Technology','TWLO':'Technology','SQ':'Technology','PYPL':'Technology',
+        // Software & Analytics
+        'MSCI':'Financial Services','VEEV':'Healthcare','ANSS':'Technology',
+        'CDNS':'Technology','SNPS':'Technology','ADSK':'Technology','ROP':'Industrials',
+        'KEYS':'Technology','PTC':'Technology','MCHP':'Technology',
+        // Semiconductors
+        'ASML':'Technology','TSM':'Technology','AMAT':'Technology','LRCX':'Technology',
+        'KLAC':'Technology','MU':'Technology','NXPI':'Technology','ADI':'Technology',
+        'MRVL':'Technology','ON':'Technology','SWKS':'Technology','QRVO':'Technology',
+        'MPWR':'Technology','ENTG':'Technology','SOXL':'Technology','SMH':'Technology',
+        // E-commerce & Digital
+        'SHOP':'Consumer Cyclical','MELI':'Consumer Cyclical','SE':'Consumer Cyclical',
+        'BABA':'Consumer Cyclical','JD':'Consumer Cyclical','PDD':'Consumer Cyclical',
+        'EBAY':'Consumer Cyclical','ETSY':'Consumer Cyclical','W':'Consumer Cyclical',
+        'CHWY':'Consumer Cyclical',
+        // Social Media & Gaming
+        'SNAP':'Communication Services','PINS':'Communication Services',
+        'RBLX':'Communication Services','TTWO':'Communication Services',
+        'EA':'Communication Services','DKNG':'Consumer Cyclical','PENN':'Consumer Cyclical',
+        // Streaming & Entertainment
+        'DIS':'Communication Services','PARA':'Communication Services',
+        'WBD':'Communication Services','ROKU':'Communication Services',
+        'SPOT':'Communication Services',
+        // Fintech & Payments
+        'V':'Financial Services','MA':'Financial Services','AXP':'Financial Services',
+        'FIS':'Financial Services','FISV':'Financial Services','GPN':'Financial Services',
+        'COIN':'Financial Services','HOOD':'Financial Services','AFRM':'Financial Services',
+        'SOFI':'Financial Services','UPST':'Financial Services',
+        // Banks
+        'JPM':'Financial Services','BAC':'Financial Services','WFC':'Financial Services',
+        'C':'Financial Services','GS':'Financial Services','MS':'Financial Services',
+        'BLK':'Financial Services','SCHW':'Financial Services','USB':'Financial Services',
+        'PNC':'Financial Services','TFC':'Financial Services','ALLY':'Financial Services',
+        'COF':'Financial Services','DFS':'Financial Services','SYF':'Financial Services',
+        // Insurance
+        'PGR':'Financial Services','ALL':'Financial Services','TRV':'Financial Services',
+        'AIG':'Financial Services','MET':'Financial Services','PRU':'Financial Services',
+        'AFL':'Financial Services',
+        // Healthcare - Pharma
+        'JNJ':'Healthcare','PFE':'Healthcare','ABBV':'Healthcare','MRK':'Healthcare',
+        'LLY':'Healthcare','BMY':'Healthcare','AMGN':'Healthcare','GILD':'Healthcare',
+        'REGN':'Healthcare','VRTX':'Healthcare','BIIB':'Healthcare','MRNA':'Healthcare',
+        'BNTX':'Healthcare',
+        // Healthcare - Devices & Services
+        'UNH':'Healthcare','CVS':'Healthcare','MDT':'Healthcare','ABT':'Healthcare',
+        'SYK':'Healthcare','BSX':'Healthcare','ISRG':'Healthcare','EW':'Healthcare',
+        'ZBH':'Healthcare','BDX':'Healthcare','HCA':'Healthcare','CI':'Healthcare',
+        'HUM':'Healthcare','CNC':'Healthcare','MOH':'Healthcare',
+        // Consumer Defensive
+        'WMT':'Consumer Defensive','PG':'Consumer Defensive','KO':'Consumer Defensive',
+        'PEP':'Consumer Defensive','COST':'Consumer Defensive','MDLZ':'Consumer Defensive',
+        'PM':'Consumer Defensive','MO':'Consumer Defensive','STZ':'Consumer Defensive',
+        'GIS':'Consumer Defensive','K':'Consumer Defensive','CPB':'Consumer Defensive',
+        'CL':'Consumer Defensive','CHD':'Consumer Defensive',
+        // Consumer Cyclical
+        'MCD':'Consumer Cyclical','SBUX':'Consumer Cyclical','NKE':'Consumer Cyclical',
+        'TGT':'Consumer Cyclical','HD':'Consumer Cyclical','LOW':'Consumer Cyclical',
+        'TJX':'Consumer Cyclical','ROST':'Consumer Cyclical','BBWI':'Consumer Cyclical',
+        'YUM':'Consumer Cyclical','CMG':'Consumer Cyclical','DPZ':'Consumer Cyclical',
+        // Industrials
+        'BA':'Industrials','CAT':'Industrials','DE':'Industrials','HON':'Industrials',
+        'GE':'Industrials','MMM':'Industrials','RTX':'Industrials','LMT':'Industrials',
+        'NOC':'Industrials','GD':'Industrials','UPS':'Industrials','FDX':'Industrials',
+        'CSX':'Industrials','UNP':'Industrials','NSC':'Industrials',
+        // Energy
+        'XOM':'Energy','CVX':'Energy','COP':'Energy','EOG':'Energy','SLB':'Energy',
+        'PXD':'Energy','MPC':'Energy','VLO':'Energy','PSX':'Energy','OXY':'Energy',
+        // Materials
+        'LIN':'Basic Materials','APD':'Basic Materials','ECL':'Basic Materials',
+        'SHW':'Basic Materials','NEM':'Basic Materials','FCX':'Basic Materials',
+        'NUE':'Basic Materials','DD':'Basic Materials','DOW':'Basic Materials',
+        // Real Estate
+        'AMT':'Real Estate','PLD':'Real Estate','CCI':'Real Estate','EQIX':'Real Estate',
+        'PSA':'Real Estate','O':'Real Estate','SPG':'Real Estate','WELL':'Real Estate',
+        'DLR':'Real Estate','AVB':'Real Estate',
+        // Utilities
+        'NEE':'Utilities','DUK':'Utilities','SO':'Utilities','D':'Utilities',
+        'AEP':'Utilities','EXC':'Utilities','SRE':'Utilities','XEL':'Utilities',
+        // Communications
+        'T':'Communication Services','VZ':'Communication Services',
+        'TMUS':'Communication Services','CMCSA':'Communication Services',
+        'CHTR':'Communication Services',
+        // ETFs
+        'SPY':'ETF','QQQ':'ETF','IWM':'ETF','DIA':'ETF','MDY':'ETF',
+        'XLK':'ETF','XLF':'ETF','XLE':'ETF','XLV':'ETF','XLI':'ETF',
+        'XLB':'ETF','XLU':'ETF','XLP':'ETF','XLY':'ETF',
+        'GLD':'ETF','TLT':'ETF','HYG':'ETF','TQQQ':'ETF','SOXL':'ETF',
+        // Auto / Consumer Cyclical (international ADRs + domestic)
+        'HMC':'Consumer Cyclical','TM':'Consumer Cyclical','TSLA':'Consumer Cyclical',
+        'F':'Consumer Cyclical','GM':'Consumer Cyclical','STLA':'Consumer Cyclical',
+        'RIVN':'Consumer Cyclical','LCID':'Consumer Cyclical','NIO':'Consumer Cyclical',
+        'LI':'Consumer Cyclical','XPEV':'Consumer Cyclical',
+        // Trucking / Freight / Logistics (Industrials)
+        'HTLD':'Industrials','JBHT':'Industrials','WERN':'Industrials','ODFL':'Industrials',
+        'SAIA':'Industrials','XPO':'Industrials','CHRW':'Industrials','EXPD':'Industrials',
+        'ECHO':'Industrials','FWRD':'Industrials','MRTN':'Industrials',
+        // Airlines / Transportation
+        'DAL':'Industrials','UAL':'Industrials','AAL':'Industrials','LUV':'Industrials',
+        'ALK':'Industrials','SAVE':'Industrials',
+        // Semiconductors (additional)
+        'SWKS':'Technology','QRVO':'Technology','CRUS':'Technology','WOLF':'Technology',
+        'SITM':'Technology','ONTO':'Technology','ACLS':'Technology','COHU':'Technology',
+        // Mid-cap Tech
+        'ZI':'Technology','HUBS':'Technology','BILL':'Financial Services',
+        'PCTY':'Technology','PAYC':'Technology','QLYS':'Technology',
+        'RPD':'Technology','TENB':'Technology','JAMF':'Technology',
+        // Mid-cap Healthcare
+        'PODD':'Healthcare','DXCM':'Healthcare','INSP':'Healthcare','TMDX':'Healthcare',
+        'AXNX':'Healthcare','NVCR':'Healthcare','FATE':'Healthcare','FOLD':'Healthcare',
+        'RVMD':'Healthcare','PTGX':'Healthcare',
+        // Homebuilders / Real-Estate adjacent
+        'DHI':'Consumer Cyclical','LEN':'Consumer Cyclical','PHM':'Consumer Cyclical',
+        'TOL':'Consumer Cyclical','NVR':'Consumer Cyclical','MDC':'Consumer Cyclical',
+        // Restaurants / Hospitality
+        'DINE':'Consumer Cyclical','JACK':'Consumer Cyclical','CAKE':'Consumer Cyclical',
+        'TXRH':'Consumer Cyclical','WING':'Consumer Cyclical','FAT':'Consumer Cyclical',
+        // Metals / Mining (Materials)
+        'X':'Basic Materials','CLF':'Basic Materials','AA':'Basic Materials',
+        'MP':'Basic Materials','STLD':'Basic Materials','RS':'Basic Materials',
+        // Biotech / Small-cap healthcare
+        'ARWR':'Healthcare','KRYS':'Healthcare','KYMR':'Healthcare','VERA':'Healthcare',
+        'CRNX':'Healthcare','ACVA':'Healthcare','INSM':'Healthcare',
+        // Media / Publishing
+        'NYT':'Communication Services','IAC':'Communication Services',
+        'WMG':'Communication Services','LYV':'Communication Services',
     };
     return sectorMap[symbol] || 'Unknown';
 };

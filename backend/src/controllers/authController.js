@@ -1,41 +1,65 @@
 const jwt = require('jsonwebtoken');
-const { findUserByUsername, createUser, findUserByEmail } = require('../services/userService');
+const bcrypt = require('bcrypt');
+const { v4: uuidv4 } = require('uuid');
+const userDb = require('../services/userDatabaseService');
 const { sendOTP, verifyOTP } = require('../services/otpService');
 
 // Temporary storage for pending signups (use database in production)
 const pendingSignups = new Map();
 
-const login = (req, res) => {
+const login = async (req, res) => {
     console.log('Login attempt:', req.body);
-    const { username, password } = req.body;
-    let user = findUserByUsername(username);
-
-    // If user does not exist, create a new one
-    if (!user) {
-        console.log(`User "${username}" not found. Creating new user.`);
-        user = createUser(username, password);
-    }
-
-    if (user && user.password === password) {
-        // Sign a token with user id
-        const token = jwt.sign({ id: user.id }, 'your_jwt_secret', { expiresIn: '1h' });
-        console.log('Login successful for user:', username);
+    try {
+        const { username, password } = req.body;
         
-        // Return token and user details
-        res.json({ 
-            token,
-            user: {
-                id: user.id,
-                username: user.username,
-                email: user.email || '',
-                firstName: user.firstName || '',
-                lastName: user.lastName || '',
-                phone: user.phone || ''
-            }
-        });
-    } else {
-        console.log('Invalid credentials for user:', username);
-        res.status(401).send('Invalid credentials');
+        // Get user from database
+        let user = await userDb.getUserByUsername(username);
+
+        // If user does not exist, create a new one (for compatibility)
+        if (!user) {
+            console.log(`User "${username}" not found. Creating new user.`);
+            const userId = uuidv4();
+            user = await userDb.createUser({
+                id: userId,
+                username,
+                password,
+                email: null,
+                fullName: null,
+                phone: null,
+                telegramChatId: null
+            });
+        }
+
+        // Verify password
+        const isValidPassword = await bcrypt.compare(password, user.password);
+        
+        if (isValidPassword) {
+            // Update last login
+            await userDb.updateLastLogin(user.id);
+            
+            // Sign a token with user id
+            const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+            console.log('Login successful for user:', username);
+            
+            // Return token and user details
+            res.json({ 
+                token,
+                user: {
+                    id: user.id,
+                    username: user.username,
+                    email: user.email || '',
+                    firstName: user.full_name?.split(' ')[0] || '',
+                    lastName: user.full_name?.split(' ').slice(1).join(' ') || '',
+                    phone: user.phone || ''
+                }
+            });
+        } else {
+            console.log('Invalid credentials for user:', username);
+            res.status(401).send('Invalid credentials');
+        }
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({ error: 'Login failed' });
     }
 };
 
@@ -57,13 +81,14 @@ const signup = async (req, res) => {
         }
 
         // Check if username already exists
-        const existingUser = findUserByUsername(username);
+        const existingUser = await userDb.getUserByUsername(username);
         if (existingUser) {
             return res.status(400).json({ error: 'Username already exists' });
         }
 
-        // Check if email already exists
-        const existingEmail = findUserByEmail(email);
+        // Check if email already exists (we'll need to add this query)
+        const allUsers = await userDb.getAllUsers();
+        const existingEmail = allUsers.find(u => u.email === email);
         if (existingEmail) {
             return res.status(400).json({ error: 'Email already registered' });
         }
@@ -116,23 +141,23 @@ const verifySignup = async (req, res) => {
             return res.status(400).json({ error: 'Signup session expired. Please start again.' });
         }
 
-        // Create user
-        const user = createUser(
-            signupData.username,
-            signupData.password,
-            {
-                email: signupData.email,
-                firstName: signupData.firstName,
-                lastName: signupData.lastName,
-                phone: signupData.phone
-            }
-        );
+        // Create user in database
+        const userId = uuidv4();
+        const user = await userDb.createUser({
+            id: userId,
+            username: signupData.username,
+            password: signupData.password,
+            email: signupData.email,
+            fullName: `${signupData.firstName} ${signupData.lastName}`.trim(),
+            phone: signupData.phone,
+            telegramChatId: null
+        });
 
         // Clear pending signup
         pendingSignups.delete(email);
 
         // Generate token
-        const token = jwt.sign({ id: user.id }, 'your_jwt_secret', { expiresIn: '1h' });
+        const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '1h' });
 
         console.log(`[Signup] User created successfully: ${signupData.username}`);
         res.json({ 
@@ -141,7 +166,7 @@ const verifySignup = async (req, res) => {
                 id: user.id,
                 username: user.username,
                 email: user.email,
-                firstName: user.firstName,
+                firstName: signupData.firstName,
                 lastName: user.lastName,
                 phone: user.phone
             },

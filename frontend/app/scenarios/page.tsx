@@ -3,7 +3,7 @@
 import { getApiBaseUrl } from '../config';
 
 import { useState } from 'react';
-import AppHeader from '../components/AppHeader';
+
 
 interface ScenarioResult {
   scenario: string;
@@ -62,7 +62,7 @@ export default function ScenariosPage() {
       const results: ScenarioResult[] = [];
 
       for (const priceChange of scenarios) {
-  const response = fetch(`${getApiBaseUrl()}/api/scenarios/price-change`, {
+  const response = await fetch(`${getApiBaseUrl()}/api/scenarios/price-change`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -97,7 +97,7 @@ export default function ScenariosPage() {
     try {
       const token = localStorage.getItem('token');
       const option = buildOptionObject();
-  const response = fetch(`${getApiBaseUrl()}/api/scenarios/theta-decay`, {
+      const response = await fetch(`${getApiBaseUrl()}/api/scenarios/theta-decay`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -132,7 +132,7 @@ export default function ScenariosPage() {
     try {
       const token = localStorage.getItem('token');
       const option = buildOptionObject();
-  const response = fetch(`${getApiBaseUrl()}/api/scenarios/matrix`, {
+  const response = await fetch(`${getApiBaseUrl()}/api/scenarios/matrix`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -157,7 +157,7 @@ export default function ScenariosPage() {
       setMatrixResults(results);
       
       // Calculate risk metrics
-  const riskResp = fetch(`${getApiBaseUrl()}/api/scenarios/risk-metrics`, {
+  const riskResp = await fetch(`${getApiBaseUrl()}/api/scenarios/risk-metrics`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -263,7 +263,6 @@ export default function ScenariosPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-gray-100 dark:from-gray-900 dark:via-slate-900 dark:to-gray-900">
-      <AppHeader showSearch={false} />
       <div className="max-w-7xl mx-auto p-6">
         <div className="mb-8">
           <h1 className="text-4xl font-bold text-gray-900 dark:text-white mb-2">

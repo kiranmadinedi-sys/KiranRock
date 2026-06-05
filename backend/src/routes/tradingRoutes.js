@@ -3,7 +3,12 @@ const router = express.Router();
 const { protect } = require('../middleware/authMiddleware');
 const tradingAccountService = require('../services/tradingAccountService');
 const tradingService = require('../services/tradingService');
+const marketQuoteService = require('../services/marketQuoteService');
+const brokerService = require('../services/brokerService');
 const portfolioTrackingService = require('../services/portfolioTrackingService');
+const ledgerService = require('../services/ledgerService');
+const { analyzeStock } = require('../services/aiTradingBotService');
+const { getNewsSentiment } = require('../services/newsSentimentService');
 
 // All routes require authentication
 router.use(protect);
@@ -113,7 +118,7 @@ router.post('/buy', async (req, res) => {
             return res.status(400).json({ error: 'Quantity must be a positive integer' });
         }
         
-        const result = await tradingService.executeBuyOrder(req.userId, symbol, quantity);
+        const result = await brokerService.executeManualBuyOrder(req.userId, symbol, quantity);
         res.json(result);
     } catch (error) {
         res.status(400).json({ error: error.message });
@@ -136,7 +141,7 @@ router.post('/sell', async (req, res) => {
             return res.status(400).json({ error: 'Quantity must be a positive integer' });
         }
         
-        const result = await tradingService.executeSellOrder(req.userId, symbol, quantity);
+        const result = await brokerService.executeManualSellOrder(req.userId, symbol, quantity);
         res.json(result);
     } catch (error) {
         res.status(400).json({ error: error.message });
@@ -145,13 +150,13 @@ router.post('/sell', async (req, res) => {
 
 /**
  * GET /api/trading/history
- * Get trade history
+ * Get trade history (all types: BUY, SELL, DEPOSIT, WITHDRAWAL)
  */
 router.get('/history', async (req, res) => {
     try {
-        const limit = parseInt(req.query.limit) || 50;
+        const limit = parseInt(req.query.limit) || 100;
         const trades = await tradingService.getTradeHistory(req.userId, limit);
-        res.json(trades);
+        res.json({ trades });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -178,6 +183,42 @@ router.get('/portfolio', async (req, res) => {
     try {
         const portfolio = await portfolioTrackingService.getPortfolioSummary(req.userId);
         res.json(portfolio);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * GET /api/trading/ledger
+ * Return ledger reconciliation (deposits, withdrawals, buys, sells, commissions)
+ */
+router.get('/ledger', async (req, res) => {
+    try {
+        const summary = await ledgerService.getLedgerSummary(req.userId);
+        res.json(summary);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Get full ledger trades (including deposits/withdrawals)
+router.get('/ledger/trades', async (req, res) => {
+    try {
+        const limit = parseInt(req.query.limit) || 1000;
+        const trades = await ledgerService.getLedgerTrades(req.userId, limit);
+        res.json({ trades });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Export ledger CSV
+router.get('/ledger/export', async (req, res) => {
+    try {
+        const csv = await ledgerService.getLedgerCSV(req.userId);
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', 'attachment; filename="ledger.csv"');
+        res.send(csv);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -229,7 +270,7 @@ router.get('/transactions', async (req, res) => {
 router.get('/quote/:symbol', async (req, res) => {
     try {
         const { symbol } = req.params;
-        const price = await tradingService.getCurrentPrice(symbol);
+        const price = await marketQuoteService.getCurrentPrice(symbol);
         res.json({ symbol, price });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -245,6 +286,72 @@ router.get('/portfolio-history', async (req, res) => {
         const range = req.query.range || '1D';
         const history = await portfolioTrackingService.getPortfolioHistory(req.userId, range);
         res.json(history);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * GET /api/trading/news-signals
+ * Get AI trading signals enriched with news + X sentiment for a list of symbols.
+ * Query params:
+ *   symbols  - comma-separated list (default: AAPL,MSFT,GOOGL,NVDA,AMZN,TSLA,META,AMD)
+ *
+ * Returns per-symbol: aiScore, recommendation, newsSentiment, xPostCount, sentiment label
+ */
+router.get('/news-signals', async (req, res) => {
+    try {
+        const DEFAULT_SYMBOLS = 'AAPL,MSFT,GOOGL,NVDA,AMZN,TSLA,META,AMD,NFLX,JPM';
+        const rawSymbols = String(req.query.symbols || DEFAULT_SYMBOLS);
+        const symbols = rawSymbols
+            .split(',')
+            .map(s => s.trim().toUpperCase())
+            .filter(s => /^[A-Z]{1,5}$/.test(s))
+            .slice(0, 15); // hard cap: 15 symbols per request
+
+        if (symbols.length === 0) {
+            return res.status(400).json({ error: 'No valid symbols provided' });
+        }
+
+        // Fetch sentiment for all symbols in parallel
+        const sentimentResults = await Promise.allSettled(symbols.map(sym => getNewsSentiment(sym)));
+        const sentimentMap = {};
+        sentimentResults.forEach((res, i) => {
+            sentimentMap[symbols[i]] = res.status === 'fulfilled' ? res.value : null;
+        });
+
+        // Analyze each symbol (uses pre-loaded sentiment — no extra API calls)
+        const signalResults = await Promise.allSettled(
+            symbols.map(sym => analyzeStock(sym, null, sentimentMap[sym]))
+        );
+
+        const signals = signalResults
+            .map((result, i) => {
+                if (result.status !== 'fulfilled' || !result.value) return null;
+                const a = result.value;
+                return {
+                    symbol: a.symbol,
+                    price: a.price,
+                    change: a.change,
+                    aiScore: a.aiScore,
+                    recommendation: a.recommendation,
+                    chartSignal: a.chartSignal,
+                    confidence: a.confidence,
+                    newsSentimentImpact: a.newsSentimentImpact,
+                    newsSentiment: a.newsSentiment,
+                    vix: a.vix,
+                    timestamp: a.timestamp
+                };
+            })
+            .filter(Boolean)
+            .sort((a, b) => b.aiScore - a.aiScore);
+
+        res.json({
+            signals,
+            symbolCount: signals.length,
+            xEnabled: signals.some(s => (s.newsSentiment?.xPostCount || 0) > 0),
+            generatedAt: new Date().toISOString()
+        });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }

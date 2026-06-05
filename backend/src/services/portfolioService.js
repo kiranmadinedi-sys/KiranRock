@@ -1,74 +1,74 @@
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
+const { query } = require('../config/database');
 
-const usersFilePath = path.join(__dirname, '..', '..', 'users.json');
-
-const readUsers = () => {
-    if (!fs.existsSync(usersFilePath)) {
-        return [];
-    }
-    const data = fs.readFileSync(usersFilePath, 'utf8');
-    if (!data) {
-        return [];
-    }
+const getPortfolioByUserId = async (userId) => {
     try {
-        return JSON.parse(data);
+        const result = await query(
+            `SELECT id, symbol, quantity, average_price as "purchasePrice", 
+                    purchase_date as "addedAt", current_price as "currentPrice",
+                    market_value as "marketValue", gain_loss as "gainLoss",
+                    gain_loss_percent as "gainLossPercent"
+             FROM holdings 
+             WHERE user_id = $1 
+             ORDER BY purchase_date DESC`,
+            [userId]
+        );
+        
+        return result.rows.map(row => ({
+            id: row.id.toString(),
+            symbol: row.symbol,
+            quantity: parseInt(row.quantity),
+            purchasePrice: parseFloat(row.purchasePrice),
+            addedAt: row.addedAt,
+            currentPrice: row.currentPrice ? parseFloat(row.currentPrice) : null,
+            marketValue: row.marketValue ? parseFloat(row.marketValue) : null,
+            gainLoss: row.gainLoss ? parseFloat(row.gainLoss) : null,
+            gainLossPercent: row.gainLossPercent ? parseFloat(row.gainLossPercent) : null
+        }));
     } catch (error) {
-        console.error('Error parsing users.json:', error);
-        return []; // Return empty array on parsing error
+        console.error('Error getting portfolio:', error);
+        return [];
     }
 };
 
-const writeUsers = (users) => {
-    fs.writeFileSync(usersFilePath, JSON.stringify(users, null, 2));
-};
-
-const getPortfolioByUserId = (userId) => {
-    const users = readUsers();
-    const user = users.find(u => u.id === userId);
-    return user ? user.portfolio || [] : [];
-};
-
-const addHolding = (userId, symbol, quantity, purchasePrice) => {
-    const users = readUsers();
-    const userIndex = users.findIndex(u => u.id === userId);
-    if (userIndex === -1) {
+const addHolding = async (userId, symbol, quantity, purchasePrice) => {
+    try {
+        const result = await query(
+            `INSERT INTO holdings (user_id, symbol, quantity, average_price, purchase_date) 
+             VALUES ($1, $2, $3, $4, NOW()) 
+             RETURNING id, symbol, quantity, average_price as "purchasePrice", purchase_date as "addedAt"`,
+            [userId, symbol.toUpperCase(), parseInt(quantity), parseFloat(purchasePrice)]
+        );
+        
+        if (result.rows.length === 0) {
+            return null;
+        }
+        
+        const holding = result.rows[0];
+        return {
+            id: holding.id.toString(),
+            symbol: holding.symbol,
+            quantity: parseInt(holding.quantity),
+            purchasePrice: parseFloat(holding.purchasePrice),
+            addedAt: holding.addedAt
+        };
+    } catch (error) {
+        console.error('Error adding holding:', error);
         return null;
     }
-
-    if (!users[userIndex].portfolio) {
-        users[userIndex].portfolio = [];
-    }
-
-    const newHolding = {
-        id: crypto.randomUUID(),
-        symbol,
-        quantity: parseInt(quantity),
-        purchasePrice: parseFloat(purchasePrice),
-        addedAt: new Date().toISOString(),
-    };
-
-    users[userIndex].portfolio.push(newHolding);
-    writeUsers(users);
-    return newHolding;
 };
 
-const deleteHolding = (userId, holdingId) => {
-    const users = readUsers();
-    const userIndex = users.findIndex(u => u.id === userId);
-    if (userIndex === -1) {
+const deleteHolding = async (userId, holdingId) => {
+    try {
+        const result = await query(
+            'DELETE FROM holdings WHERE id = $1 AND user_id = $2 RETURNING id',
+            [holdingId, userId]
+        );
+        
+        return result.rows.length > 0;
+    } catch (error) {
+        console.error('Error deleting holding:', error);
         return false;
     }
-
-    const holdingIndex = users[userIndex].portfolio.findIndex(h => h.id === holdingId);
-    if (holdingIndex === -1) {
-        return false;
-    }
-
-    users[userIndex].portfolio.splice(holdingIndex, 1);
-    writeUsers(users);
-    return true;
 };
 
 module.exports = { getPortfolioByUserId, addHolding, deleteHolding };

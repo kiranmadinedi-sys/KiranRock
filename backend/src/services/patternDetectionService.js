@@ -371,6 +371,168 @@ const generatePatternAlerts = (patterns) => {
     }));
 };
 
+// ─── PANTHEON ORACLE PATTERNS ────────────────────────────────────────────────
+// These three patterns feed directly into ORACLE Step 3 scoring.
+// Input: bars array of { open, high, low, close, volume } sorted oldest→newest.
+
+/**
+ * Volatility Contraction Pattern (Minervini VCP).
+ * Looks for ≥2 successive pullbacks where each swing is ≤60% of the prior,
+ * volume drying up, and price within 15% of the 52-week high.
+ * @param {Array} bars
+ * @returns {boolean}
+ */
+function detectVCP(bars) {
+    if (bars.length < 45) return false;
+
+    const recent = bars.slice(-65);
+    const highs  = recent.map(b => b.high);
+    const lows   = recent.map(b => b.low);
+    const vols   = recent.map(b => b.volume);
+
+    const week52High = Math.max(...highs);
+    const currentClose = recent[recent.length - 1].close;
+    if (currentClose < week52High * 0.85) return false; // Must be within 15% of 52wk high
+
+    // Find pullback swings: local high → local low pairs
+    const swings = [];
+    let inPullback = false;
+    let swingHigh = 0;
+
+    for (let i = 5; i < recent.length - 3; i++) {
+        const isLocalHigh = recent[i].high >= recent[i - 1].high &&
+                            recent[i].high >= recent[i + 1].high &&
+                            recent[i].high >= recent[i - 2].high;
+        const isLocalLow  = recent[i].low <= recent[i - 1].low &&
+                            recent[i].low <= recent[i + 1].low &&
+                            recent[i].low <= recent[i - 2].low;
+
+        if (isLocalHigh && !inPullback) {
+            swingHigh   = recent[i].high;
+            inPullback  = true;
+        } else if (isLocalLow && inPullback) {
+            const swingDepth = (swingHigh - recent[i].low) / swingHigh;
+            swings.push({ depth: swingDepth, volAtLow: vols[i] });
+            inPullback = false;
+        }
+    }
+
+    if (swings.length < 2) return false;
+
+    // Each swing must be ≤65% of the prior (contracting)
+    for (let i = 1; i < swings.length; i++) {
+        if (swings[i].depth > swings[i - 1].depth * 0.65) return false;
+    }
+
+    // Volume at last low should be below 20-day average (drying up)
+    const avgVol20 = vols.slice(-20).reduce((a, b) => a + b, 0) / 20;
+    const lastSwingVol = swings[swings.length - 1].volAtLow;
+    if (lastSwingVol > avgVol20 * 1.1) return false;
+
+    return true;
+}
+
+/**
+ * Cup & Handle (O'Neil).
+ * Cup: smooth U-shape 15-35% deep over ≥30 bars; right lip recovers to within 5% of left.
+ * Handle: subsequent 5-15% pullback over 5-20 bars with declining volume.
+ * @param {Array} bars
+ * @returns {boolean}
+ */
+function detectCupAndHandle(bars) {
+    if (bars.length < 55) return false;
+
+    // Use the last 75 bars for the cup
+    const cupBars = bars.slice(-75, -5);
+    if (cupBars.length < 30) return false;
+
+    const leftLipPrice  = cupBars[0].high;
+    const cupLow        = Math.min(...cupBars.map(b => b.low));
+    const rightLipPrice = cupBars[cupBars.length - 1].close;
+    const cupDepth      = (leftLipPrice - cupLow) / leftLipPrice;
+
+    if (cupDepth < 0.15 || cupDepth > 0.35) return false; // Cup must be 15-35% deep
+    if (rightLipPrice < leftLipPrice * 0.95) return false; // Right lip within 5% of left
+
+    // Cup shape: midpoint price should be near the cup low
+    const midClose = cupBars[Math.floor(cupBars.length / 2)].close;
+    if (midClose > leftLipPrice * 0.88) return false; // Mid should be at least 12% below left lip
+
+    // Handle: last 5-20 bars should be a shallow pullback
+    const handleBars = bars.slice(-20);
+    const handleHigh = Math.max(...handleBars.map(b => b.high));
+    const handleLow  = Math.min(...handleBars.map(b => b.low));
+    const handleDepth = (handleHigh - handleLow) / handleHigh;
+
+    if (handleDepth < 0.05 || handleDepth > 0.15) return false; // Handle 5-15% deep
+
+    // Volume declining in handle
+    const handleVols = handleBars.map(b => b.volume);
+    const firstHalfVol = handleVols.slice(0, Math.floor(handleVols.length / 2)).reduce((a, b) => a + b, 0);
+    const secondHalfVol = handleVols.slice(Math.floor(handleVols.length / 2)).reduce((a, b) => a + b, 0);
+    if (secondHalfVol >= firstHalfVol) return false; // Volume must contract
+
+    return true;
+}
+
+/**
+ * Darvas Box.
+ * Finds a price "box" (consolidation range) then checks if price has broken
+ * above the box ceiling on above-average volume.
+ * @param {Array} bars
+ * @returns {boolean}
+ */
+function detectDarvasBox(bars) {
+    if (bars.length < 30) return false;
+
+    const recent  = bars.slice(-40);
+    const boxBars = recent.slice(0, -5); // Box formation — all but last 5 bars
+    const breakBars = recent.slice(-5);  // Potential breakout bars
+
+    const boxHigh = Math.max(...boxBars.map(b => b.high));
+    const boxLow  = Math.min(...boxBars.map(b => b.low));
+    const boxRange = (boxHigh - boxLow) / boxHigh;
+
+    if (boxRange > 0.20) return false; // Box must be tight (< 20% range)
+    if (boxRange < 0.04) return false; // Must have some range (not flat)
+
+    // Ceiling must have been tested at least twice
+    const ceilingTests = boxBars.filter(b => b.high >= boxHigh * 0.99).length;
+    if (ceilingTests < 2) return false;
+
+    // Current price must have broken above box ceiling
+    const currentClose = breakBars[breakBars.length - 1].close;
+    if (currentClose <= boxHigh) return false;
+
+    // Breakout bar should have above-average volume
+    const avgVol = boxBars.reduce((a, b) => a + b.volume, 0) / boxBars.length;
+    const breakoutVol = Math.max(...breakBars.map(b => b.volume));
+    if (breakoutVol < avgVol * 1.3) return false;
+
+    return true;
+}
+
+/**
+ * Detect the best PANTHEON ORACLE pattern in a bar series.
+ * Returns the pattern name and its ORACLE Step 3 score contribution.
+ *
+ * @param {Array} bars  — OHLCV array sorted oldest→newest
+ * @returns {{ pattern: string, score: number, signal: string }}
+ */
+function detectOraclePatterns(bars) {
+    if (!bars || bars.length < 30) return { pattern: 'None', score: 0, signal: 'None' };
+
+    if (detectVCP(bars))          return { pattern: 'VCP',        score: 10, signal: 'Bullish' };
+    if (detectCupAndHandle(bars)) return { pattern: 'Cup&Handle', score: 8,  signal: 'Bullish' };
+    if (detectDarvasBox(bars))    return { pattern: 'Darvas',     score: 8,  signal: 'Bullish' };
+
+    return { pattern: 'None', score: 0, signal: 'None' };
+}
+
 module.exports = {
-    detectPatterns
+    detectPatterns,
+    detectOraclePatterns,
+    detectVCP,
+    detectCupAndHandle,
+    detectDarvasBox
 };

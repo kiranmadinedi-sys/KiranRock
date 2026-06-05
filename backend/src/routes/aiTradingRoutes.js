@@ -3,9 +3,7 @@ const express = require('express');
 const router = express.Router();
 const { protect } = require('../middleware/authMiddleware');
 const aiTradingBotService = require('../services/aiTradingBotService');
-const fs = require('fs').promises;
-const path = require('path');
-const USERS_FILE = path.join(__dirname, '../../users.json');
+const userProfileService = require('../services/userProfileService');
 
 // All routes require authentication
 router.use(protect);
@@ -16,12 +14,8 @@ router.use(protect);
  */
 router.get('/settings', async (req, res) => {
     try {
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const user = users.find(u => u.id === req.userId);
-        if (!user) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-        res.json({ aiTradingSettings: user.aiTradingSettings || {} });
+        const aiTradingSettings = await userProfileService.getAITradingSettings(req.userId);
+        res.json({ aiTradingSettings });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -34,19 +28,12 @@ router.get('/settings', async (req, res) => {
 router.post('/settings', async (req, res) => {
     try {
         const { stopLoss, takeProfit, minCashReserve } = req.body;
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const userIndex = users.findIndex(u => u.id === req.userId);
-        if (userIndex === -1) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-        users[userIndex].aiTradingSettings = {
-            ...(users[userIndex].aiTradingSettings || {}),
-            ...(stopLoss !== undefined ? { stopLoss: parseFloat(stopLoss) } : {}),
-            ...(takeProfit !== undefined ? { takeProfit: parseFloat(takeProfit) } : {}),
-            ...(minCashReserve !== undefined ? { minCashReserve: parseFloat(minCashReserve) } : {})
-        };
-        await fs.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
-        res.json({ success: true, aiTradingSettings: users[userIndex].aiTradingSettings });
+        const aiTradingSettings = await userProfileService.updateAITradingSettings(req.userId, {
+            stopLoss,
+            takeProfit,
+            minCashReserve
+        });
+        res.json({ success: true, aiTradingSettings });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }

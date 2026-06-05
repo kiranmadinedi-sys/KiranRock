@@ -1,12 +1,12 @@
-const { sendTelegramMessage } = require('./services/telegramService');
-const users = require('../users.json');
+const { sendTelegramMessage, getPrimaryTelegramRecipient } = require('./services/telegramService');
 
 async function testTelegramHello() {
-  // Find main user with phone
-  const user = users.find(u => u.username === 'user' && u.phone);
-  if (!user) throw new Error('User with phone not found');
+  const user = await getPrimaryTelegramRecipient('user');
+  if (!user || (!user.telegram_chat_id && !user.phone)) {
+    throw new Error('User with Telegram recipient details not found');
+  }
   try {
-    const result = await sendTelegramMessage(user.phone, 'Hello');
+    const result = await sendTelegramMessage(user.telegram_chat_id || user.phone, 'Hello');
     console.log('Telegram message sent:', result);
   } catch (err) {
     console.error('Failed to send Telegram message:', err.message);

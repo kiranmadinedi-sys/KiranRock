@@ -1,7 +1,9 @@
-const YahooFinance = require('yahoo-finance2').default;
-const yahooFinance = new YahooFinance();
+const yfClient = require('../utils/yfClient');
 const fs = require('fs');
 const path = require('path');
+const cacheService = require('./cacheService');
+const dataProvider = require('./dataProvider');
+const marketDataStore = require('./marketDataStore');
 
 const STOCKS_FILE = path.join(__dirname, '../../stocks.json');
 
@@ -27,8 +29,18 @@ const writeStocksToFile = (stocks) => {
 
 let stocks = readStocksFromFile(); // Initialize from file
 
-// In-memory cache for stock prices (per symbol)
-const priceCache = {};
+function getBarCacheTtlMs(interval) {
+    if (interval === '1d') return 24 * 60 * 60 * 1000;
+    if (interval === '1wk') return 7 * 24 * 60 * 60 * 1000;
+    if (interval === '1mo') return 30 * 24 * 60 * 60 * 1000;
+    if (interval === '5m') return 30 * 60 * 1000;
+    if (interval === '1m') return 5 * 60 * 1000;
+    return 24 * 60 * 60 * 1000;
+}
+
+function getQuoteCacheTtlMs(symbol) {
+    return symbol.startsWith('^') ? 30 * 60 * 1000 : 60 * 1000;
+}
 
 const getStockData = async (symbol, interval = '1d', includePrePost = true) => {
     const fs = require('fs');
@@ -38,6 +50,11 @@ const getStockData = async (symbol, interval = '1d', includePrePost = true) => {
         fs.mkdirSync(storageDir, { recursive: true });
     }
     const candleFile = path.join(storageDir, `candles_${symbol}_${interval}.json`);
+    const inMemoryKey = `bars:${symbol}:${interval}`;
+    const cachedBars = cacheService.get(inMemoryKey);
+    if (cachedBars) {
+        return cachedBars;
+    }
     try {
         // If 1m interval, combine historical (lower-res) and recent (1m) data
         if (interval === '1m') {
@@ -63,7 +80,7 @@ const getStockData = async (symbol, interval = '1d', includePrePost = true) => {
                     interval: histInterval,
                     includePrePost: includePrePost,
                 };
-                const histResult = await yahooFinance.chart(symbol, histOptions);
+                const histResult = await yfClient._raw.chart(symbol, histOptions);
                 const histQuotes = (histResult.quotes || []).map(d => ({
                     time: Math.floor(new Date(d.date).getTime() / 1000),
                     open: d.open, high: d.high, low: d.low, close: d.close, volume: d.volume, isExtendedHours: d.isExtendedHours || false
@@ -80,7 +97,7 @@ const getStockData = async (symbol, interval = '1d', includePrePost = true) => {
                 interval: '1m',
                 includePrePost: includePrePost,
             };
-            const min1mResult = await yahooFinance.chart(symbol, min1mOptions);
+            const min1mResult = await yfClient._raw.chart(symbol, min1mOptions);
             const min1mQuotes = (min1mResult.quotes || []).map(d => ({
                 time: Math.floor(new Date(d.date).getTime() / 1000),
                 open: d.open, high: d.high, low: d.low, close: d.close, volume: d.volume, isExtendedHours: d.isExtendedHours || false
@@ -108,63 +125,118 @@ const getStockData = async (symbol, interval = '1d', includePrePost = true) => {
             });
             return deduped;
         } else {
-            // For other intervals, fetch and store if not present
+            const CACHE_TTL_MS = getBarCacheTtlMs(interval);
+            const persistentKey = `bars_${symbol}_${interval}`;
+
             let candles = [];
-            if (!fs.existsSync(storageDir)) {
-                fs.mkdirSync(storageDir, { recursive: true });
-            }
+            let cacheValid = false;
             if (fs.existsSync(candleFile)) {
                 try {
-                    candles = JSON.parse(fs.readFileSync(candleFile, 'utf8'));
+                    const stat = fs.statSync(candleFile);
+                    const age  = Date.now() - stat.mtimeMs;
+                    if (age < CACHE_TTL_MS) {
+                        candles   = JSON.parse(fs.readFileSync(candleFile, 'utf8'));
+                        cacheValid = candles.length > 0;
+                    }
                 } catch (e) { candles = []; }
-            } else {
-                // Download and store
+            }
+
+            if (!cacheValid) {
                 let periodMonths = 3;
                 if (interval === '1wk') periodMonths = 24;
                 else if (interval === '1mo') periodMonths = 60;
                 else if (interval === 'all') periodMonths = 120;
-                const startDate = new Date();
-                startDate.setMonth(startDate.getMonth() - periodMonths);
-                const queryOptions = {
-                    period1: startDate.toISOString().slice(0, 10),
-                    period2: new Date().toISOString().slice(0, 10),
-                    interval: interval === 'all' ? '1d' : interval,
-                    includePrePost: includePrePost,
-                };
-                const result = await yahooFinance.chart(symbol, queryOptions);
-                const quotes = (result.quotes || []).map(d => ({
-                    time: Math.floor(new Date(d.date).getTime() / 1000),
-                    open: d.open, high: d.high, low: d.low, close: d.close, volume: d.volume, isExtendedHours: d.isExtendedHours || false
-                }));
-                candles = quotes;
-                fs.writeFileSync(candleFile, JSON.stringify(quotes, null, 2));
+                const lookbackDays = periodMonths * 31;
+                const fetchInterval = interval === 'all' ? '1d' : interval;
+                try {
+                    const bars = await dataProvider.getBars(symbol, fetchInterval, lookbackDays);
+                    const quotes = (bars || []).filter(b => b && b.time).map(b => ({
+                        time:   Math.floor(new Date(b.time).getTime() / 1000),
+                        open:   b.open,
+                        high:   b.high,
+                        low:    b.low,
+                        close:  b.close,
+                        volume: b.volume,
+                        isExtendedHours: false
+                    }));
+                    candles = quotes;
+                    if (quotes.length > 0) {
+                        fs.writeFileSync(candleFile, JSON.stringify(quotes, null, 2));
+                        marketDataStore.writeEntry(persistentKey, quotes);
+                    }
+                } catch (fetchError) {
+                    console.warn(`[StockData] Fresh bars fetch failed for ${symbol} ${interval}:`, fetchError.message);
+                    const staleBars = marketDataStore.getStaleValue(persistentKey);
+                    if (Array.isArray(staleBars) && staleBars.length > 0) {
+                        candles = staleBars;
+                    } else {
+                        throw fetchError;
+                    }
+                }
             }
+            cacheService.set(inMemoryKey, candles, Math.min(CACHE_TTL_MS, 15 * 60 * 1000));
             return candles;
         }
     } catch (error) {
         console.error(`Failed to fetch data for ${symbol}:`, error);
+        const staleBars = marketDataStore.getStaleValue(`bars_${symbol}_${interval}`);
+        if (Array.isArray(staleBars) && staleBars.length > 0) {
+            return staleBars;
+        }
         return [];
     }
 };
 
-// Fetch current price with 1-second cache
 const getCurrentPrice = async (symbol) => {
+    const cacheKey = `quote:${symbol}`;
+    const cachedQuote = cacheService.get(cacheKey);
+    if (cachedQuote !== null) {
+        return cachedQuote;
+    }
+
+    const persistentKey = `quote_${symbol}`;
+    const quoteTtlMs = getQuoteCacheTtlMs(symbol);
+    const storedQuote = marketDataStore.getValue(persistentKey, quoteTtlMs);
+    if (typeof storedQuote === 'number') {
+        cacheService.set(cacheKey, storedQuote, quoteTtlMs);
+        return storedQuote;
+    }
+
     try {
-        const quote = await yahooFinance.quote(symbol);
-        // Use the freshest available price: preMarket > postMarket > regularMarket
         let price = null;
-        if (quote) {
-            if (quote.preMarketPrice) {
-                price = quote.preMarketPrice;
-            } else if (quote.postMarketPrice) {
-                price = quote.postMarketPrice;
-            } else if (quote.regularMarketPrice) {
-                price = quote.regularMarketPrice;
+
+        try {
+            const providerQuote = await dataProvider.getQuote(symbol);
+            price = providerQuote?.price ?? null;
+        } catch (providerError) {
+            console.warn(`[StockData] dataProvider quote failed for ${symbol}:`, providerError.message);
+        }
+
+        if (price === null) {
+            const quote = await yfClient.quote(symbol);
+            if (quote) {
+                if (quote.preMarketPrice) {
+                    price = quote.preMarketPrice;
+                } else if (quote.postMarketPrice) {
+                    price = quote.postMarketPrice;
+                } else if (quote.regularMarketPrice) {
+                    price = quote.regularMarketPrice;
+                }
             }
+        }
+
+        if (typeof price === 'number') {
+            cacheService.set(cacheKey, price, quoteTtlMs);
+            marketDataStore.writeEntry(persistentKey, price);
         }
         return price;
     } catch (error) {
-        console.error(`Failed to fetch current price for ${symbol}:`, error);
+        console.error(`Failed to fetch current price for ${symbol}:`, error && error.message ? error.message : error);
+        const staleQuote = marketDataStore.getStaleValue(persistentKey);
+        if (typeof staleQuote === 'number') {
+            cacheService.set(cacheKey, staleQuote, Math.min(quoteTtlMs, 5 * 60 * 1000));
+            return staleQuote;
+        }
         return null;
     }
 };
@@ -172,7 +244,7 @@ const getCurrentPrice = async (symbol) => {
 const searchSymbols = async (query) => {
     try {
         // Try Yahoo Finance autocomplete API for real symbol search
-        const results = await yahooFinance.search(query);
+        const results = await yfClient.search(query);
         if (results && results.quotes && results.quotes.length > 0) {
             // Return objects with symbol and name (exclude currency pairs, etc.)
             return results.quotes
@@ -185,63 +257,44 @@ const searchSymbols = async (query) => {
                     exchange: q.exchange
                 }));
         }
-        // Fallback to demo list if no results
-        const stockNames = {
-            'AMD': 'Advanced Micro Devices',
-            'AAPL': 'Apple Inc.',
-            'GOOGL': 'Alphabet Inc.',
-            'MSFT': 'Microsoft Corporation',
-            'TSLA': 'Tesla Inc.',
-            'NVDA': 'NVIDIA Corporation',
-            'V': 'Visa Inc.',
-            'META': 'Meta Platforms Inc.',
-            'NFLX': 'Netflix Inc.',
-            'DIS': 'The Walt Disney Company',
-            'BAC': 'Bank of America Corp',
-            'JPM': 'JPMorgan Chase & Co.',
-            'WMT': 'Walmart Inc.',
-            'INTC': 'Intel Corporation',
-            'CSCO': 'Cisco Systems Inc.',
-            'ORCL': 'Oracle Corporation',
-            'PYPL': 'PayPal Holdings Inc.',
-            'ADBE': 'Adobe Inc.',
-            'CRM': 'Salesforce Inc.',
-            'UBER': 'Uber Technologies Inc.',
-            'LYFT': 'Lyft Inc.',
-            'SHOP': 'Shopify Inc.',
-            'SQ': 'Block Inc.',
-            'COIN': 'Coinbase Global Inc.',
-            'PLTR': 'Palantir Technologies Inc.',
-            'SNOW': 'Snowflake Inc.',
-            'SPOT': 'Spotify Technology S.A.',
-            'TWLO': 'Twilio Inc.',
-            'ZM': 'Zoom Video Communications',
-            'ROKU': 'Roku Inc.',
-            'F': 'Ford Motor Company',
-            'GM': 'General Motors Company',
-            'T': 'AT&T Inc.',
-            'VZ': 'Verizon Communications',
-            'PEP': 'PepsiCo Inc.',
-            'KO': 'The Coca-Cola Company',
-            'MCD': 'McDonald\'s Corporation',
-            'SBUX': 'Starbucks Corporation',
-            'NKE': 'Nike Inc.',
-            'COST': 'Costco Wholesale Corporation'
-        };
-        const matchedSymbols = Object.keys(stockNames).filter(s => 
-            s.toLowerCase().includes(query.toLowerCase()) || 
-            stockNames[s].toLowerCase().includes(query.toLowerCase())
-        );
-        return matchedSymbols.slice(0, 10).map(s => ({
-            symbol: s,
-            name: stockNames[s],
-            type: 'EQUITY',
-            exchange: 'NASDAQ/NYSE'
-        }));
+        // No results from Yahoo — fall through to local fallback
     } catch (error) {
-        console.error(`Failed to search for symbols with query "${query}":`, error);
-        return [];
+        console.warn(`Yahoo search failed for "${query}" (${error.message}), using local fallback`);
+        // Fall through to local fallback below
     }
+
+    // Local fallback when Yahoo is rate-limited or unavailable
+    const stockNames = {
+        'AMD': 'Advanced Micro Devices', 'AAPL': 'Apple Inc.', 'GOOGL': 'Alphabet Inc.',
+        'MSFT': 'Microsoft Corporation', 'TSLA': 'Tesla Inc.', 'NVDA': 'NVIDIA Corporation',
+        'V': 'Visa Inc.', 'META': 'Meta Platforms Inc.', 'NFLX': 'Netflix Inc.',
+        'DIS': 'The Walt Disney Company', 'BAC': 'Bank of America Corp',
+        'JPM': 'JPMorgan Chase & Co.', 'WMT': 'Walmart Inc.', 'INTC': 'Intel Corporation',
+        'CSCO': 'Cisco Systems Inc.', 'ORCL': 'Oracle Corporation', 'PYPL': 'PayPal Holdings Inc.',
+        'ADBE': 'Adobe Inc.', 'CRM': 'Salesforce Inc.', 'UBER': 'Uber Technologies Inc.',
+        'LYFT': 'Lyft Inc.', 'SHOP': 'Shopify Inc.', 'SQ': 'Block Inc.',
+        'COIN': 'Coinbase Global Inc.', 'PLTR': 'Palantir Technologies Inc.',
+        'SNOW': 'Snowflake Inc.', 'SPOT': 'Spotify Technology S.A.',
+        'TWLO': 'Twilio Inc.', 'ZM': 'Zoom Video Communications', 'ROKU': 'Roku Inc.',
+        'F': 'Ford Motor Company', 'GM': 'General Motors Company', 'T': 'AT&T Inc.',
+        'VZ': 'Verizon Communications', 'PEP': 'PepsiCo Inc.', 'KO': 'The Coca-Cola Company',
+        'MCD': "McDonald's Corporation", 'SBUX': 'Starbucks Corporation',
+        'NKE': 'Nike Inc.', 'COST': 'Costco Wholesale Corporation',
+        'AMZN': 'Amazon.com Inc.', 'GOOG': 'Alphabet Inc. Class C',
+        'MRVL': 'Marvell Technology Inc.', 'QCOM': 'QUALCOMM Inc.',
+        'AVGO': 'Broadcom Inc.', 'TXN': 'Texas Instruments Inc.',
+        'GS': 'Goldman Sachs Group Inc.', 'MS': 'Morgan Stanley',
+        'UNH': 'UnitedHealth Group Inc.', 'JNJ': 'Johnson & Johnson',
+        'PFE': 'Pfizer Inc.', 'ABBV': 'AbbVie Inc.',
+        'XOM': 'Exxon Mobil Corporation', 'CVX': 'Chevron Corporation'
+    };
+    const q = query.toLowerCase();
+    const matched = Object.keys(stockNames).filter(s =>
+        s.toLowerCase().includes(q) || stockNames[s].toLowerCase().includes(q)
+    );
+    return matched.slice(0, 10).map(s => ({
+        symbol: s, name: stockNames[s], type: 'EQUITY', exchange: 'NASDAQ/NYSE'
+    }));
 };
 
 

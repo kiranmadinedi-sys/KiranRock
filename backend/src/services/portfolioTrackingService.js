@@ -1,34 +1,118 @@
 const tradingService = require('./tradingService');
+const marketQuoteService = require('./marketQuoteService');
 const tradingAccountService = require('./tradingAccountService');
+const tradesDb = require('./tradesDatabaseService');
+const { savePortfolioSnapshot } = require('./portfolioSnapshotService');
+const { buildPortfolioHistory } = require('./portfolioHistoryService');
 
 /**
  * Get complete portfolio with real-time valuations
  */
 const getPortfolioSummary = async (userId) => {
     try {
-        const [holdings, account, trades] = await Promise.all([
+        const [holdings, account, trades, firstBuyRows] = await Promise.all([
             tradingService.getHoldings(userId),
             tradingAccountService.getTradingAccount(userId),
-            tradingService.getTradeHistory(userId, 1000)
+            tradingService.getTradeHistory(userId, 1000),
+            tradesDb.getFirstBuyDates(userId)
         ]);
+
+        // Build a quick lookup map symbol -> first_bought
+        const firstBoughtMap = {};
+        (firstBuyRows || []).forEach(r => {
+            if (r && r.symbol) firstBoughtMap[r.symbol] = r.first_bought;
+        });
         
         // Get current prices for all holdings
         const holdingsWithCurrentPrice = await Promise.all(
             holdings.map(async (holding) => {
                 try {
-                    const currentPrice = await tradingService.getCurrentPrice(holding.symbol);
+                    // lookup precomputed firstBought for this symbol
+                    const firstBought = firstBoughtMap[holding.symbol] || null;
+
+                    // Try live price; if unavailable, fall back to cached holding.currentPrice or averagePrice
+                    let currentPrice = null;
+                    try {
+                        currentPrice = await marketQuoteService.getCurrentPrice(holding.symbol);
+                    } catch (e) {
+                        currentPrice = null;
+                    }
+
+                    if (currentPrice === null || currentPrice === undefined) {
+                        currentPrice = holding.currentPrice != null ? holding.currentPrice : holding.averagePrice;
+                    }
+
                     const currentValue = currentPrice * holding.quantity;
                     const costBasis = holding.averagePrice * holding.quantity;
                     const unrealizedPL = currentValue - costBasis;
                     const unrealizedPLPercent = (unrealizedPL / costBasis) * 100;
                     
+                    // Compute per-symbol realized P/L using FIFO per-lot matching for exact accounting
+                    let realizedPL = 0;
+                    try {
+                        const symbolTrades = await tradesDb.getSymbolTrades(userId, holding.symbol, 1000);
+                        // Sort chronological ascending
+                        symbolTrades.sort((a, b) => new Date(a.trade_date) - new Date(b.trade_date));
+
+                        // Use precomputed first-bought map if available to avoid per-symbol scans
+                        let firstBought = firstBoughtMap[holding.symbol] || null;
+
+                        // Maintain a queue of buy lots: { qtyRemaining, price, commission }
+                        const buyQueue = [];
+
+                        for (const t of symbolTrades) {
+                            const action = (t.action || t.type || '').toUpperCase();
+                            const qty = parseInt(t.quantity || 0);
+                            const price = parseFloat(t.price || 0);
+                            const total = parseFloat(t.total || 0) || (price * qty);
+                            const commission = parseFloat(t.commission || 0) || 0;
+
+                            if (action === 'BUY') {
+                                buyQueue.push({ qtyRemaining: qty, price, commission, originalQty: qty });
+                            } else if (action === 'SELL') {
+                                let remainingToMatch = qty;
+                                let sellProceedsTotal = total;
+                                // Allocate commissions proportionally between matched lots if needed
+                                while (remainingToMatch > 0 && buyQueue.length > 0) {
+                                    const lot = buyQueue[0];
+                                    const matchQty = Math.min(remainingToMatch, lot.qtyRemaining);
+
+                                    const cost = lot.price * matchQty;
+                                    const proceeds = price * matchQty;
+
+                                    // Pro-rate commissions: buy commission portion and sell commission portion
+                                    const buyCommPortion = (lot.commission || 0) * (matchQty / (lot.originalQty || lot.qtyRemaining || matchQty));
+                                    const sellCommPortion = commission * (matchQty / qty);
+
+                                    realizedPL += (proceeds - cost - (buyCommPortion || 0) - (sellCommPortion || 0));
+
+                                    // Decrease lot
+                                    lot.qtyRemaining -= matchQty;
+                                    remainingToMatch -= matchQty;
+
+                                    if (lot.qtyRemaining === 0) buyQueue.shift();
+                                }
+                                // If sells exceed buys (shouldn't happen normally), compute based on average
+                                if (remainingToMatch > 0) {
+                                    const avgBuyPrice = holding.averagePrice || 0;
+                                    realizedPL += (price - avgBuyPrice) * remainingToMatch - (commission || 0) * (remainingToMatch / qty);
+                                }
+                            }
+                        }
+                    } catch (err) {
+                        console.error('Error computing realized P/L (FIFO) for', holding.symbol, err.message);
+                        realizedPL = 0;
+                    }
+
                     return {
                         ...holding,
                         currentPrice,
                         currentValue,
                         costBasis,
                         unrealizedPL,
-                        unrealizedPLPercent
+                        unrealizedPLPercent,
+                        realizedPL,
+                        firstBought
                     };
                 } catch (error) {
                     console.error(`Error getting price for ${holding.symbol}:`, error.message);
@@ -39,7 +123,8 @@ const getPortfolioSummary = async (userId) => {
                         costBasis: holding.averagePrice * holding.quantity,
                         unrealizedPL: 0,
                         unrealizedPLPercent: 0,
-                        priceError: true
+                        priceError: true,
+                        firstBought: firstBoughtMap[holding.symbol] || null
                     };
                 }
             })
@@ -65,7 +150,7 @@ const getPortfolioSummary = async (userId) => {
         const overallPL = totalPortfolioValue - totalInvested;
         const overallReturn = totalInvested > 0 ? (overallPL / totalInvested) * 100 : 0;
         
-        return {
+        const portfolioSummary = {
             account: {
                 cashBalance: account.balance,
                 totalDeposited: account.totalDeposited,
@@ -86,6 +171,14 @@ const getPortfolioSummary = async (userId) => {
                 cashBalance: account.balance
             }
         };
+
+        try {
+            await savePortfolioSnapshot(userId, portfolioSummary.summary, { source: 'portfolio-summary' });
+        } catch (snapshotError) {
+            console.error('Error saving portfolio snapshot:', snapshotError.message);
+        }
+
+        return portfolioSummary;
     } catch (error) {
         console.error('Error getting portfolio summary:', error);
         throw error;
@@ -226,7 +319,7 @@ const getSectorAllocation = async (userId) => {
         const sectorMap = {};
         
         for (const holding of holdings) {
-            const currentPrice = await tradingService.getCurrentPrice(holding.symbol).catch(() => holding.averagePrice);
+            const currentPrice = await marketQuoteService.getCurrentPrice(holding.symbol).catch(() => holding.averagePrice);
             const value = currentPrice * holding.quantity;
             
             // You can enhance this by fetching actual sector from fundamentalsService
@@ -318,28 +411,8 @@ const getRiskMetrics = async (userId) => {
  * Get portfolio value history for charting
  */
 const getPortfolioHistory = async (userId, range = '1D') => {
-    // For demo: generate fake data based on current portfolio value
-    // In production, use actual historical data from trades and prices
     const summary = await getPortfolioSummary(userId);
-    const now = Date.now();
-    let points = [];
-    let intervals = 1;
-    if (range === '1D') intervals = 24;
-    else if (range === '1W') intervals = 7;
-    else if (range === '1M') intervals = 30;
-    else if (range === '3M') intervals = 12;
-    else if (range === 'YTD') intervals = 10;
-    else if (range === '1Y') intervals = 12;
-    for (let i = intervals - 1; i >= 0; i--) {
-        points.push({
-            time: new Date(now - i * 3600 * 1000).toLocaleString(),
-            value: summary.summary.totalPortfolioValue * (1 + (Math.random() - 0.5) * 0.02)
-        });
-    }
-    // Calculate change
-    const changeValue = points[points.length - 1].value - points[0].value;
-    const changePercent = (changeValue / points[0].value) * 100;
-    return { history: points, changeValue, changePercent };
+    return buildPortfolioHistory(userId, range, summary.summary);
 };
 
 module.exports = {

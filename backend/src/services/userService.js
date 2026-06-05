@@ -1,70 +1,128 @@
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-
-const usersFilePath = path.join(__dirname, '..', '..', 'users.json');
-
-const readUsers = () => {
-    if (!fs.existsSync(usersFilePath)) {
-        fs.writeFileSync(usersFilePath, JSON.stringify([], null, 2));
-        return [];
-    }
-    const data = fs.readFileSync(usersFilePath, 'utf8');
-    if (!data) {
-        return [];
-    }
-    try {
-        return JSON.parse(data);
-    } catch (error) {
-        console.error('Error parsing users.json:', error);
-        return [];
-    }
-};
-
-const writeUsers = (users) => {
-    fs.writeFileSync(usersFilePath, JSON.stringify(users, null, 2));
-};
-
-const findUserByUsername = (username) => {
-    const users = readUsers();
-    return users.find(u => u.username === username);
-};
-
-const findUserById = (id) => {
-    const users = readUsers();
-    return users.find(u => u.id === id);
-};
-
-const findUserByEmail = (email) => {
-    const users = readUsers();
-    return users.find(u => u.email === email);
-};
-
+const { query } = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
 
-const createUser = (username, password, additionalData = {}) => {
-    const users = readUsers();
-    const newUser = {
-        id: uuidv4(),
-        username,
-        password, // In a real app, hash this!
-        email: additionalData.email || '',
-        firstName: additionalData.firstName || '',
-        lastName: additionalData.lastName || '',
-        phone: additionalData.phone || '',
-        alerts: [],
-        portfolio: [],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-    };
-    users.push(newUser);
-    writeUsers(users);
-    return newUser;
+const findUserByUsername = async (username) => {
+    try {
+        const result = await query(
+            'SELECT id, username, password, email, full_name, phone, ai_trading_enabled, created_at FROM users WHERE username = $1',
+            [username]
+        );
+        
+        if (result.rows.length === 0) {
+            return null;
+        }
+        
+        const user = result.rows[0];
+        return {
+            id: user.id,
+            username: user.username,
+            password: user.password,
+            email: user.email,
+            firstName: user.full_name ? user.full_name.split(' ')[0] : '',
+            lastName: user.full_name ? user.full_name.split(' ').slice(1).join(' ') : '',
+            phone: user.phone,
+            aiTradingEnabled: user.ai_trading_enabled,
+            createdAt: user.created_at
+        };
+    } catch (error) {
+        console.error('Error finding user by username:', error);
+        return null;
+    }
+};
+
+const findUserById = async (id) => {
+    try {
+        const result = await query(
+            'SELECT id, username, password, email, full_name, phone, ai_trading_enabled, created_at FROM users WHERE id = $1',
+            [id]
+        );
+        
+        if (result.rows.length === 0) {
+            return null;
+        }
+        
+        const user = result.rows[0];
+        return {
+            id: user.id,
+            username: user.username,
+            password: user.password,
+            email: user.email,
+            firstName: user.full_name ? user.full_name.split(' ')[0] : '',
+            lastName: user.full_name ? user.full_name.split(' ').slice(1).join(' ') : '',
+            phone: user.phone,
+            aiTradingEnabled: user.ai_trading_enabled,
+            createdAt: user.created_at
+        };
+    } catch (error) {
+        console.error('Error finding user by id:', error);
+        return null;
+    }
+};
+
+const findUserByEmail = async (email) => {
+    try {
+        const result = await query(
+            'SELECT id, username, password, email, full_name, phone, ai_trading_enabled, created_at FROM users WHERE email = $1',
+            [email]
+        );
+        
+        if (result.rows.length === 0) {
+            return null;
+        }
+        
+        const user = result.rows[0];
+        return {
+            id: user.id,
+            username: user.username,
+            password: user.password,
+            email: user.email,
+            firstName: user.full_name ? user.full_name.split(' ')[0] : '',
+            lastName: user.full_name ? user.full_name.split(' ').slice(1).join(' ') : '',
+            phone: user.phone,
+            aiTradingEnabled: user.ai_trading_enabled,
+            createdAt: user.created_at
+        };
+    } catch (error) {
+        console.error('Error finding user by email:', error);
+        return null;
+    }
+};
+
+const createUser = async (username, password, additionalData = {}) => {
+    try {
+        const userId = uuidv4();
+        const fullName = `${additionalData.firstName || ''} ${additionalData.lastName || ''}`.trim();
+        
+        const result = await query(
+            'INSERT INTO users (id, username, password, email, full_name, phone, ai_trading_enabled, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW()) RETURNING id, username, email, full_name, phone, created_at',
+            [userId, username, password, additionalData.email || '', fullName, additionalData.phone || '', false]
+        );
+        
+        const user = result.rows[0];
+        
+        // Create trading account for new user
+        await query(
+            'INSERT INTO trading_accounts (user_id, balance) VALUES ($1, $2)',
+            [userId, 100000] // Default starting balance
+        );
+        
+        return {
+            id: user.id,
+            username: user.username,
+            password: password,
+            email: user.email,
+            firstName: additionalData.firstName || '',
+            lastName: additionalData.lastName || '',
+            phone: user.phone,
+            createdAt: user.created_at
+        };
+    } catch (error) {
+        console.error('Error creating user:', error);
+        throw error;
+    }
 };
 
 module.exports = {
-    readUsers,
-    writeUsers,
     findUserByUsername,
     findUserById,
     findUserByEmail,

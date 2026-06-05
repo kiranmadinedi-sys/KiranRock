@@ -528,25 +528,22 @@ if (Test-Path $backfillScript) {
 Write-Host ""
 
 # ----------------------------------------------------------------
-#  DB Schema Init (idempotent — safe to run every startup)
+#  DB Schema Init (idempotent - safe to run every startup)
 # ----------------------------------------------------------------
 Write-Host "[0.5/4] Running DB schema init (CREATE IF NOT EXISTS)..." -ForegroundColor Cyan
 $initDbScript = Join-Path $backendPath "src\config\initDatabase.js"
 if (Test-Path $initDbScript) {
-    $initDbEnv = @(
-        "`$env:TELEGRAM_BOT_TOKEN = $telegramBotTokenLiteral",
-        "`$env:TELEGRAM_CHAT_ID   = $telegramChatIdLiteral",
-        "`$env:NODE_ENV           = 'development'"
-    ) -join '; '
-    $initDbOutput = powershell -NonInteractive -Command "$initDbEnv; Set-Location -Path $backendPathLiteral; node src/config/initDatabase.js" 2>&1
-    if ($LASTEXITCODE -eq 0) {
+    Push-Location $backendPath
+    node src/config/initDatabase.js
+    $initExitCode = $LASTEXITCODE
+    Pop-Location
+    if ($initExitCode -eq 0) {
         Write-Host "      DB schema ready." -ForegroundColor Green
     } else {
-        Write-Host "      WARNING: DB init exited with code $LASTEXITCODE — check DB connection." -ForegroundColor Yellow
-        Write-Host "      $initDbOutput" -ForegroundColor DarkGray
+        Write-Host "      WARNING: DB init failed (exit $initExitCode) - check DB connection." -ForegroundColor Yellow
     }
 } else {
-    Write-Host "      initDatabase.js not found — skipping." -ForegroundColor DarkYellow
+    Write-Host "      initDatabase.js not found - skipping." -ForegroundColor DarkYellow
 }
 Write-Host ""
 

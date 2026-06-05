@@ -9,26 +9,37 @@ const cache = new Map();
 
 const defaultTTL = 1000 * 60 * 5; // 5 minutes
 
+function isTruthyEnv(value) {
+    if (value == null) return false;
+    const normalized = String(value).trim().toLowerCase();
+    return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
 // Redis optional
 let redisClient = null;
 let redisConnectPromise = null;
 let usingRedis = false;
-try {
-    const { createClient } = require('redis');
-    const redisUrl = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
-    redisClient = createClient({ url: redisUrl });
-    redisConnectPromise = redisClient.connect().then(() => {
-        usingRedis = true;
-        console.log('yfClient: connected to Redis cache');
-    }).catch((err) => {
-        console.warn('yfClient: Redis connect failed, falling back to file cache', err && err.message);
+const redisExplicitlyEnabled = isTruthyEnv(process.env.REDIS_ENABLED);
+const redisUrl = process.env.REDIS_URL;
+const shouldUseRedis = redisExplicitlyEnabled || Boolean(redisUrl);
+
+if (shouldUseRedis) {
+    try {
+        const { createClient } = require('redis');
+        redisClient = createClient({ url: redisUrl || 'redis://127.0.0.1:6379' });
+        redisConnectPromise = redisClient.connect().then(() => {
+            usingRedis = true;
+            console.log('yfClient: connected to Redis cache');
+        }).catch((err) => {
+            console.warn('yfClient: Redis connect failed, falling back to file cache', err && err.message);
+            redisClient = null;
+            usingRedis = false;
+        });
+    } catch (e) {
+        // redis not installed or not available - will use file cache
         redisClient = null;
         usingRedis = false;
-    });
-} catch (e) {
-    // redis not installed or not available - will use file cache
-    redisClient = null;
-    usingRedis = false;
+    }
 }
 
 // File cache fallback directory

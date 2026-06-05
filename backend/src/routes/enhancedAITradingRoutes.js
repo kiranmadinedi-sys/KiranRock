@@ -1,134 +1,112 @@
 const express = require('express');
 const router = express.Router();
+const { protect } = require('../middleware/authMiddleware');
 const enhancedAITradingBot = require('../services/enhancedAITradingBot');
 const enhancedAIScheduler = require('../services/enhancedAIScheduler');
-const fs = require('fs').promises;
-const path = require('path');
+const userProfileService = require('../services/userProfileService');
+const { upsertRiskConfig, getRecentTradingLogs, getUserTradingControls, getGlobalTradingControl } = require('../services/tradingControlService');
 
-const USERS_FILE = path.join(__dirname, '../../users.json');
+router.use(protect);
+
+function resolveAuthorizedUserId(req) {
+    const requestedUserId = req.params.userId || req.body.userId;
+    if (requestedUserId && requestedUserId !== req.userId) {
+        const error = new Error('Forbidden: you can only manage your own AI trading settings');
+        error.status = 403;
+        throw error;
+    }
+    return req.userId;
+}
 
 /**
  * Enable/Disable AI Trading for a user
  */
 router.post('/toggle', async (req, res) => {
     try {
-        const { userId, enabled } = req.body;
-
-        if (!userId) {
-            return res.status(400).json({ error: 'User ID is required' });
-        }
-
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const userIndex = users.findIndex(u => u.id === userId);
-
-        if (userIndex === -1) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-
-        users[userIndex].aiTradingEnabled = enabled;
-        await fs.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
+        const userId = resolveAuthorizedUserId(req);
+        const { enabled } = req.body;
+        const result = await userProfileService.toggleAITrading(userId, enabled === true);
 
         res.json({
             success: true,
-            aiTradingEnabled: users[userIndex].aiTradingEnabled,
+            aiTradingEnabled: result.aiTradingEnabled,
+            toggledAt: result.toggledAt,
             message: enabled ? 'AI Trading enabled' : 'AI Trading disabled'
         });
     } catch (error) {
+        const status = error.status || 500;
         console.error('Error toggling AI trading:', error);
-        res.status(500).json({ error: error.message });
+        res.status(status).json({ error: error.message });
     }
 });
 
 /**
  * Get AI Trading status for a user
  */
-router.get('/status/:userId', async (req, res) => {
+router.get('/status/:userId?', async (req, res) => {
     try {
-        const { userId } = req.params;
-
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const user = users.find(u => u.id === userId);
-
-        if (!user) {
-            return res.status(404).json({ error: 'User not found' });
-        }
+        const userId = resolveAuthorizedUserId(req);
 
         const riskConfig = await enhancedAITradingBot.getUserRiskConfig(userId);
-        const schedulerStatus = enhancedAIScheduler.getStatus();
+        const schedulerStatus = await enhancedAIScheduler.getStatus();
         const marketOpen = enhancedAITradingBot.isMarketOpen();
+        const userControls = await getUserTradingControls(userId);
+        const globalControl = await getGlobalTradingControl();
+        const lastActivity = (await getRecentTradingLogs(userId, 1))[0] || null;
 
         res.json({
-            aiTradingEnabled: user.aiTradingEnabled || false,
+            aiTradingEnabled: userControls.aiTradingEnabled,
+            emergencyStopEnabled: userControls.emergencyStopEnabled,
+            globalTradingEnabled: globalControl.globalTradingEnabled,
+            killSwitchReason: globalControl.killSwitchReason,
             riskConfig,
             schedulerStatus,
             marketOpen,
-            lastActivity: user.aiTradingLog && user.aiTradingLog.length > 0 
-                ? user.aiTradingLog[user.aiTradingLog.length - 1] 
-                : null
+            lastActivity
         });
     } catch (error) {
+        const status = error.status || 500;
         console.error('Error getting AI trading status:', error);
-        res.status(500).json({ error: error.message });
+        res.status(status).json({ error: error.message });
     }
 });
 
 /**
  * Update risk configuration for a user
  */
-router.post('/config/:userId', async (req, res) => {
+router.post('/config/:userId?', async (req, res) => {
     try {
-        const { userId } = req.params;
-        const riskConfig = req.body;
-
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const userIndex = users.findIndex(u => u.id === userId);
-
-        if (userIndex === -1) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-
-        users[userIndex].aiRiskConfig = {
-            ...users[userIndex].aiRiskConfig,
-            ...riskConfig
-        };
-
-        await fs.writeFile(USERS_FILE, JSON.stringify(users, null, 2));
+        const userId = resolveAuthorizedUserId(req);
+        const riskConfig = await upsertRiskConfig(userId, req.body || {});
 
         res.json({
             success: true,
-            riskConfig: users[userIndex].aiRiskConfig
+            riskConfig
         });
     } catch (error) {
+        const status = error.status || 500;
         console.error('Error updating risk config:', error);
-        res.status(500).json({ error: error.message });
+        res.status(status).json({ error: error.message });
     }
 });
 
 /**
  * Get trading activity log
  */
-router.get('/log/:userId', async (req, res) => {
+router.get('/log/:userId?', async (req, res) => {
     try {
-        const { userId } = req.params;
+        const userId = resolveAuthorizedUserId(req);
         const { limit = 50 } = req.query;
-
-        const users = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const user = users.find(u => u.id === userId);
-
-        if (!user) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-
-        const log = user.aiTradingLog || [];
-        const limitedLog = log.slice(-parseInt(limit));
+        const log = await getRecentTradingLogs(userId, limit);
 
         res.json({
-            log: limitedLog,
+            log,
             totalEntries: log.length
         });
     } catch (error) {
+        const status = error.status || 500;
         console.error('Error getting trading log:', error);
-        res.status(500).json({ error: error.message });
+        res.status(status).json({ error: error.message });
     }
 });
 
@@ -137,11 +115,8 @@ router.get('/log/:userId', async (req, res) => {
  */
 router.post('/scan', async (req, res) => {
     try {
-        const { userId, limit = 30 } = req.body;
-
-        if (!userId) {
-            return res.status(400).json({ error: 'User ID is required' });
-        }
+        const userId = resolveAuthorizedUserId(req);
+        const { limit = 30 } = req.body || {};
 
         const opportunities = await enhancedAITradingBot.scanMarketForOpportunities(userId, limit);
 
@@ -152,8 +127,9 @@ router.post('/scan', async (req, res) => {
             timestamp: new Date()
         });
     } catch (error) {
+        const status = error.status || 500;
         console.error('Error scanning market:', error);
-        res.status(500).json({ error: error.message });
+        res.status(status).json({ error: error.message });
     }
 });
 
@@ -162,27 +138,24 @@ router.post('/scan', async (req, res) => {
  */
 router.post('/execute', async (req, res) => {
     try {
-        const { userId } = req.body;
-
-        if (!userId) {
-            return res.status(400).json({ error: 'User ID is required' });
-        }
+        const userId = resolveAuthorizedUserId(req);
 
         const result = await enhancedAITradingBot.executeAutonomousTrading(userId);
 
         res.json(result);
     } catch (error) {
+        const status = error.status || 500;
         console.error('Error executing trading:', error);
-        res.status(500).json({ error: error.message });
+        res.status(status).json({ error: error.message });
     }
 });
 
 /**
  * Get scheduler status (global)
  */
-router.get('/scheduler/status', (req, res) => {
+router.get('/scheduler/status', async (req, res) => {
     try {
-        const status = enhancedAIScheduler.getStatus();
+        const status = await enhancedAIScheduler.getStatus();
         res.json(status);
     } catch (error) {
         console.error('Error getting scheduler status:', error);

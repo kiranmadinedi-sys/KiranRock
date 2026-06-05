@@ -1,13 +1,13 @@
 'use client';
 
 import React from 'react';
-import AppHeader from '../components/AppHeader';
+
 import OptionsBotView from '../components/OptionsBotView';
 
 export default function OptionsBotPage() {
     return (
         <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 dark:from-gray-900 dark:to-gray-800">
-            <AppHeader showSearch={false} />
+
             
             <main className="max-w-7xl mx-auto px-4 py-6">
                 <div className="mb-6">

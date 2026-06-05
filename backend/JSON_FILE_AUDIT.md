@@ -1,29 +1,16 @@
-## Files Still Using users.json (OLD JSON FILE)
+## users.json Audit Status
 
-### CRITICAL - Need Immediate Fix:
-1. **src/services/portfolioService.js** - Portfolio operations
-2. **src/services/tradingAccountService.js** - Trading account management
-3. **src/services/tradingService.js** - Trade execution
-4. **src/services/aiTradingBotService.js** - AI Trading bot
-5. **src/services/aiTradingScheduler.js** - AI Trading scheduler
-6. **src/services/userService.js** - User lookup (used by auth)
-7. **src/services/alertService.js** - Alert management
-8. **src/services/backtestService.js** - Backtesting
-9. **src/services/optionsScheduler.js** - Options scheduling
+The backend no longer uses `users.json` on live request paths, worker paths, or helper/reporting scripts.
 
-### MEDIUM Priority:
-10. **src/routes/aiTradingRoutes.js** - AI Trading API routes
-11. **src/routes/enhancedAITradingRoutes.js** - Enhanced AI routes
+### Current State
+1. **Live services:** PostgreSQL-backed
+2. **Reporting helpers/scripts:** PostgreSQL-backed recipient resolution
+3. **Manual and AI trading paths:** PostgreSQL-backed state and broker abstraction
+4. **Worker health/scheduler paths:** PostgreSQL-backed coordination and status
 
-### LOW Priority (Reporting/Batches):
-12. **src/scheduleWeeklyReportBatch.js** - Weekly reports
-13. **src/sendWeeklyReportToTelegram.js** - Telegram reports
-14. **src/testTelegramHello.js** - Test script
+### Remaining JSON Import Usage
+1. **src/config/migrateData.js** - One-time import utility that now requires an explicit `--users-file` or `MIGRATION_USERS_FILE` input path rather than a hardcoded `users.json` dependency
 
-### Database Migration:
-15. **src/config/migrateData.js** - Migration script (intentional)
-
-## Action Plan:
-These services need to be updated to query PostgreSQL database instead of reading users.json.
-
-The authentication middleware has been fixed, but all other services still use the old file.
+## Action Plan
+1. Keep one-time import tooling generic and explicit about input files.
+2. Archive legacy JSON exports once migration verification is complete.

@@ -1,8 +1,12 @@
 const cron = require('node-cron');
 const autonomousOptionsBot = require('./autonomousOptionsBot');
+const optionsService = require('./optionsService');
 const { logger } = require('../utils/logger');
 const telegramAlertService = require('./telegramAlertService');
 const { query } = require('../config/database');
+
+// All symbols the options bot may trade — fetched pre-market to warm the DB cache
+const PREWARM_UNIVERSE = ['SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA', 'AMZN', 'AMD', 'META', 'TSLA', 'PANW'];
 
 /**
  * AUTONOMOUS OPTIONS TRADING SCHEDULER
@@ -17,8 +21,9 @@ const { query } = require('../config/database');
  */
 
 let schedulerActive = false;
-let scanJob = null;
+let scanJobs = [];
 let monitorJob = null;
+let summaryJob = null;
 
 /**
  * Check if market is open (Monday-Friday, 9:30 AM - 4:00 PM ET)
@@ -138,6 +143,67 @@ async function monitorOpenPositions() {
 }
 
 /**
+ * Pre-market options chain collection.
+ * Fetches live options data for every symbol in PREWARM_UNIVERSE and stores it
+ * in the options_chain_cache DB table so market-hours scans can serve from DB
+ * instead of hammering Yahoo Finance at peak time.
+ */
+async function collectOptionsChains() {
+    logger.info('[Options Prewarm] Starting options chain collection', {
+        symbols: PREWARM_UNIVERSE.length
+    });
+
+    let succeeded = 0;
+    let failed = 0;
+    const failures = [];
+
+    for (const symbol of PREWARM_UNIVERSE) {
+        try {
+            const data = await optionsService.getOptionsWithGreeks(symbol);
+            if (data.options && data.options.length > 0) {
+                succeeded++;
+                logger.info('[Options Prewarm] Cached options chain', {
+                    symbol,
+                    contracts: data.options.length,
+                    stockPrice: data.stockPrice
+                });
+            } else {
+                failed++;
+                failures.push(symbol);
+                logger.warn('[Options Prewarm] No options data returned', { symbol, error: data.error });
+            }
+        } catch (error) {
+            failed++;
+            failures.push(symbol);
+            logger.error('[Options Prewarm] Failed to cache symbol', { symbol, error: error.message });
+        }
+        // 2-second gap between symbols — avoids Yahoo Finance 429s
+        await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+
+    logger.info('[Options Prewarm] Collection complete', { succeeded, failed });
+
+    // Send a single Telegram summary to all active users
+    try {
+        const users = await getActiveOptionsBotUsers();
+        const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+        const failLine = failures.length > 0 ? `\n❌ Failed: ${failures.join(', ')}` : '';
+        const message =
+            `📦 *OPTIONS CHAIN CACHE READY*\n\n` +
+            `✅ Cached: ${succeeded}/${PREWARM_UNIVERSE.length} symbols\n` +
+            `📅 As of: ${now} ET` +
+            failLine +
+            `\n\nBot is ready for market open.`;
+
+        for (const user of users) {
+            await telegramAlertService.sendMessage(user.id, message);
+        }
+    } catch (alertError) {
+        logger.warn('[Options Prewarm] Telegram summary failed', { error: alertError.message });
+    }
+}
+
+/**
  * Send daily summary at market close
  */
 async function sendDailySummary() {
@@ -208,38 +274,49 @@ async function startOptionsScheduler() {
     // Convert to cron format: minute hour * * day
     
     // 09:45 AM ET - Post-open scan
-    cron.schedule('45 13 * * 1-5', runOptionsScans, {
+    scanJobs.push(cron.schedule('45 9 * * 1-5', runOptionsScans, {
         timezone: 'America/New_York'
-    });
+    }));
     
     // 11:00 AM ET - Mid-morning scan
-    cron.schedule('0 15 * * 1-5', runOptionsScans, {
+    scanJobs.push(cron.schedule('0 11 * * 1-5', runOptionsScans, {
         timezone: 'America/New_York'
-    });
+    }));
     
     // 01:00 PM ET - Post-lunch scan
-    cron.schedule('0 17 * * 1-5', runOptionsScans, {
+    scanJobs.push(cron.schedule('0 13 * * 1-5', runOptionsScans, {
         timezone: 'America/New_York'
-    });
+    }));
     
     // 03:00 PM ET - Pre-close scan
-    cron.schedule('0 19 * * 1-5', runOptionsScans, {
+    scanJobs.push(cron.schedule('0 15 * * 1-5', runOptionsScans, {
         timezone: 'America/New_York'
-    });
+    }));
     
     // Monitor open positions every 5 minutes during market hours
     monitorJob = cron.schedule('*/5 * * * 1-5', monitorOpenPositions, {
         timezone: 'America/New_York'
     });
-    
+
     // Daily summary at 4:15 PM ET (after market close)
-    cron.schedule('15 20 * * 1-5', sendDailySummary, {
+    summaryJob = cron.schedule('15 16 * * 1-5', sendDailySummary, {
         timezone: 'America/New_York'
     });
-    
+
+    // 8:00 AM ET — pre-market cache warmup (1.5h before open, fresh data for the day)
+    cron.schedule('0 8 * * 1-5', collectOptionsChains, {
+        timezone: 'America/New_York'
+    });
+
+    // 6:00 PM ET — evening refresh (captures after-hours IV moves, ready for next morning)
+    cron.schedule('0 18 * * 1-5', collectOptionsChains, {
+        timezone: 'America/New_York'
+    });
+
     schedulerActive = true;
     logger.info('[Options Scheduler] ✓ Scheduler started successfully');
     logger.info('[Options Scheduler] Scan times: 09:45, 11:00, 13:00, 15:00 ET');
+    logger.info('[Options Scheduler] Pre-market cache: 08:00 ET | Evening refresh: 18:00 ET');
     logger.info('[Options Scheduler] Position monitoring: Every 5 minutes during market hours');
 }
 
@@ -252,8 +329,17 @@ function stopOptionsScheduler() {
         return;
     }
     
+    scanJobs.forEach((job) => job.stop());
+    scanJobs = [];
+
     if (monitorJob) {
         monitorJob.stop();
+        monitorJob = null;
+    }
+
+    if (summaryJob) {
+        summaryJob.stop();
+        summaryJob = null;
     }
     
     schedulerActive = false;
@@ -300,5 +386,6 @@ module.exports = {
     stopOptionsScheduler,
     getSchedulerStatus,
     manualTrigger,
+    collectOptionsChains,
     isMarketOpen
 };

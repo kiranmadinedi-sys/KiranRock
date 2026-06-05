@@ -133,10 +133,11 @@ function buildNeutralResult(message, meta = {}) {
  * @param {string} symbol - Stock symbol
  * @returns {Promise<Object>} News and sentiment analysis
  */
-const getNewsSentiment = async (symbol) => {
+const getNewsSentiment = async (symbol, options = {}) => {
     const normalizedSymbol = String(symbol || '').trim().toUpperCase();
     const cacheKey = `news_sentiment_${normalizedSymbol}`;
     const inMemory = cacheService.get(cacheKey);
+    const executionProfile = String(options.executionProfile || 'default').toLowerCase();
     if (inMemory) {
         return {
             ...inMemory,
@@ -161,6 +162,27 @@ const getNewsSentiment = async (symbol) => {
                 stale: false
             }
         };
+    }
+
+    if (executionProfile === 'warmup' || options.lightweight) {
+        if (persisted && persistedAge <= NEWS_SENTIMENT_STALE_MS) {
+            return {
+                ...persisted.payload,
+                meta: {
+                    ...(persisted.payload.meta || {}),
+                    cache: 'stale-disk',
+                    stale: true,
+                    staleReason: 'Warmup profile avoids live news fetches'
+                }
+            };
+        }
+
+        return buildNeutralResult('Warmup profile skipped live news sentiment', {
+            symbol: normalizedSymbol,
+            cache: 'warmup-skip',
+            stale: false,
+            xEnabled: isXConfigured()
+        });
     }
 
     try {

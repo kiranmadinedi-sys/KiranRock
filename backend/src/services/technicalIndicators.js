@@ -623,6 +623,63 @@ const interpretBollingerBands = (bb) => {
     return { signal: 'MILD_OVERBOUGHT', scoreAdjustment: -2, description: `Price in upper half BB (percentB: ${percentB.toFixed(2)})` };
 };
 
+/**
+ * Stochastic RSI — applies the Stochastic formula to RSI values.
+ * Returns K (0-100): >80 overbought, <20 oversold.
+ * @param {number[]} closes
+ * @param {number} rsiPeriod  default 14
+ * @param {number} stochPeriod  default 14
+ * @returns {number|null}
+ */
+const calculateStochasticRSI = (closes, rsiPeriod = 14, stochPeriod = 14) => {
+    if (closes.length < rsiPeriod + stochPeriod) return null;
+
+    // Build RSI series
+    const rsiSeries = [];
+    for (let i = rsiPeriod; i <= closes.length; i++) {
+        const slice = closes.slice(i - rsiPeriod - 1, i);
+        let gains = 0, losses = 0;
+        for (let j = 1; j < slice.length; j++) {
+            const diff = slice[j] - slice[j - 1];
+            if (diff > 0) gains += diff;
+            else losses -= diff;
+        }
+        const avgGain = gains / rsiPeriod;
+        const avgLoss = losses / rsiPeriod;
+        const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+        rsiSeries.push(100 - (100 / (1 + rs)));
+    }
+
+    if (rsiSeries.length < stochPeriod) return null;
+    const window = rsiSeries.slice(-stochPeriod);
+    const minRSI = Math.min(...window);
+    const maxRSI = Math.max(...window);
+    if (maxRSI === minRSI) return 50;
+    return ((rsiSeries[rsiSeries.length - 1] - minRSI) / (maxRSI - minRSI)) * 100;
+};
+
+/**
+ * Williams %R — momentum oscillator, inverse of Fast Stochastic.
+ * Returns value in [-100, 0]: above -20 overbought, below -80 oversold.
+ * @param {number[]} closes
+ * @param {number[]} highs
+ * @param {number[]} lows
+ * @param {number} period  default 14
+ * @returns {number|null}
+ */
+const calculateWilliamsR = (closes, highs, lows, period = 14) => {
+    if (!closes.length || !highs.length || !lows.length) return null;
+    const len = Math.min(closes.length, highs.length, lows.length);
+    if (len < period) return null;
+    const h = highs.slice(len - period);
+    const l = lows.slice(len - period);
+    const highestHigh = Math.max(...h);
+    const lowestLow  = Math.min(...l);
+    const currentClose = closes[len - 1];
+    if (highestHigh === lowestLow) return -50;
+    return ((highestHigh - currentClose) / (highestHigh - lowestLow)) * -100;
+};
+
 module.exports = {
     // Original functions (for chart data with time/close objects)
     calculateRSI,
@@ -637,6 +694,10 @@ module.exports = {
     // Bollinger Bands
     calculateBollingerBands,
     interpretBollingerBands,
+
+    // Oscillators
+    calculateStochasticRSI,
+    calculateWilliamsR,
 
     // Interpretation and utility functions
     calculateEMA,

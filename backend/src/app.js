@@ -1,89 +1,4 @@
-require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
-
-// ─── DATA PROVIDER PATCH ─────────────────────────────────────────────────────
-// When DATA_PROVIDER != yahoo, intercept every yahooFinance.quote() and
-// yahooFinance.chart() call across ALL services and route them through the
-// active dataProvider (Alpaca/Polygon) so real-time prices appear everywhere.
-// Must run before any service is required.
-;(function patchYahooFinance() {
-    const provider = (process.env.DATA_PROVIDER || 'yahoo').toLowerCase();
-    if (provider === 'yahoo') return; // no patch needed
-
-    const YahooFinance = require('yahoo-finance2').default;
-    const proto = YahooFinance.prototype;
-
-    // --- quote() → dataProvider.getQuote() ---
-    const _origQuote = proto.quote;   // save original before overwriting
-    const _origChart = proto.chart;   // save original before overwriting
-    proto.quote = async function(symbol) {
-        // Index symbols (^VIX, ^GSPC) go direct to Yahoo — Alpaca doesn't support them
-        if (symbol.startsWith('^') || symbol.startsWith('=')) {
-            return _origQuote.call(this, symbol);
-        }
-        try {
-            const dp = require('./services/dataProvider');
-            const q  = await dp.getQuote(symbol);
-            // Return in yahoo-finance2 shape so callers need no changes
-            return {
-                symbol,
-                regularMarketPrice:         q.price,
-                regularMarketChange:        q.change,
-                regularMarketChangePercent: q.changePercent,
-                regularMarketVolume:        q.volume,
-                averageDailyVolume10Day:    q.avgVolume,
-                marketCap:                  q.marketCap  || 0,
-                fiftyTwoWeekHigh:           q.high52w    || q.price,
-                fiftyTwoWeekLow:            q.low52w     || q.price,
-                sector:                     q.sector     || null,
-                exchange:                   q.exchange   || null,
-                preMarketPrice:             null,
-                postMarketPrice:            null
-            };
-        } catch (e) {
-            console.warn(`[DataPatch] quote(${symbol}) failed, no fallback:`, e.message);
-            return { regularMarketPrice: 0, symbol };
-        }
-    };
-
-    // --- chart() → dataProvider.getBars() ---
-    proto.chart = async function(symbol, opts = {}) {
-        // Index symbols (^VIX, ^GSPC) go direct to Yahoo
-        if (symbol.startsWith('^') || symbol.startsWith('=')) {
-            return _origChart.call(this, symbol, opts);
-        }
-        // Some callers pass { interval, period1, period2 } or { interval, range }
-        // We translate to dataProvider.getBars(symbol, interval, lookbackDays)
-        try {
-            const dp = require('./services/dataProvider');
-            const interval    = opts.interval || '1d';
-            let lookbackDays  = 90;
-            if (opts.period1) {
-                const diff = Date.now() - new Date(opts.period1).getTime();
-                lookbackDays = Math.ceil(diff / 86400000) + 5;
-            } else if (opts.range) {
-                const rangeMap = { '1d': 2, '5d': 6, '1mo': 35, '3mo': 95, '6mo': 185, '1y': 370, '2y': 730, '5y': 1830 };
-                lookbackDays = rangeMap[opts.range] || 90;
-            }
-            const bars = await dp.getBars(symbol, interval, lookbackDays);
-            // Return in yahoo-finance2 chart shape: { quotes: [{date,open,high,low,close,volume}] }
-            return {
-                quotes: bars.map(b => ({
-                    date:   new Date(b.time),
-                    open:   b.open,
-                    high:   b.high,
-                    low:    b.low,
-                    close:  b.close,
-                    volume: b.volume
-                }))
-            };
-        } catch (e) {
-            console.warn(`[DataPatch] chart(${symbol}) failed, no fallback:`, e.message);
-            return { quotes: [] };
-        }
-    };
-
-    console.log(`[DataPatch] yahoo-finance2 patched → routing quote()+chart() through ${provider.toUpperCase()}`);
-})();
+require('./bootstrapRuntime');
 
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -123,14 +38,19 @@ const enhancedSignalRoutes = require('./routes/enhancedSignalRoutes');
 const watchlistRoutes = require('./routes/watchlistRoutes');
 const optionsBotRoutes = require('./routes/optionsBotRoutes');
 const performanceRoutes = require('./routes/performanceRoutes');
-const aiTradingScheduler = require('./services/aiTradingScheduler');
-const enhancedAIScheduler = require('./services/enhancedAIScheduler');
-const optionsScheduler = require('./services/optionsScheduler');
-const optionsBotScheduler = require('./services/optionsBotScheduler');
-const newsMonitoringService = require('./services/newsMonitoringService');
+const stockFeedRoutes = require('./routes/stockFeedRoutes');
+const systemRoutes = require('./routes/systemRoutes'); // Import the new system routes
+const assetUniverseRoutes = require('./routes/assetUniverseRoutes');
+const dailySignalsRoutes  = require('./routes/dailySignalsRoutes');
+const localdataRoutes = require('./routes/localdataRoutes'); // Localdata tickers endpoint
+const enquiryRoutes = require('./routes/enquiryRoutes'); // AI Enquiry endpoint
+const { requestTracing } = require('./middleware/requestTracing');
 const { pool } = require('./config/database');
-// Load enhanced Telegram weekly report scheduler
-require('./scheduleTelegramReport');
+const { getWorkerStatus } = require('./services/workerCoordinationService');
+const { buildHealthResponse } = require('./services/healthStatusService');
+const { buildWeeklyPredictionCacheKey } = require('./services/weeklyPredictionService');
+const { getWeeklyPredictionSnapshotStatus } = require('./services/weeklyPredictionSnapshotService');
+const { getReportSchedulerStatus } = require('./services/reportSchedulerStatusService');
 
 const app = express();
 
@@ -154,6 +74,14 @@ function isLocalOrDevRequest(req) {
     /^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)
   );
 }
+
+// --- Serve static presentations from project root ---
+const path = require('path');
+app.use(express.static(path.join(__dirname, '../../'), {
+  index: false, // don't auto-serve index.html for /
+  dotfiles: 'deny',
+  extensions: ['html']
+}));
 
 // --- Security & performance middleware ---
 app.use(helmet({
@@ -224,26 +152,9 @@ app.use('/api/auth', authLimiter);
 
 app.use(bodyParser.json());
 
-// Middleware to log client IP addresses
-app.use((req, res, next) => {
-  const clientIP = req.ip || 
-                   req.connection.remoteAddress || 
-                   req.socket.remoteAddress ||
-                   (req.connection.socket ? req.connection.socket.remoteAddress : null);
-  
-  const forwardedFor = req.headers['x-forwarded-for'];
-  const realIP = req.headers['x-real-ip'];
-  
-  // Get the most accurate IP
-  const ip = realIP || 
-             (Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor) || 
-             clientIP;
-  
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] ${req.method} ${req.path} - IP: ${ip} - User-Agent: ${req.get('User-Agent') || 'Unknown'}`);
-  
-  next();
-});
+// Structured request tracing: assigns correlationId, sets X-Correlation-Id header,
+// logs every response via Winston (health-poll paths sampled to reduce noise).
+app.use(requestTracing);
 
 app.use('/api/auth', authRoutes);
 app.use('/api/stocks', stockRoutes);
@@ -277,26 +188,86 @@ app.use('/api/enhanced-signals', enhancedSignalRoutes);
 app.use('/api/watchlist', watchlistRoutes);
 app.use('/api/options-bot', optionsBotRoutes);
 app.use('/api/performance', performanceRoutes);
+app.use('/api/feed', stockFeedRoutes);
+app.use('/api/system', systemRoutes); // Use the new system routes
+app.use('/api/asset-universe', assetUniverseRoutes);
+app.use('/api/daily-signals', dailySignalsRoutes);
+app.use('/api', localdataRoutes); // Register /api/localdata/tickers
+app.use('/api', enquiryRoutes); // Register /api/enquiry
 
-// ─── HEALTH CHECK ────────────────────────────────────────────────────────────
+// --- Health Check & Status Endpoints ---
 app.get('/health', async (req, res) => {
     const { pool } = require('./config/database');
     let dbOk = false;
+  let workerStatus = {
+    present: false,
+    healthy: false,
+    status: 'unknown'
+  };
+
     try {
         await pool.query('SELECT 1');
         dbOk = true;
     } catch (_) { /* db down */ }
 
-    const status = dbOk ? 'ok' : 'degraded';
-    res.status(dbOk ? 200 : 503).json({
-        status,
-        timestamp: new Date().toISOString(),
-        uptime:    Math.round(process.uptime()),
-        db:        dbOk ? 'connected' : 'unreachable',
-        broker:    process.env.BROKER     || 'simulated',
-        provider:  process.env.DATA_PROVIDER || 'yahoo',
-        botEnabled: process.env.BOT_ENABLED !== 'false'
+  if (dbOk) {
+    try {
+      workerStatus = await getWorkerStatus();
+    } catch (error) {
+      workerStatus = {
+        present: false,
+        healthy: false,
+        status: 'error',
+        error: error.message
+      };
+    }
+  }
+
+  const reportSnapshot = getWeeklyPredictionSnapshotStatus(
+    buildWeeklyPredictionCacheKey({
+      limit: Math.max(10, Number.parseInt(process.env.TELEGRAM_REPORT_FETCH_LIMIT || '25', 10) || 25),
+      minScore: 60,
+      universe: (process.env.TELEGRAM_REPORT_PRIMARY_UNIVERSE || 'ALL').toUpperCase()
+    }),
+    Math.max(30 * 60 * 1000, Number.parseInt(process.env.TELEGRAM_REPORT_SNAPSHOT_MAX_AGE_MS || `${12 * 60 * 60 * 1000}`, 10) || (12 * 60 * 60 * 1000))
+  );
+
+  const reportScheduler = getReportSchedulerStatus();
+
+    const response = buildHealthResponse({
+      dbOk,
+      workerStatus,
+      reportSnapshot,
+      reportScheduler,
+      uptimeSeconds: process.uptime(),
+      timestamp: new Date().toISOString(),
+      env: {
+        NODE_ENV:      process.env.NODE_ENV,
+        BROKER:        process.env.BROKER,
+        DATA_PROVIDER: process.env.DATA_PROVIDER,
+        ALPACA_PAPER:  process.env.ALPACA_PAPER,
+        BOT_ENABLED:   process.env.BOT_ENABLED
+      }
     });
+
+    res.status(response.httpStatus).json(response.body);
+});
+
+// Global error handlers — prevent silent crashes from unhandled rejections
+process.on('unhandledRejection', (reason) => {
+  const { logger } = require('./utils/logger');
+  logger.error('[App] Unhandled promise rejection', {
+    reason: reason instanceof Error ? reason.message : String(reason),
+    stack:  reason instanceof Error ? reason.stack : undefined
+  });
+});
+
+process.on('uncaughtException', (err) => {
+  const { logger } = require('./utils/logger');
+  logger.error('[App] Uncaught exception — process will continue', {
+    error: err.message,
+    stack: err.stack
+  });
 });
 
 const PORT = process.env.PORT || 3001;
@@ -305,25 +276,4 @@ const HOST = process.env.HOST || '0.0.0.0';
 app.listen(PORT, HOST, () => {
   console.log(`Server is running on ${HOST}:${PORT}`);
   console.log('✓ PostgreSQL database connected');
-  
-  // Start ENHANCED AI Trading automated scheduler (analyzes ALL stocks)
-  console.log('\n🤖 Starting Enhanced AI Trading Bot...');
-  enhancedAIScheduler.startScheduler();
-  
-  // Keep old scheduler for backward compatibility
-  // aiTradingScheduler.startScheduler();
-  
-  // Start Options scanner scheduler
-  optionsScheduler.startOptionsScheduler();
-  
-  // Start Autonomous Options Trading Bot
-  console.log('\n⚡ Starting Autonomous Options Trading Bot...');
-  optionsBotScheduler.startOptionsScheduler();
-  
-  // Start News monitoring service
-  const defaultSymbols = ['AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA', 'NVDA', 'META', 'NFLX'];
-  newsMonitoringService.startNewsMonitoring(defaultSymbols);
-  
-  // Enhanced Telegram weekly report scheduler is loaded via require('./scheduleTelegramReport')
-  // It auto-sends on startup and schedules Monday & Wednesday 6 AM EST
 });

@@ -180,7 +180,17 @@ async function updatePerformanceRatios(userId, date) {
             WHERE user_id = $5 AND date = $6
         `, [winRate, avgWin, avgLoss, profitFactor, userId, date]);
 
-        logger.info('Performance ratios updated', { userId, winRate, profitFactor });
+        // Persist Sharpe ratio (rolling 30-day)
+        const sharpe = await calculateSharpeRatio(userId, 30);
+        if (sharpe !== 0) {
+            await query(`
+                UPDATE ai_performance_metrics
+                SET sharpe_ratio = $1, updated_at = NOW()
+                WHERE user_id = $2 AND date = $3
+            `, [sharpe, userId, date]);
+        }
+
+        logger.info('Performance ratios updated', { userId, winRate, profitFactor, sharpe });
     } catch (error) {
         logger.error('Failed to update performance ratios', { error: error.message, userId });
     }
@@ -331,6 +341,24 @@ async function getTodayLoss(userId) {
         return parseFloat(result.rows[0]?.loss || 0);
     } catch (error) {
         logger.error('Failed to get today loss', { error: error.message, userId });
+        return 0;
+    }
+}
+
+/**
+ * Get this week's total P&L (Monday–today) for the weekly loss limit circuit breaker.
+ */
+async function getWeeklyLoss(userId) {
+    try {
+        const result = await query(`
+            SELECT COALESCE(SUM(total_profit_loss), 0) AS weekly_pnl
+            FROM ai_performance_metrics
+            WHERE user_id = $1
+              AND date >= date_trunc('week', CURRENT_DATE)
+        `, [userId]);
+        return parseFloat(result.rows[0]?.weekly_pnl || 0);
+    } catch (error) {
+        logger.error('Failed to get weekly loss', { error: error.message, userId });
         return 0;
     }
 }
@@ -491,6 +519,226 @@ async function getDailyScorecardData(userId) {
     }
 }
 
+/**
+ * MAE/MFE analytics — retroactive computation from ohlcv_cache joined with trade pairs.
+ * MAE (Max Adverse Excursion): furthest price went against entry before close.
+ * MFE (Max Favorable Excursion): furthest price went in our favor before close.
+ * Profit Capture: realised PnL as % of MFE — shows if targets are too ambitious.
+ */
+async function getMaeMfeMetrics(userId) {
+    try {
+        const result = await query(`
+            WITH trade_pairs AS (
+                SELECT DISTINCT ON (b.id)
+                    b.id          AS buy_id,
+                    b.symbol,
+                    b.price       AS buy_price,
+                    b.trade_date  AS buy_date,
+                    s.price       AS sell_price,
+                    s.trade_date  AS sell_date,
+                    (s.price - b.price) / NULLIF(b.price, 0) * 100  AS realized_pnl_pct
+                FROM trades b
+                JOIN trades s
+                    ON  s.symbol   = b.symbol
+                    AND s.user_id  = b.user_id
+                    AND s.action   = 'SELL'
+                    AND s.trade_date >= b.trade_date
+                WHERE b.user_id    = $1
+                  AND b.action     = 'BUY'
+                  AND b.executed_by LIKE 'ALPACA%'
+                ORDER BY b.id, s.trade_date ASC
+            ),
+            excursions AS (
+                SELECT
+                    tp.buy_id,
+                    tp.buy_price,
+                    tp.sell_price,
+                    tp.realized_pnl_pct,
+                    MIN(oc.low)  AS lowest_low,
+                    MAX(oc.high) AS highest_high
+                FROM trade_pairs tp
+                JOIN ohlcv_cache oc
+                    ON  oc.symbol = tp.symbol
+                    AND oc.date  >= tp.buy_date::date
+                    AND oc.date  <= tp.sell_date::date
+                GROUP BY tp.buy_id, tp.buy_price, tp.sell_price, tp.realized_pnl_pct
+            )
+            SELECT
+                COUNT(*)                                                                AS sample_size,
+                ROUND(AVG((lowest_low  - buy_price) / NULLIF(buy_price, 0) * 100)::numeric, 2)  AS avg_mae_pct,
+                ROUND(AVG((highest_high - buy_price) / NULLIF(buy_price, 0) * 100)::numeric, 2) AS avg_mfe_pct,
+                ROUND(AVG(
+                    CASE WHEN (highest_high - buy_price) > 0
+                    THEN realized_pnl_pct / ((highest_high - buy_price) / NULLIF(buy_price, 0) * 100) * 100
+                    ELSE NULL END
+                )::numeric, 1)                                                          AS avg_profit_capture_pct,
+                ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY
+                    (lowest_low - buy_price) / NULLIF(buy_price, 0) * 100
+                )::numeric, 2)                                                          AS median_mae_pct,
+                ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY
+                    (highest_high - buy_price) / NULLIF(buy_price, 0) * 100
+                )::numeric, 2)                                                          AS median_mfe_pct
+            FROM excursions
+            WHERE lowest_low IS NOT NULL
+        `, [userId]);
+
+        const row = result.rows[0] || {};
+        const sampleSize = parseInt(row.sample_size || 0);
+        if (sampleSize === 0) return { available: false, reason: 'No matched trades with OHLCV history' };
+
+        return {
+            available:            true,
+            sampleSize,
+            avgMaePct:            parseFloat(row.avg_mae_pct    || 0),
+            avgMfePct:            parseFloat(row.avg_mfe_pct    || 0),
+            medianMaePct:         parseFloat(row.median_mae_pct || 0),
+            medianMfePct:         parseFloat(row.median_mfe_pct || 0),
+            avgProfitCapturePct:  row.avg_profit_capture_pct != null
+                                    ? parseFloat(row.avg_profit_capture_pct) : null,
+        };
+    } catch (error) {
+        logger.error('Failed to get MAE/MFE metrics', { error: error.message, userId });
+        return { available: false, reason: error.message };
+    }
+}
+
+/**
+ * Advanced metrics derived from the trades table:
+ *   - Average hold time (hours) from BUY→SELL pairs
+ *   - Time-of-day win rate breakdown (by entry hour)
+ *   - Slippage stats (signal_price in notes JSON vs recorded fill price)
+ *   - MAE/MFE excursion analytics
+ */
+async function getAdvancedMetrics(userId) {
+    try {
+        // ── Hold time (hours) ────────────────────────────────────────────────
+        const holdResult = await query(`
+            WITH buys AS (
+                SELECT id, symbol, price AS buy_price, trade_date AS buy_date
+                FROM trades
+                WHERE user_id = $1 AND action = 'BUY'
+                  AND executed_by LIKE 'ALPACA%'
+            ),
+            sells AS (
+                SELECT symbol, price AS sell_price, trade_date AS sell_date
+                FROM trades
+                WHERE user_id = $1 AND action = 'SELL'
+            ),
+            matched AS (
+                SELECT DISTINCT ON (b.id)
+                    EXTRACT(EPOCH FROM (s.sell_date - b.buy_date)) / 3600 AS hold_hours,
+                    (s.sell_price - b.buy_price) * 1 AS pnl_dir
+                FROM buys b
+                JOIN sells s ON s.symbol = b.symbol AND s.sell_date >= b.buy_date
+                ORDER BY b.id, s.sell_date ASC
+            )
+            SELECT
+                ROUND(AVG(hold_hours)::numeric, 1)                                             AS avg_hold_hours,
+                ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY hold_hours)::numeric, 1)    AS median_hold_hours,
+                ROUND(MIN(hold_hours)::numeric, 1)                                             AS min_hold_hours,
+                ROUND(MAX(hold_hours)::numeric, 1)                                             AS max_hold_hours,
+                COUNT(*)                                                                        AS sample_size
+            FROM matched
+            WHERE hold_hours IS NOT NULL AND hold_hours >= 0
+        `, [userId]);
+
+        // ── Time-of-day win rate ─────────────────────────────────────────────
+        const todResult = await query(`
+            WITH buys AS (
+                SELECT id, symbol, price AS buy_price,
+                       EXTRACT(HOUR FROM trade_date AT TIME ZONE 'America/New_York') AS entry_hour
+                FROM trades
+                WHERE user_id = $1 AND action = 'BUY'
+                  AND executed_by LIKE 'ALPACA%'
+            ),
+            sells AS (
+                SELECT symbol, price AS sell_price, trade_date AS sell_date
+                FROM trades
+                WHERE user_id = $1 AND action = 'SELL'
+            ),
+            matched AS (
+                SELECT DISTINCT ON (b.id)
+                    b.entry_hour,
+                    CASE WHEN s.sell_price > b.buy_price THEN 1 ELSE 0 END AS win
+                FROM buys b
+                JOIN sells s ON s.symbol = b.symbol AND s.sell_date >= (
+                    SELECT trade_date FROM trades WHERE id = b.id LIMIT 1
+                )
+                ORDER BY b.id, s.sell_date ASC
+            )
+            SELECT
+                entry_hour,
+                COUNT(*)                                                        AS trades,
+                SUM(win)                                                        AS wins,
+                ROUND((SUM(win)::decimal / NULLIF(COUNT(*), 0)) * 100, 1)      AS win_rate_pct
+            FROM matched
+            WHERE entry_hour IS NOT NULL
+            GROUP BY entry_hour
+            ORDER BY entry_hour
+        `, [userId]);
+
+        // ── Slippage ─────────────────────────────────────────────────────────
+        // signal_price is stored as JSON in the notes column: {"signalPrice": 123.45, ...}
+        const slippageResult = await query(`
+            SELECT
+                price                                                               AS fill_price,
+                notes
+            FROM trades
+            WHERE user_id = $1
+              AND action = 'BUY'
+              AND executed_by LIKE 'ALPACA%'
+              AND notes IS NOT NULL
+              AND notes LIKE '%signalPrice%'
+            ORDER BY trade_date DESC
+            LIMIT 200
+        `, [userId]);
+
+        let slippageStats = { avgSlippagePct: null, maxSlippagePct: null, sampleSize: 0 };
+        if (slippageResult.rows.length > 0) {
+            const slippages = slippageResult.rows.map(row => {
+                try {
+                    const meta = JSON.parse(row.notes);
+                    const sig  = parseFloat(meta.signalPrice);
+                    const fill = parseFloat(row.fill_price);
+                    if (!sig || !fill || sig <= 0) return null;
+                    return ((fill - sig) / sig) * 100;
+                } catch { return null; }
+            }).filter(s => s !== null);
+
+            if (slippages.length > 0) {
+                slippageStats = {
+                    avgSlippagePct:  parseFloat((slippages.reduce((a, b) => a + b, 0) / slippages.length).toFixed(4)),
+                    maxSlippagePct:  parseFloat(Math.max(...slippages).toFixed(4)),
+                    minSlippagePct:  parseFloat(Math.min(...slippages).toFixed(4)),
+                    sampleSize:      slippages.length,
+                };
+            }
+        }
+
+        const [hold, maeMfe] = [holdResult.rows[0] || {}, await getMaeMfeMetrics(userId)];
+        return {
+            holdTime: {
+                avgHours:    parseFloat(hold.avg_hold_hours    || 0),
+                medianHours: parseFloat(hold.median_hold_hours || 0),
+                minHours:    parseFloat(hold.min_hold_hours    || 0),
+                maxHours:    parseFloat(hold.max_hold_hours    || 0),
+                sampleSize:  parseInt(hold.sample_size         || 0),
+            },
+            timeOfDay: todResult.rows.map(r => ({
+                hour:       parseInt(r.entry_hour),
+                trades:     parseInt(r.trades),
+                wins:       parseInt(r.wins),
+                winRatePct: parseFloat(r.win_rate_pct),
+            })),
+            slippage: slippageStats,
+            maeMfe,
+        };
+    } catch (error) {
+        logger.error('Failed to get advanced metrics', { error: error.message, userId });
+        return { holdTime: null, timeOfDay: [], slippage: null, maeMfe: { available: false } };
+    }
+}
+
 module.exports = {
     initializePerformanceTable,
     recordTradePerformance,
@@ -501,7 +749,10 @@ module.exports = {
     calculateSharpeRatio,
     updateDailyLoss,
     getTodayLoss,
+    getWeeklyLoss,
     getKellyMetrics,
     getConsecutiveLosses,
-    getDailyScorecardData
+    getDailyScorecardData,
+    getAdvancedMetrics,
+    getMaeMfeMetrics,
 };

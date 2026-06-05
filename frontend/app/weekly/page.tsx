@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import { getApiBaseUrl } from '../config';
 import { useRouter } from 'next/navigation';
-import AppHeader from '../components/AppHeader';
+
 
 interface StockPrediction {
   symbol: string;
@@ -183,8 +183,12 @@ export default function WeeklyPredictionsPage() {
 
   const handleLogout = () => {
     localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    localStorage.removeItem('lastActivity');
+    document.cookie = 'token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+    sessionStorage.setItem('justLoggedOut', 'true');
     setToken(null);
-    router.push('/login');
+    window.location.replace('/login');
   };
 
   const getTierColor = (tier: string) => {
@@ -274,7 +278,7 @@ export default function WeeklyPredictionsPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-gray-100 dark:from-gray-900 dark:via-slate-900 dark:to-gray-900">
-      <AppHeader showSearch={false} />
+
 
       <div className="max-w-[1800px] mx-auto px-3 sm:px-4 py-3 sm:py-4">
         {/* Page Title */}

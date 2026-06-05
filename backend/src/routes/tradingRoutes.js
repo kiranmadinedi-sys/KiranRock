@@ -3,6 +3,8 @@ const router = express.Router();
 const { protect } = require('../middleware/authMiddleware');
 const tradingAccountService = require('../services/tradingAccountService');
 const tradingService = require('../services/tradingService');
+const marketQuoteService = require('../services/marketQuoteService');
+const brokerService = require('../services/brokerService');
 const portfolioTrackingService = require('../services/portfolioTrackingService');
 const ledgerService = require('../services/ledgerService');
 const { analyzeStock } = require('../services/aiTradingBotService');
@@ -116,7 +118,7 @@ router.post('/buy', async (req, res) => {
             return res.status(400).json({ error: 'Quantity must be a positive integer' });
         }
         
-        const result = await tradingService.executeBuyOrder(req.userId, symbol, quantity);
+        const result = await brokerService.executeManualBuyOrder(req.userId, symbol, quantity);
         res.json(result);
     } catch (error) {
         res.status(400).json({ error: error.message });
@@ -139,7 +141,7 @@ router.post('/sell', async (req, res) => {
             return res.status(400).json({ error: 'Quantity must be a positive integer' });
         }
         
-        const result = await tradingService.executeSellOrder(req.userId, symbol, quantity);
+        const result = await brokerService.executeManualSellOrder(req.userId, symbol, quantity);
         res.json(result);
     } catch (error) {
         res.status(400).json({ error: error.message });
@@ -148,13 +150,13 @@ router.post('/sell', async (req, res) => {
 
 /**
  * GET /api/trading/history
- * Get trade history
+ * Get trade history (all types: BUY, SELL, DEPOSIT, WITHDRAWAL)
  */
 router.get('/history', async (req, res) => {
     try {
-        const limit = parseInt(req.query.limit) || 50;
+        const limit = parseInt(req.query.limit) || 100;
         const trades = await tradingService.getTradeHistory(req.userId, limit);
-        res.json(trades);
+        res.json({ trades });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -268,7 +270,7 @@ router.get('/transactions', async (req, res) => {
 router.get('/quote/:symbol', async (req, res) => {
     try {
         const { symbol } = req.params;
-        const price = await tradingService.getCurrentPrice(symbol);
+        const price = await marketQuoteService.getCurrentPrice(symbol);
         res.json({ symbol, price });
     } catch (error) {
         res.status(500).json({ error: error.message });

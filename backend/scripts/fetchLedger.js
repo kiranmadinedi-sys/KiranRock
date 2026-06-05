@@ -1,6 +1,6 @@
 const axios = require('axios');
 
-const token = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjVmNzVkMTIzLWMyMmMtNDRkNi05YWYzLTJmOGVjMjczMDllMiIsImlhdCI6MTc2NzE1OTAxNywiZXhwIjoxNzY3MTYyNjE3fQ.MSN_ZYCFnhetWteYyzkYrgc7cpukuZO0cFXV_VfLgX0';
+const token = process.env.JWT_TOKEN;
 
 (async () => {
   try {

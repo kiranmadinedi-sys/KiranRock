@@ -4,8 +4,7 @@
  */
 
 const { getWeeklyPredictions } = require('./services/weeklyPredictionService');
-const { sendTelegramMessage } = require('./services/telegramService');
-const users = require('../users.json');
+const { sendTelegramMessage, getPrimaryTelegramRecipient } = require('./services/telegramService');
 
 async function generateAndSendReport() {
   console.log('========================================');
@@ -45,13 +44,13 @@ async function generateAndSendReport() {
     // Step 3: Send to Telegram
     console.log('Step 3: Sending to Telegram...\n');
     
-    const user = users.find(u => u.username === 'user' && u.phone);
-    if (!user) {
-      console.log('❌ User with phone number not found in users.json\n');
+    const user = await getPrimaryTelegramRecipient('user');
+    if (!user || (!user.telegram_chat_id && !user.phone)) {
+      console.log('❌ User with Telegram recipient details not found in database\n');
       return;
     }
-    
-    console.log(`Target: ${user.phone} (@KiranTradePro_bot)\n`);
+
+    console.log(`Target: ${user.telegram_chat_id || user.phone} (@KiranTradePro_bot)\n`);
     
     const MAX_LENGTH = 4000;
     const chunks = [];
@@ -64,7 +63,7 @@ async function generateAndSendReport() {
     
     for (let i = 0; i < chunks.length; i++) {
       console.log(`Sending message ${i + 1}/${chunks.length}...`);
-      await sendTelegramMessage(user.phone, chunks[i]);
+      await sendTelegramMessage(user.telegram_chat_id || user.phone, chunks[i]);
       
       // Small delay between messages
       if (i < chunks.length - 1) {

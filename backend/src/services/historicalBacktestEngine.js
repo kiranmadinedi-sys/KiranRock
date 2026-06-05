@@ -463,4 +463,94 @@ async function runBacktest(symbols, config = {}) {
     };
 }
 
-module.exports = { runBacktest, BT_CONFIG };
+/**
+ * Monte Carlo simulation on a completed backtest result.
+ *
+ * Bootstraps the strategy's daily return sequence (sampling with replacement)
+ * across N simulations to estimate the distribution of possible outcomes.
+ *
+ * @param {object} backtestResult  — output of runBacktest()
+ * @param {number} numSimulations  — default 10,000
+ * @returns {object} Monte Carlo report
+ */
+function runMonteCarlo(backtestResult, numSimulations = 10000) {
+    const curve = backtestResult?.equityCurve;
+    if (!curve || curve.length < 10) {
+        return { error: 'Insufficient equity curve data for Monte Carlo simulation' };
+    }
+
+    // Reconstruct daily returns from equity curve points
+    const dailyReturns = [];
+    for (let i = 1; i < curve.length; i++) {
+        const prev = curve[i - 1].equity;
+        const curr = curve[i].equity;
+        if (prev > 0) dailyReturns.push((curr - prev) / prev);
+    }
+
+    const n          = dailyReturns.length;
+    const startEq    = backtestResult.summary.startingCapital;
+    const finalEquities = new Float64Array(numSimulations);
+
+    // Run simulations
+    for (let sim = 0; sim < numSimulations; sim++) {
+        let equity = startEq;
+        for (let day = 0; day < n; day++) {
+            // Bootstrap: sample a random day's return with replacement
+            const r = dailyReturns[Math.floor(Math.random() * n)];
+            equity  = equity * (1 + r);
+            if (equity <= 0) { equity = 0; break; } // ruin
+        }
+        finalEquities[sim] = equity;
+    }
+
+    // Sort for percentile computation
+    finalEquities.sort();
+
+    const pct = (p) => {
+        const idx = Math.floor((p / 100) * numSimulations);
+        return parseFloat(finalEquities[Math.min(idx, numSimulations - 1)].toFixed(2));
+    };
+
+    const median      = pct(50);
+    const p5          = pct(5);
+    const p25         = pct(25);
+    const p75         = pct(75);
+    const p95         = pct(95);
+    const ruinCount   = Array.from(finalEquities).filter(e => e < startEq * 0.50).length;
+    const profitCount = Array.from(finalEquities).filter(e => e > startEq).length;
+
+    const pctReturn   = (e) => ((e - startEq) / startEq * 100).toFixed(1) + '%';
+
+    logger.info('[MonteCarlo] Complete', {
+        simulations: numSimulations,
+        median:      pctReturn(median),
+        p5:          pctReturn(p5),
+        p95:         pctReturn(p95),
+        ruinPct:     (ruinCount / numSimulations * 100).toFixed(1) + '%'
+    });
+
+    return {
+        simulations:      numSimulations,
+        startingCapital:  startEq,
+        percentiles: {
+            p5,  p25, p50: median, p75, p95,
+            p5Return:  pctReturn(p5),
+            p50Return: pctReturn(median),
+            p95Return: pctReturn(p95)
+        },
+        riskMetrics: {
+            probabilityOfProfit: parseFloat((profitCount / numSimulations * 100).toFixed(1)),
+            probabilityOfRuin50: parseFloat((ruinCount   / numSimulations * 100).toFixed(1)),
+            worstCase:           pct(1),
+            bestCase:            pct(99)
+        },
+        interpretation:
+            ruinCount / numSimulations > 0.10
+                ? '⚠️  HIGH RISK — >10% of simulations result in >50% drawdown. Do NOT trade real money.'
+                : profitCount / numSimulations > 0.65
+                    ? '✅ ROBUST — Strategy is profitable in >65% of simulated paths.'
+                    : '⚡ MARGINAL — Strategy shows modest edge but high variance. Extend paper trading.'
+    };
+}
+
+module.exports = { runBacktest, runMonteCarlo, BT_CONFIG };

@@ -1,5 +1,74 @@
 # 🚀 AI Trading Bot - Complete Enhancement Package
 
+## Current Runtime Status (April 2026)
+
+This file originally documented the enhancement package before the backend hardening and architecture work. The package contents below still exist, but the runtime model is now more mature than the original integration notes.
+
+### What Changed Since The Original Package
+
+1. **API and worker split**
+  - `src/app.js` now runs the API only.
+  - `src/worker.js` owns schedulers, Telegram report timing, options jobs, and news monitoring.
+  - `start.ps1` is the canonical local launcher for API + worker + frontend.
+
+2. **Single-worker ownership**
+  - Worker leadership is protected through PostgreSQL advisory locking.
+  - Worker heartbeat/status is persisted and surfaced through `/health`.
+
+3. **Broker-unified execution**
+  - Manual trading routes, enhanced AI trading, and legacy AI trading execution now all route through `brokerService`.
+  - Global kill switch, emergency stop, and `maxOrderNotional` enforcement are applied consistently.
+
+4. **Database-backed operational state**
+  - Telegram/report recipient lookup is PostgreSQL-backed.
+  - Worker-driven news and options alerts are PostgreSQL-backed.
+  - Live backend and script paths no longer depend on `users.json`.
+
+5. **Shared quote lookup path**
+  - Price lookup is centralized in `src/services/marketQuoteService.js`.
+  - `tradingService` still exists, but it is no longer the shared quote dependency for portfolio and route read paths.
+
+6. **Focused backend test coverage**
+  - Broker-backed manual trading paths
+  - Legacy AI execution paths
+  - Worker coordination and heartbeat status
+  - Worker shutdown/secondary-worker lifecycle
+  - Shared quote helper behavior
+
+### Canonical Local Commands
+
+```powershell
+# Start backend API, worker, and frontend together
+.\start.ps1
+
+# Run backend test suite
+Set-Location backend
+npm test
+
+# Health check (includes worker status)
+Invoke-WebRequest -UseBasicParsing http://localhost:3001/health | Select-Object -ExpandProperty Content
+```
+
+### Current Health Expectations
+
+`/health` should now report:
+
+- `db: connected`
+- `worker.present: true`
+- `worker.healthy: true`
+- `worker.status: running`
+- `broker: alpaca` or `simulated` depending on `.env`
+
+### Migration Note
+
+The one-time JSON importer remains available in `src/config/migrateData.js`, but it now requires an explicit input path:
+
+```powershell
+node src/config/migrateData.js --users-file C:\path\to\users-export.json
+```
+
+The rest of this document describes the original enhancement package and supporting services.
+
 ## 📦 What's Included
 
 This package contains **ALL** advanced features requested for your AI Trading Bot:
@@ -26,17 +95,18 @@ This package contains **ALL** advanced features requested for your AI Trading Bo
 | **Logging & Alerts** | 65/100 | 88/100 | +23 ✨ |
 | **OVERALL SCORE** | **73/100** | **87/100** | **+14 🎉** |
 
-## 🎯 Quick Start (3 Commands)
+## 🎯 Quick Start
 
-```bash
-# Step 1: Validate everything is ready
-node quick-start.js
+```powershell
+# Step 1: Start the full local stack
+.\start.ps1
 
-# Step 2: Run test suite
-node test-enhancements.js
+# Step 2: Run backend tests
+Set-Location backend
+npm test
 
-# Step 3: View integration guide
-node integrate-enhancements.js
+# Step 3: Check runtime health
+Invoke-WebRequest -UseBasicParsing http://localhost:3001/health | Select-Object -ExpandProperty Content
 ```
 
 ## 📚 Documentation
@@ -55,13 +125,25 @@ node integrate-enhancements.js
 ```
 backend/
 ├── src/
+│   ├── app.js                         ✅ API-only entrypoint
+│   ├── worker.js                      ✅ Worker-only entrypoint
 │   ├── utils/
 │   │   └── logger.js                    ✅ NEW - Winston logging config
 │   └── services/
+│       ├── brokerService.js             ✅ UNIFIED - Manual + AI execution path
+│       ├── marketQuoteService.js        ✅ NEW - Shared price lookup helper
+│       ├── workerCoordinationService.js ✅ NEW - Leadership + heartbeat
+│       ├── healthStatusService.js       ✅ NEW - Testable health shaping
 │       ├── telegramAlertService.js       ✅ NEW - 11 alert types
 │       ├── performanceMetricsService.js  ✅ NEW - Database metrics
 │       ├── technicalIndicators.js        ✅ ENHANCED - RSI/MACD/ATR
-│       └── enhancedAITradingBot.js       ⏳ NEEDS INTEGRATION
+│       └── enhancedAITradingBot.js       ✅ HARDENED - Production controls applied
+├── test/                                 ✅ EXPANDED - Focused Mocha coverage
+│   ├── brokerExecutionPaths.test.js
+│   ├── marketQuoteService.test.js
+│   ├── workerHealth.test.js
+│   ├── workerProcess.test.js
+│   └── tradesDatabase.test.js
 ├── logs/                                 ✅ AUTO-CREATED
 │   ├── application-YYYY-MM-DD.log
 │   ├── ai-trading-YYYY-MM-DD.log
@@ -159,7 +241,7 @@ LOG_RETENTION_DAYS=30
 
 # Telegram
 TELEGRAM_BOT_TOKEN=your_bot_token_here
-TELEGRAM_CHAT_ID=8574952938
+TELEGRAM_CHAT_ID=your_telegram_chat_id
 
 # Trading
 DAILY_LOSS_LIMIT=-1000
@@ -219,7 +301,21 @@ Get-ChildItem logs/
 Select-String "error" logs/error-2025-12-25.log
 ```
 
-## 📋 Integration Checklist
+## 📋 Current Hardening Checklist
+
+- [x] API process separated from worker process
+- [x] Single-worker ownership enforced with PostgreSQL advisory lock
+- [x] Worker heartbeat/status surfaced through `/health`
+- [x] Manual trading routed through `brokerService`
+- [x] Legacy AI trading routed through `brokerService`
+- [x] Enhanced AI trading routed through `brokerService`
+- [x] Telegram/report recipient resolution moved to PostgreSQL
+- [x] Worker-driven alert persistence moved to PostgreSQL
+- [x] Shared quote lookup extracted to `marketQuoteService`
+- [x] Backend Mocha coverage added for broker paths and worker lifecycle
+- [x] Hardcoded `users.json` runtime/script dependency removed
+
+## 📋 Historical Integration Checklist
 
 Before integrating into `enhancedAITradingBot.js`:
 
@@ -268,9 +364,9 @@ node test-enhancements.js
 ```
 
 ### 6. Restart Backend
-```bash
-Get-Process node | Stop-Process -Force
-npm start
+```powershell
+Set-Location ..
+.\start.ps1
 ```
 
 ### 7. Monitor First Session
@@ -290,8 +386,10 @@ node quick-start.js
 ```
 
 ### Test all services
-```bash
+```powershell
 node test-enhancements.js
+Set-Location backend
+npm test
 ```
 
 ### View integration steps
@@ -377,21 +475,23 @@ Track these daily:
 
 ## 🎉 You're Ready!
 
-All infrastructure is **COMPLETE and TESTED**. 
+The enhancement package and the later production-hardening work are now **implemented and tested**.
 
-Next step: Run integration guide and follow the 6 steps to activate enhancements.
+For day-to-day local use, start with:
 
-**Command to start:**
-```bash
-node integrate-enhancements.js
+```powershell
+.\start.ps1
 ```
 
-**Time required:** 30-45 minutes
+For backend verification, run:
 
-**Expected outcome:** AI Trading Bot upgraded from 73/100 to 87/100 🚀
+```powershell
+Set-Location backend
+npm test
+```
 
 ---
 
 **Questions?** Check [ENHANCEMENT_SUMMARY.md](../ENHANCEMENT_SUMMARY.md) or [AI_BOT_ENHANCEMENTS.md](../AI_BOT_ENHANCEMENTS.md)
 
-**Status:** ✅ All features implemented and ready for integration
+**Status:** ✅ Features implemented, hardened, and covered by focused backend tests

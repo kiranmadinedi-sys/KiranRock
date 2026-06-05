@@ -1,8 +1,11 @@
 const optionsService = require('./optionsService');
 const tradingAccountService = require('./tradingAccountService');
-const logger = require('../utils/logger');
+const { logger } = require('../utils/logger');
 const telegramAlertService = require('./telegramAlertService');
 const performanceMetricsService = require('./performanceMetricsService');
+const marketRegimeService = require('./marketRegimeService');
+const tradeIntelligenceService = require('./tradeIntelligenceService');
+const dataProvider = require('./dataProvider');
 const { query } = require('../config/database');
 const YahooFinance = require('yahoo-finance2').default;
 const yahooFinance = new YahooFinance();
@@ -118,6 +121,244 @@ const BOT_CONFIG = {
     }
 };
 
+const DEFAULT_USER_BOT_CONFIG = {
+    enabled: false,
+    scalping_enabled: false,  // Disabled: too complex, requires near-perfect Greek data
+    swing_enabled: true,
+    spreads_enabled: true,
+    hedging_enabled: false,
+    max_position_risk: BOT_CONFIG.maxPositionRisk,
+    max_account_risk: BOT_CONFIG.maxAccountRisk,
+    max_open_positions: BOT_CONFIG.maxOpenPositions,
+    max_daily_loss: BOT_CONFIG.risk.maxDailyLoss,
+    position_size_method: BOT_CONFIG.risk.positionSizeMethod,
+    fixed_contracts: 1,
+    take_profit_percent: BOT_CONFIG.risk.takeProfit * 100,
+    stop_loss_percent: BOT_CONFIG.risk.stopLoss * 100,
+    trailing_stop_percent: BOT_CONFIG.risk.trailingStop * 100,
+    trading_start_time: `${BOT_CONFIG.trading.startTime}:00`,
+    trading_end_time: `${BOT_CONFIG.trading.endTime}:00`,
+    min_liquidity_score: 50,
+    min_opportunity_score: 70
+};
+
+async function getUserBotConfig(userId) {
+    const result = await query(
+        `INSERT INTO options_bot_config (
+            user_id, enabled, scalping_enabled, swing_enabled, spreads_enabled, hedging_enabled,
+            max_position_risk, max_account_risk, max_open_positions, max_daily_loss,
+            position_size_method, fixed_contracts, take_profit_percent, stop_loss_percent,
+            trailing_stop_percent, trading_start_time, trading_end_time,
+            min_liquidity_score, min_opportunity_score
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6,
+            $7, $8, $9, $10,
+            $11, $12, $13, $14,
+            $15, $16, $17,
+            $18, $19
+        )
+        ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
+        RETURNING *`,
+        [
+            userId,
+            DEFAULT_USER_BOT_CONFIG.enabled,
+            DEFAULT_USER_BOT_CONFIG.scalping_enabled,
+            DEFAULT_USER_BOT_CONFIG.swing_enabled,
+            DEFAULT_USER_BOT_CONFIG.spreads_enabled,
+            DEFAULT_USER_BOT_CONFIG.hedging_enabled,
+            DEFAULT_USER_BOT_CONFIG.max_position_risk,
+            DEFAULT_USER_BOT_CONFIG.max_account_risk,
+            DEFAULT_USER_BOT_CONFIG.max_open_positions,
+            DEFAULT_USER_BOT_CONFIG.max_daily_loss,
+            DEFAULT_USER_BOT_CONFIG.position_size_method,
+            DEFAULT_USER_BOT_CONFIG.fixed_contracts,
+            DEFAULT_USER_BOT_CONFIG.take_profit_percent,
+            DEFAULT_USER_BOT_CONFIG.stop_loss_percent,
+            DEFAULT_USER_BOT_CONFIG.trailing_stop_percent,
+            DEFAULT_USER_BOT_CONFIG.trading_start_time,
+            DEFAULT_USER_BOT_CONFIG.trading_end_time,
+            DEFAULT_USER_BOT_CONFIG.min_liquidity_score,
+            DEFAULT_USER_BOT_CONFIG.min_opportunity_score
+        ]
+    );
+
+    return result.rows[0];
+}
+
+function buildRuntimeConfig(userConfig = {}) {
+    return {
+        ...BOT_CONFIG,
+        maxAccountRisk: Number(userConfig.max_account_risk ?? BOT_CONFIG.maxAccountRisk),
+        maxPositionRisk: Number(userConfig.max_position_risk ?? BOT_CONFIG.maxPositionRisk),
+        maxOpenPositions: Number(userConfig.max_open_positions ?? BOT_CONFIG.maxOpenPositions),
+        strategies: {
+            ...BOT_CONFIG.strategies,
+            deltaNeutralScalping: {
+                ...BOT_CONFIG.strategies.deltaNeutralScalping,
+                enabled: userConfig.scalping_enabled ?? BOT_CONFIG.strategies.deltaNeutralScalping.enabled
+            },
+            directionalSwing: {
+                ...BOT_CONFIG.strategies.directionalSwing,
+                enabled: userConfig.swing_enabled ?? BOT_CONFIG.strategies.directionalSwing.enabled
+            },
+            creditSpreads: {
+                ...BOT_CONFIG.strategies.creditSpreads,
+                enabled: userConfig.spreads_enabled ?? BOT_CONFIG.strategies.creditSpreads.enabled
+            },
+            protectivePuts: {
+                ...BOT_CONFIG.strategies.protectivePuts,
+                enabled: userConfig.hedging_enabled ?? BOT_CONFIG.strategies.protectivePuts.enabled
+            }
+        },
+        risk: {
+            ...BOT_CONFIG.risk,
+            stopLoss: Number(userConfig.stop_loss_percent ?? BOT_CONFIG.risk.stopLoss * 100) / 100,
+            takeProfit: Number(userConfig.take_profit_percent ?? BOT_CONFIG.risk.takeProfit * 100) / 100,
+            trailingStop: Number(userConfig.trailing_stop_percent ?? BOT_CONFIG.risk.trailingStop * 100) / 100,
+            maxDailyLoss: Number(userConfig.max_daily_loss ?? BOT_CONFIG.risk.maxDailyLoss),
+            positionSizeMethod: userConfig.position_size_method || BOT_CONFIG.risk.positionSizeMethod,
+            fixedContracts: Number(userConfig.fixed_contracts ?? 1)
+        },
+        trading: {
+            ...BOT_CONFIG.trading,
+            startTime: String(userConfig.trading_start_time || DEFAULT_USER_BOT_CONFIG.trading_start_time).slice(0, 5),
+            endTime: String(userConfig.trading_end_time || DEFAULT_USER_BOT_CONFIG.trading_end_time).slice(0, 5)
+        },
+        minimums: {
+            liquidityScore: Number(userConfig.min_liquidity_score ?? DEFAULT_USER_BOT_CONFIG.min_liquidity_score),
+            opportunityScore: Number(userConfig.min_opportunity_score ?? DEFAULT_USER_BOT_CONFIG.min_opportunity_score)
+        }
+    };
+}
+
+function deriveOptionsSetupFamily(strategy, opportunity) {
+    const ivRankLabel = opportunity.ivRankLabel || 'NORMAL';
+    const momentum = Number(opportunity.underlyingMomentum || 0);
+
+    if (strategy === 'creditSpreads') {
+        return `${String(opportunity.type || 'credit_spread').toLowerCase()}_${ivRankLabel.toLowerCase()}`;
+    }
+
+    if (strategy === 'directionalSwing') {
+        return momentum >= 0 ? `bullish_swing_${ivRankLabel.toLowerCase()}` : `bearish_swing_${ivRankLabel.toLowerCase()}`;
+    }
+
+    if (strategy === 'deltaNeutralScalping') {
+        return `gamma_scalp_${ivRankLabel.toLowerCase()}`;
+    }
+
+    return `${strategy}_${ivRankLabel.toLowerCase()}`;
+}
+
+function getOptionsRegimeAdjustment(strategy, regime, opportunity) {
+    const momentum = Number(opportunity.underlyingMomentum || 0);
+    let scoreAdjustment = 0;
+    let sizeMultiplier = 1;
+    let thresholdAdjustment = 0;
+
+    if (regime === 'BEAR') {
+        sizeMultiplier = 0.8;
+        thresholdAdjustment = 5;
+
+        if (strategy === 'creditSpreads') {
+            scoreAdjustment += 6;
+            sizeMultiplier = 0.95;
+        } else if (strategy === 'directionalSwing') {
+            scoreAdjustment += momentum < 0 ? 4 : -8;
+        } else if (strategy === 'deltaNeutralScalping') {
+            scoreAdjustment += 2;
+        }
+    } else if (regime === 'BULL') {
+        if (strategy === 'directionalSwing') {
+            scoreAdjustment += momentum > 0 ? 5 : -3;
+            sizeMultiplier = momentum > 0 ? 1.05 : 0.9;
+        } else if (strategy === 'creditSpreads') {
+            scoreAdjustment += 2;
+        }
+    } else {
+        sizeMultiplier = 0.92;
+        thresholdAdjustment = 2;
+    }
+
+    return { scoreAdjustment, sizeMultiplier, thresholdAdjustment };
+}
+
+// Valid physical bounds for each Greek — values outside these indicate bad API data.
+// delta ∈ [-1, 1]  gamma ∈ [0, 1]  theta ≤ 0  vega ≥ 0  IV ∈ [0, 5] (0-500%)
+const GREEKS_BOUNDS = {
+    delta:             { min: -1,  max: 1   },
+    gamma:             { min: 0,   max: 1   },
+    theta:             { min: -50, max: 0   },
+    vega:              { min: 0,   max: 50  },
+    impliedVolatility: { min: 0,   max: 5   }
+};
+
+function validateAndClampGreeks(raw, symbol) {
+    const g = { ...raw };
+    for (const [key, { min, max }] of Object.entries(GREEKS_BOUNDS)) {
+        const v = Number(g[key]);
+        if (!Number.isFinite(v)) {
+            if (g[key] !== undefined && g[key] !== null) {
+                logger.warn(`[OptionsGreeks] Non-finite ${key} for ${symbol || '?'}: ${g[key]}, defaulting to 0`);
+            }
+            g[key] = 0;
+        } else if (v < min || v > max) {
+            logger.warn(`[OptionsGreeks] ${key} out of range for ${symbol || '?'}: ${v.toFixed(4)} (valid [${min}, ${max}]), clamping`);
+            g[key] = Math.max(min, Math.min(max, v));
+        }
+    }
+    return g;
+}
+
+function getOptionGreeks(option, symbol) {
+    const raw = option.greeks || {
+        delta:             option.delta             || 0,
+        gamma:             option.gamma             || 0,
+        theta:             option.theta             || 0,
+        vega:              option.vega              || 0,
+        impliedVolatility: option.impliedVolatility || 0,
+        theoreticalPrice:  option.theoreticalPrice  || 0,
+        intrinsicValue:    option.intrinsicValue    || 0,
+        timeValue:         option.timeValue         || 0
+    };
+    return validateAndClampGreeks(raw, symbol || option.symbol);
+}
+
+function getOptionType(option) {
+    return (option.optionType || option.type || '').toLowerCase();
+}
+
+function getOptionExpiration(option) {
+    return option.expirationDate || option.expiration;
+}
+
+function isTradableOption(option) {
+    const bid = Number(option?.bid || 0);
+    const ask = Number(option?.ask || 0);
+    if (bid <= 0 || ask <= 0 || ask < bid) return false;
+    return ((ask - bid) / ask) <= BOT_CONFIG.liquidity.maxBidAskSpread;
+}
+
+function findMatchingOption(options, criteria) {
+    return options.find((option) =>
+        Number(option.strike) === Number(criteria.strike) &&
+        getOptionExpiration(option) === criteria.expiration &&
+        getOptionType(option) === criteria.optionType
+    );
+}
+
+function getCurrentEasternTimeMinutes() {
+    const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    return et.getHours() * 60 + et.getMinutes();
+}
+
+function isWithinTradingWindow(runtimeConfig) {
+    const [startHour, startMinute] = runtimeConfig.trading.startTime.split(':').map(Number);
+    const [endHour, endMinute] = runtimeConfig.trading.endTime.split(':').map(Number);
+    const currentTime = getCurrentEasternTimeMinutes();
+    return currentTime >= (startHour * 60 + startMinute) && currentTime <= (endHour * 60 + endMinute);
+}
+
 // === MARKET DATA & ANALYSIS ===
 
 /**
@@ -125,8 +366,8 @@ const BOT_CONFIG = {
  */
 async function getVixLevel() {
     try {
-        const vixData = await yahooFinance.quote('^VIX');
-        const vixLevel = vixData.regularMarketPrice;
+        const vixData = await dataProvider.getQuote('^VIX');
+        const vixLevel = vixData?.price || vixData?.regularMarketPrice;
         
         logger.info('[Options Bot] VIX Level', { vix: vixLevel });
         
@@ -154,22 +395,19 @@ async function getVixLevel() {
  *   IV Rank 30-70 → IV is NORMAL → Any strategy
  *   IV Rank > 70  → IV is EXPENSIVE → Prefer SELLING options (credit strategies, avoid debit)
  */
-async function calculateIVRank(symbol) {
+async function calculateIVRank(symbol, optionsData = null) {
     try {
-        const [optionsData, chart52w] = await Promise.all([
-            optionsService.getOptionsWithGreeks(symbol),
-            yahooFinance.chart(symbol, {
-                period1: new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-                interval: '1wk'
-            })
+        const [resolvedOptionsData, bars] = await Promise.all([
+            optionsData ? Promise.resolve(optionsData) : optionsService.getOptionsWithGreeks(symbol),
+            dataProvider.getBars(symbol, '1d', 90)
         ]);
 
-        if (!optionsData.options || optionsData.options.length === 0) {
+        if (!resolvedOptionsData.options || resolvedOptionsData.options.length === 0) {
             return null;
         }
 
         // Current IV: average of near-ATM options (delta 0.40 – 0.60)
-        const atmOptions = optionsData.options
+        const atmOptions = resolvedOptionsData.options
             .filter(opt => {
                 const d = Math.abs(opt.greeks?.delta || 0);
                 return d >= 0.40 && d <= 0.60 && (opt.greeks?.impliedVolatility || 0) > 0;
@@ -181,7 +419,7 @@ async function calculateIVRank(symbol) {
         const currentIV = atmOptions.reduce((sum, opt) => sum + opt.greeks.impliedVolatility, 0) / atmOptions.length;
 
         // Estimate 52-week IV range using historical realized volatility (weekly returns)
-        const closes = chart52w.quotes.map(q => q.close).filter(c => c != null && c > 0);
+        const closes = (bars || []).map(q => q.close).filter(c => c != null && c > 0);
         if (closes.length < 10) {
             return {
                 currentIV: parseFloat((currentIV * 100).toFixed(1)),
@@ -260,45 +498,46 @@ async function calculateIVRank(symbol) {
 async function analyzeStockForOptions(symbol) {
     try {
         // Get stock quote
-        const quote = await yahooFinance.quote(symbol);
+        const quote = await dataProvider.getQuote(symbol);
+        const price = Number(quote?.price || quote?.regularMarketPrice || 0);
+        const marketCapValue = Number(quote?.marketCap || 0);
+        const volume = Number(quote?.volume || quote?.regularMarketVolume || 0);
+        const momentum = Number(quote?.changePercent || quote?.regularMarketChangePercent || 0);
         
         // Check basic requirements
-        if (!quote.regularMarketPrice || quote.regularMarketPrice < BOT_CONFIG.liquidity.minStockPrice) {
+        if (!price || price < BOT_CONFIG.liquidity.minStockPrice) {
             return null;
         }
         
-        const marketCap = quote.marketCap ? quote.marketCap / 1000000 : 0;
+        const marketCap = marketCapValue ? marketCapValue / 1000000 : 0;
         if (marketCap < BOT_CONFIG.liquidity.minMarketCap) {
             return null;
         }
         
         // Get options chain
-        const optionsData = await optionsService.getOptionsWithGreeks(symbol);
+        const optionsData = await optionsService.getOptionsWithGreeks(symbol, marketCap);
         if (!optionsData.options || optionsData.options.length === 0) {
+            logger.warn('[Options Bot] Skipping symbol because no usable options chain was available', {
+                symbol,
+                error: optionsData.error || null,
+                warning: optionsData.warning || null,
+                cacheSource: optionsData.cache?.source || null,
+                cacheAgeMs: optionsData.cache?.ageMs || null
+            });
             return null;
         }
         
         // Calculate IV Rank
-        const ivRank = await calculateIVRank(symbol);
-        
-        // Get stock momentum (using recent price action)
-        const historical = await yahooFinance.historical(symbol, {
-            period1: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-            period2: new Date()
-        });
-        
-        const prices = historical.map(h => h.close);
-        const momentum = prices.length > 0 
-            ? ((prices[prices.length - 1] - prices[0]) / prices[0]) * 100 
-            : 0;
+        const ivRank = await calculateIVRank(symbol, optionsData);
         
         return {
             symbol,
-            stockPrice: quote.regularMarketPrice,
+            stockPrice: price,
             marketCap,
-            volume: quote.regularMarketVolume,
+            volume,
             momentum,
             ivRank,
+            optionsData,
             optionsAvailable: optionsData.options.length,
             analysis: {
                 liquidityScore: calculateLiquidityScore(optionsData.options),
@@ -339,10 +578,11 @@ async function findDeltaNeutralScalps(symbol, stockAnalysis, optionsData) {
         const criteria = BOT_CONFIG.greeksThresholds.deltaNeutralScalping;
         
         const opportunities = optionsData.options.filter(opt => {
-            const delta = Math.abs(opt.greeks.delta);
-            const gamma = opt.greeks.gamma;
-            const vega = opt.greeks.vega;
-            const theta = opt.greeks.theta;
+            const greeks = getOptionGreeks(opt);
+            const delta = Math.abs(greeks.delta);
+            const gamma = greeks.gamma;
+            const vega = greeks.vega;
+            const theta = greeks.theta;
             
             // ATM options with high gamma
             return (
@@ -351,6 +591,7 @@ async function findDeltaNeutralScalps(symbol, stockAnalysis, optionsData) {
                 gamma >= criteria.minGamma &&
                 vega >= criteria.minVega &&
                 theta >= criteria.maxTheta && // Less negative is better
+                isTradableOption(opt) &&
                 opt.volume >= BOT_CONFIG.liquidity.minVolume &&
                 opt.openInterest >= BOT_CONFIG.liquidity.minOpenInterest
             );
@@ -374,19 +615,20 @@ async function findDeltaNeutralScalps(symbol, stockAnalysis, optionsData) {
  */
 function calculateScalperScore(option, stockAnalysis) {
     let score = 0;
+    const greeks = getOptionGreeks(option);
     
     // Gamma weight (40%) - Higher gamma = faster profits
-    score += (option.greeks.gamma / 0.15) * 40;
+    score += (greeks.gamma / 0.15) * 40;
     
     // Vega weight (30%) - Higher vega = profit from vol spikes
-    score += (option.greeks.vega / 0.30) * 30;
+    score += (greeks.vega / 0.30) * 30;
     
     // Liquidity weight (20%)
     const spreadPercent = (option.ask - option.bid) / option.ask;
     score += (1 - spreadPercent / BOT_CONFIG.liquidity.maxBidAskSpread) * 20;
     
     // Theta penalty (10%) - Less theta decay is better
-    const thetaScore = Math.max(0, 1 + (option.greeks.theta / 1.0));
+    const thetaScore = Math.max(0, 1 + (greeks.theta / 1.0));
     score += thetaScore * 10;
     
     return Math.min(100, Math.max(0, score));
@@ -396,32 +638,51 @@ function calculateScalperScore(option, stockAnalysis) {
  * Find directional swing opportunities
  * Strategy: Buy ITM options with momentum in favorable direction
  */
-async function findDirectionalSwings(symbol, stockAnalysis, optionsData) {
+async function findDirectionalSwings(symbol, stockAnalysis, optionsData, scanSignal = null) {
     try {
         const criteria = BOT_CONFIG.greeksThresholds.directionalSwing;
-        const bullish = stockAnalysis.momentum > 2; // Positive momentum
-        
+
+        // Direction priority:
+        // 1. Nightly AI scan recommendation (STRONG BUY → CALL, STRONG SELL → PUT)
+        //    More reliable than intraday momentum — uses overnight fundamental + technical AI score
+        // 2. Intraday momentum fallback (>1% move, lowered from 2%)
+        let bullish;
+        if (scanSignal) {
+            const rec = (scanSignal.recommendation || '').toUpperCase();
+            if (rec.includes('BUY'))  { bullish = true;  }
+            else if (rec.includes('SELL')) { bullish = false; }
+            else { bullish = stockAnalysis.momentum > 1; }
+            logger.info('[Options Bot] Direction from scan signal', {
+                symbol, recommendation: scanSignal.recommendation,
+                aiScore: scanSignal.ai_score, direction: bullish ? 'CALL' : 'PUT'
+            });
+        } else {
+            bullish = stockAnalysis.momentum > 1; // lowered threshold: any meaningful positive move
+        }
+
         const opportunities = optionsData.options.filter(opt => {
-            const delta = opt.greeks.delta;
-            const gamma = opt.greeks.gamma;
-            const vega = opt.greeks.vega;
-            const theta = opt.greeks.theta;
-            
-            // For bullish: calls with high positive delta
-            // For bearish: puts with high negative delta
-            const deltaCheck = bullish 
+            const greeks = getOptionGreeks(opt);
+            const delta = greeks.delta;
+            const gamma = greeks.gamma;
+            const vega = greeks.vega;
+            const theta = greeks.theta;
+
+            // Bullish (STRONG BUY) → BUY CALL (delta 0.50–0.85)
+            // Bearish (STRONG SELL) → BUY PUT (delta -0.50 to -0.85)
+            const deltaCheck = bullish
                 ? (delta >= criteria.minDelta && delta <= criteria.maxDelta)
                 : (delta <= -criteria.minDelta && delta >= -criteria.maxDelta);
-            
+
             return (
                 deltaCheck &&
                 gamma >= criteria.minGamma &&
                 vega >= criteria.minVega &&
                 theta >= criteria.maxTheta &&
+                isTradableOption(opt) &&
                 opt.volume >= BOT_CONFIG.liquidity.minVolume &&
                 opt.openInterest >= BOT_CONFIG.liquidity.minOpenInterest &&
-                opt.daysToExpiration >= 14 &&
-                opt.daysToExpiration <= 45
+                opt.daysToExpiration >= 21 &&   // roadmap: DTE ≥ 21 at entry
+                opt.daysToExpiration <= 60
             );
         });
         
@@ -442,9 +703,10 @@ async function findDirectionalSwings(symbol, stockAnalysis, optionsData) {
  */
 function calculateSwingScore(option, stockAnalysis, bullish) {
     let score = 0;
+    const greeks = getOptionGreeks(option);
     
     // Delta alignment (40%)
-    const delta = Math.abs(option.greeks.delta);
+    const delta = Math.abs(greeks.delta);
     score += (delta / 0.85) * 40;
     
     // Momentum alignment (30%)
@@ -494,6 +756,8 @@ async function findCreditSpreads(symbol, stockAnalysis, optionsData) {
                 
                 if (Math.abs(shortPut.greeks.delta) <= criteria.shortDelta &&
                     Math.abs(longPut.greeks.delta) <= criteria.longDelta &&
+                    isTradableOption(shortPut) &&
+                    isTradableOption(longPut) &&
                     (shortPut.strike - longPut.strike) <= criteria.maxWidth &&
                     shortPut.bid >= criteria.minPremium) {
                     
@@ -523,8 +787,10 @@ async function findCreditSpreads(symbol, stockAnalysis, optionsData) {
                 const shortCall = calls[i];
                 const longCall = calls[i + 1];
                 
-                if (shortCall.greeks.delta <= criteria.shortDelta &&
-                    longCall.greeks.delta <= criteria.longDelta &&
+                if (Math.abs(shortCall.greeks.delta) <= criteria.shortDelta &&
+                    Math.abs(longCall.greeks.delta) <= criteria.longDelta &&
+                    isTradableOption(shortCall) &&
+                    isTradableOption(longCall) &&
                     (longCall.strike - shortCall.strike) <= criteria.maxWidth &&
                     shortCall.bid >= criteria.minPremium) {
                     
@@ -561,14 +827,18 @@ async function findCreditSpreads(symbol, stockAnalysis, optionsData) {
 /**
  * Calculate position size based on Greeks and risk
  */
-function calculateOptionsPositionSize(option, accountBalance, strategy) {
+function calculateOptionsPositionSize(option, accountBalance, strategy, runtimeConfig) {
     try {
-        const maxRiskAmount = accountBalance * BOT_CONFIG.maxPositionRisk;
+        const maxRiskAmount = accountBalance * runtimeConfig.maxPositionRisk;
         
         if (strategy === 'creditSpreads') {
             // For spreads, risk is max loss
             const contracts = Math.floor(maxRiskAmount / (option.maxRisk * 100));
             return Math.max(1, Math.min(contracts, 10)); // 1-10 contracts
+        }
+
+        if (runtimeConfig.risk.positionSizeMethod === 'fixed') {
+            return Math.max(1, runtimeConfig.risk.fixedContracts || 1);
         }
         
         // For long options, risk is premium paid
@@ -576,10 +846,11 @@ function calculateOptionsPositionSize(option, accountBalance, strategy) {
         const contracts = Math.floor(maxRiskAmount / (optionPrice * 100));
         
         // Adjust for delta exposure
-        const deltaAdjusted = Math.abs(option.greeks.delta) * contracts;
+        const greeks = getOptionGreeks(option);
+        const deltaAdjusted = Math.abs(greeks.delta) * contracts;
         
         // Don't exceed equivalent of 500 shares
-        const maxContracts = Math.floor(500 / (Math.abs(option.greeks.delta) * 100));
+        const maxContracts = Math.floor(500 / Math.max(Math.abs(greeks.delta) * 100, 1));
         
         return Math.max(1, Math.min(contracts, maxContracts, 20)); // 1-20 contracts
     } catch (error) {
@@ -612,42 +883,75 @@ async function executeOptionsTrade(userId, opportunity, strategy, contracts) {
                 userId,
                 opportunity.symbol,
                 opportunity.strike,
-                opportunity.expirationDate,
-                opportunity.optionType.toUpperCase(),
+                getOptionExpiration(opportunity),
+                getOptionType(opportunity).toUpperCase(),
                 'BUY',
                 contracts,
                 entryPrice,
                 strategy,
                 'OPEN',
-                JSON.stringify(opportunity.greeks)
+                JSON.stringify(getOptionGreeks(opportunity))
             ]
         );
         
         const trade = result.rows[0];
+
+        await tradeIntelligenceService.recordExecution(userId, {
+            botType: 'options',
+            symbol: opportunity.symbol,
+            setupFamily: opportunity.setupFamily,
+            strategyFamily: strategy,
+            regime: opportunity.regime,
+            score: opportunity.score,
+            scoreAdjustment: opportunity.intelligenceScoreAdjustment,
+            sizeMultiplier: opportunity.intelligenceSizeMultiplier,
+            expectancy: opportunity.expectancyStats?.expectancy,
+            confidence: opportunity.expectancyStats?.confidence,
+            entryPrice,
+            tradeRefType: 'options_trade',
+            tradeRefId: trade.id,
+            metadata: {
+                contracts,
+                strike: opportunity.strike,
+                optionType: getOptionType(opportunity),
+                expiration: getOptionExpiration(opportunity),
+                ivRankLabel: opportunity.ivRankLabel,
+                underlyingMomentum: opportunity.underlyingMomentum
+            }
+        });
         
         // Log trade
         logger.trade('BUY', opportunity.symbol, contracts, entryPrice, {
             type: 'OPTIONS',
             strike: opportunity.strike,
-            expiration: opportunity.expirationDate,
-            optionType: opportunity.optionType,
+            expiration: getOptionExpiration(opportunity),
+            optionType: getOptionType(opportunity),
             strategy,
-            greeks: opportunity.greeks,
+            greeks: getOptionGreeks(opportunity),
             score: opportunity.scalperScore || opportunity.swingScore || 0
         });
         
-        // Send Telegram alert
-        await telegramAlertService.alertOptionsTradeExecuted(userId, {
-            action: 'BUY',
+        // Send directional signal alert (CALL or PUT with full thesis)
+        const greeks = getOptionGreeks(opportunity);
+        await telegramAlertService.alertOptionsSignalEntry(userId, {
             symbol: opportunity.symbol,
-            contracts,
+            stockPrice: opportunity.underlyingPrice || 0,
+            momentum: opportunity.underlyingMomentum || 0,
+            score: opportunity.score || opportunity.swingScore || opportunity.scalperScore || 0,
+            regime: opportunity.regime || 'UNKNOWN',
+            optionType: getOptionType(opportunity),
             strike: opportunity.strike,
-            expiration: opportunity.expirationDate,
-            optionType: opportunity.optionType,
+            expiration: getOptionExpiration(opportunity),
+            dte: opportunity.daysToExpiration || 0,
             price: entryPrice,
+            contracts,
             totalCost,
-            strategy,
-            greeks: opportunity.greeks
+            delta: greeks.delta,
+            gamma: greeks.gamma,
+            theta: greeks.theta,
+            ivRankLabel: opportunity.ivRankLabel || 'NORMAL',
+            ivRank: opportunity.ivRankNumeric,
+            strategy
         });
         
         return trade;
@@ -688,6 +992,31 @@ async function executeCreditSpread(userId, spread, contracts) {
             ]
         );
         
+        await tradeIntelligenceService.recordExecution(userId, {
+            botType: 'options',
+            symbol: spread.symbol,
+            setupFamily: spread.setupFamily,
+            strategyFamily: 'creditSpreads',
+            regime: spread.regime,
+            score: spread.score,
+            scoreAdjustment: spread.intelligenceScoreAdjustment,
+            sizeMultiplier: spread.intelligenceSizeMultiplier,
+            expectancy: spread.expectancyStats?.expectancy,
+            confidence: spread.expectancyStats?.confidence,
+            entryPrice: spread.credit,
+            tradeRefType: 'options_trade',
+            tradeRefId: result.rows[0].id,
+            metadata: {
+                contracts,
+                spreadType: spread.type,
+                shortStrike: spread.shortLeg.strike,
+                longStrike: spread.longLeg.strike,
+                expiration: spread.expiration,
+                ivRankLabel: spread.ivRankLabel,
+                underlyingMomentum: spread.underlyingMomentum
+            }
+        });
+
         logger.trade('SELL_SPREAD', spread.symbol, contracts, spread.credit, {
             type: 'CREDIT_SPREAD',
             spreadType: spread.type,
@@ -716,6 +1045,8 @@ async function executeCreditSpread(userId, spread, contracts) {
  */
 async function monitorOptionsPositions(userId) {
     try {
+        const userConfig = await getUserBotConfig(userId);
+        const runtimeConfig = buildRuntimeConfig(userConfig);
         const result = await query(
             `SELECT * FROM options_trades 
              WHERE user_id = $1 AND status = 'OPEN' 
@@ -726,7 +1057,7 @@ async function monitorOptionsPositions(userId) {
         const positions = result.rows;
         
         for (const position of positions) {
-            await checkOptionsExit(userId, position);
+            await checkOptionsExit(userId, position, runtimeConfig);
         }
         
         return positions;
@@ -739,53 +1070,98 @@ async function monitorOptionsPositions(userId) {
 /**
  * Check if options position should be exited
  */
-async function checkOptionsExit(userId, position) {
+async function checkOptionsExit(userId, position, runtimeConfig) {
     try {
         // Get current options data
         const optionsData = await optionsService.getOptionsWithGreeks(position.symbol);
-        
-        // Find matching option
-        const currentOption = optionsData.options.find(opt =>
-            opt.strike === parseFloat(position.strike) &&
-            opt.expirationDate === position.expiration &&
-            opt.optionType === position.option_type.toLowerCase()
-        );
-        
-        if (!currentOption) {
-            logger.warn('[Options Bot] Could not find current option data', { position: position.id });
+        if (!optionsData.options || optionsData.options.length === 0) {
+            logger.warn('[Options Bot] Skipping exit evaluation because no usable options chain was available', {
+                positionId: position.id,
+                symbol: position.symbol,
+                error: optionsData.error || null,
+                warning: optionsData.warning || null,
+                cacheSource: optionsData.cache?.source || null,
+                cacheAgeMs: optionsData.cache?.ageMs || null
+            });
             return;
         }
-        
-        const currentPrice = (currentOption.bid + currentOption.ask) / 2;
-        const entryPrice = parseFloat(position.entry_price);
-        const pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
+        const optionType = String(position.option_type || '').toLowerCase();
+        let exitSnapshot = null;
+
+        if (position.spread_type) {
+            const shortLeg = findMatchingOption(optionsData.options, {
+                strike: position.strike,
+                expiration: position.expiration,
+                optionType
+            });
+            const longLeg = findMatchingOption(optionsData.options, {
+                strike: position.long_strike,
+                expiration: position.expiration,
+                optionType
+            });
+
+            if (!shortLeg || !longLeg) {
+                logger.warn('[Options Bot] Could not find current spread leg data', { position: position.id });
+                return;
+            }
+
+            const closeDebit = Math.max(0, (shortLeg.ask || 0) - (longLeg.bid || 0));
+            const entryCredit = parseFloat(position.entry_price);
+            exitSnapshot = {
+                currentPrice: closeDebit,
+                pnl: (entryCredit - closeDebit) * position.contracts * 100,
+                pnlPercent: entryCredit > 0 ? ((entryCredit - closeDebit) / entryCredit) * 100 : 0,
+                daysToExp: Math.min(shortLeg.daysToExpiration, longLeg.daysToExpiration),
+                thetaDecayRatio: 0
+            };
+        } else {
+            const currentOption = findMatchingOption(optionsData.options, {
+                strike: position.strike,
+                expiration: position.expiration,
+                optionType
+            });
+
+            if (!currentOption) {
+                logger.warn('[Options Bot] Could not find current option data', { position: position.id });
+                return;
+            }
+
+            const currentPrice = (currentOption.bid + currentOption.ask) / 2;
+            const entryPrice = parseFloat(position.entry_price);
+            const greeks = getOptionGreeks(currentOption);
+            exitSnapshot = {
+                currentPrice,
+                pnl: (currentPrice - entryPrice) * position.contracts * 100,
+                pnlPercent: entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0,
+                daysToExp: currentOption.daysToExpiration,
+                thetaDecayRatio: currentPrice > 0 ? (Math.abs(greeks.theta) * 7) / currentPrice : 0
+            };
+        }
         
         let exitReason = null;
         
         // Check take profit
-        if (pnlPercent >= (BOT_CONFIG.risk.takeProfit * 100)) {
+        if (exitSnapshot.pnlPercent >= (runtimeConfig.risk.takeProfit * 100)) {
             exitReason = 'TAKE_PROFIT';
         }
         
         // Check stop loss
-        if (pnlPercent <= -(BOT_CONFIG.risk.stopLoss * 100)) {
+        if (exitSnapshot.pnlPercent <= -(runtimeConfig.risk.stopLoss * 100)) {
             exitReason = 'STOP_LOSS';
         }
         
         // Check expiration (close if < 7 days)
-        const daysToExp = currentOption.daysToExpiration;
-        if (daysToExp < 7) {
+        if (exitSnapshot.daysToExp < 7) {
             exitReason = 'EXPIRATION_APPROACHING';
         }
         
         // Check theta decay (close if losing too much to time)
-        const thetaDecay = Math.abs(currentOption.greeks.theta) * 7; // 7-day theta
-        if (thetaDecay / currentPrice > 0.20) { // 20% decay in week
+        if (exitSnapshot.thetaDecayRatio > 0.20) { // 20% decay in week
             exitReason = 'HIGH_THETA_DECAY';
         }
         
         if (exitReason) {
-            await closeOptionsPosition(userId, position, currentPrice, exitReason);
+            await closeOptionsPosition(userId, position, exitSnapshot, exitReason);
         }
     } catch (error) {
         logger.error('[Options Bot] Error checking exit', { positionId: position.id, error: error.message });
@@ -795,11 +1171,12 @@ async function checkOptionsExit(userId, position) {
 /**
  * Close options position
  */
-async function closeOptionsPosition(userId, position, exitPrice, reason) {
+async function closeOptionsPosition(userId, position, exitSnapshot, reason) {
     try {
         const entryPrice = parseFloat(position.entry_price);
-        const pnl = (exitPrice - entryPrice) * position.contracts * 100;
-        const pnlPercent = ((exitPrice - entryPrice) / entryPrice) * 100;
+        const exitPrice = exitSnapshot.currentPrice;
+        const pnl = exitSnapshot.pnl;
+        const pnlPercent = exitSnapshot.pnlPercent;
         
         // Update position
         await query(
@@ -841,6 +1218,19 @@ async function closeOptionsPosition(userId, position, exitPrice, reason) {
             profit_loss: pnl,
             trade_type: 'OPTIONS'
         });
+
+        await tradeIntelligenceService.closeExecutionByRef(userId, {
+            tradeRefType: 'options_trade',
+            tradeRefId: position.id,
+            exitPrice,
+            pnl,
+            pnlPercent,
+            metadata: {
+                reason,
+                strategy: position.strategy,
+                spreadType: position.spread_type || null
+            }
+        });
         
     } catch (error) {
         logger.error('[Options Bot] Error closing position', { positionId: position.id, error: error.message });
@@ -855,6 +1245,23 @@ async function closeOptionsPosition(userId, position, exitPrice, reason) {
 async function executeAutonomousOptionsTrading(userId) {
     try {
         logger.info('[Options Bot] Starting scan', { userId });
+        const userConfig = await getUserBotConfig(userId);
+        const runtimeConfig = buildRuntimeConfig(userConfig);
+        await tradeIntelligenceService.ensureTradeIntelligenceSchema();
+
+        if (!userConfig.enabled) {
+            logger.info('[Options Bot] User config disabled', { userId });
+            return;
+        }
+
+        if (!isWithinTradingWindow(runtimeConfig)) {
+            logger.info('[Options Bot] Outside trading window', {
+                userId,
+                startTime: runtimeConfig.trading.startTime,
+                endTime: runtimeConfig.trading.endTime
+            });
+            return;
+        }
         
         // Get account info
         const account = await tradingAccountService.getTradingAccount(userId);
@@ -868,7 +1275,7 @@ async function executeAutonomousOptionsTrading(userId) {
         
         // Check daily loss limit
         const todayLoss = await performanceMetricsService.getTodayLoss(userId);
-        if (todayLoss && Math.abs(todayLoss) >= BOT_CONFIG.risk.maxDailyLoss) {
+        if (todayLoss && Math.abs(todayLoss) >= runtimeConfig.risk.maxDailyLoss) {
             logger.warn('[Options Bot] Daily loss limit reached', { loss: todayLoss });
             await telegramAlertService.alertDailyLossLimitReached(userId, todayLoss);
             return;
@@ -876,21 +1283,62 @@ async function executeAutonomousOptionsTrading(userId) {
         
         // Check open positions count
         const openPositions = await monitorOptionsPositions(userId);
-        if (openPositions.length >= BOT_CONFIG.maxOpenPositions) {
+        if (openPositions.length >= runtimeConfig.maxOpenPositions) {
             logger.info('[Options Bot] Max positions reached', { count: openPositions.length });
             return;
         }
         
         // Get VIX level
-        const vix = await getVixLevel();
-        logger.info('[Options Bot] Market volatility', { vix: vix.value, regime: vix.regime });
+        const [vix, marketRegime] = await Promise.all([
+            getVixLevel(),
+            marketRegimeService.getMarketRegime()
+        ]);
+        logger.info('[Options Bot] Market volatility', {
+            vix: vix.value,
+            vixRegime: vix.regime,
+            marketRegime: marketRegime.regime
+        });
         
-        // Get trading universe (liquid stocks)
-        const universe = [
-            'SPY', 'QQQ', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'NVDA', 'META', 
-            'AMD', 'NFLX', 'JPM', 'BAC', 'XLF', 'XLE', 'GLD'
-        ];
-        
+        // Build universe from nightly scan STRONG BUY signals with good options liquidity.
+        // Falls back to the liquid-stock default list if the scan produced no results.
+        // Option-eligible = large-cap with active options markets (price >$20, mkt cap >$2B).
+        let universe = ['SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA', 'AMZN', 'AMD', 'META', 'TSLA', 'PANW'];
+        try {
+            const { query: dbQuery } = require('../config/database');
+            const scanRes = await dbQuery(`
+                SELECT symbol, ai_score, recommendation
+                FROM daily_universe_analysis
+                WHERE analysis_date >= CURRENT_DATE - INTERVAL '2 days'
+                  AND analysis_date = (
+                      SELECT MAX(analysis_date) FROM daily_universe_analysis
+                      WHERE analysis_date >= CURRENT_DATE - INTERVAL '2 days'
+                  )
+                  AND recommendation IN ('STRONG BUY','BUY')
+                  AND ai_score >= 75
+                ORDER BY ai_score DESC
+                LIMIT 20
+            `);
+            if (scanRes.rows.length >= 3) {
+                universe = scanRes.rows.map(r => r.symbol);
+                logger.info('[Options Bot] Universe loaded from nightly scan', {
+                    count: universe.length, topPick: universe[0]
+                });
+            }
+        } catch (_) { /* keep default universe on DB error */ }
+
+        // Store scan signals for direction override below
+        const scanSignalMap = {};
+        try {
+            const { query: dbQuery } = require('../config/database');
+            const sigs = await dbQuery(`
+                SELECT symbol, ai_score, recommendation
+                FROM daily_universe_analysis
+                WHERE analysis_date >= CURRENT_DATE - INTERVAL '2 days'
+                  AND analysis_date = (SELECT MAX(analysis_date) FROM daily_universe_analysis WHERE analysis_date >= CURRENT_DATE - INTERVAL '2 days')
+            `);
+            sigs.rows.forEach(r => { scanSignalMap[r.symbol] = r; });
+        } catch (_) {}
+
         // Analyze each stock
         const opportunities = {
             scalps: [],
@@ -901,8 +1349,9 @@ async function executeAutonomousOptionsTrading(userId) {
         for (const symbol of universe) {
             const stockAnalysis = await analyzeStockForOptions(symbol);
             if (!stockAnalysis) continue;
+            if (stockAnalysis.analysis.liquidityScore < runtimeConfig.minimums.liquidityScore) continue;
             
-            const optionsData = await optionsService.getOptionsWithGreeks(symbol);
+            const optionsData = stockAnalysis.optionsData;
             if (!optionsData.options || optionsData.options.length === 0) continue;
             
             // Use IV Rank to bias strategy selection
@@ -920,24 +1369,34 @@ async function executeAutonomousOptionsTrading(userId) {
             });
 
             // Find opportunities for each strategy (gated by IV Rank)
-            if (BOT_CONFIG.strategies.deltaNeutralScalping.enabled && debitStrategiesEnabled) {
+            const commonFields = {
+                underlyingMomentum: stockAnalysis.momentum,
+                underlyingPrice: stockAnalysis.stockPrice,
+                ivRankLabel: stockAnalysis.ivRank?.ivRankLabel || 'NORMAL',
+                ivRankNumeric: stockAnalysis.ivRank?.ivRank ?? null,
+                liquidityScore: stockAnalysis.analysis.liquidityScore
+            };
+
+            if (runtimeConfig.strategies.deltaNeutralScalping.enabled && debitStrategiesEnabled) {
                 const scalps = await findDeltaNeutralScalps(symbol, stockAnalysis, optionsData);
-                opportunities.scalps.push(...scalps);
+                opportunities.scalps.push(...scalps.map((opp) => ({ ...opp, ...commonFields })));
             }
 
-            if (BOT_CONFIG.strategies.directionalSwing.enabled && debitStrategiesEnabled) {
-                const swings = await findDirectionalSwings(symbol, stockAnalysis, optionsData);
-                opportunities.swings.push(...swings);
+            if (runtimeConfig.strategies.directionalSwing.enabled && debitStrategiesEnabled) {
+                const scanSig = scanSignalMap[symbol] || null;
+                const swings = await findDirectionalSwings(symbol, stockAnalysis, optionsData, scanSig);
+                opportunities.swings.push(...swings.map((opp) => ({ ...opp, ...commonFields })));
             }
 
-            if (BOT_CONFIG.strategies.creditSpreads.enabled && creditStrategiesEnabled) {
+            if (runtimeConfig.strategies.creditSpreads.enabled && creditStrategiesEnabled) {
                 const spreads = await findCreditSpreads(symbol, stockAnalysis, optionsData);
-                // Boost score for credit spreads when IV is high (ideal conditions)
                 if (ivBias === 'SELL_PREMIUM') {
-                    spreads.forEach(s => { s.score = (s.score || 50) + 15; s.ivBoost = true; });
+                    spreads.forEach(s => { s.spreadScore = (s.spreadScore || 50) + 15; s.ivBoost = true; });
                 }
-                opportunities.spreads.push(...spreads);
+                opportunities.spreads.push(...spreads.map((opp) => ({ ...opp, ...commonFields })));
             }
+
+            await new Promise((resolve) => setTimeout(resolve, 250));
         }
         
         logger.info('[Options Bot] Opportunities found', {
@@ -947,22 +1406,83 @@ async function executeAutonomousOptionsTrading(userId) {
         });
         
         // Execute trades (respect position limits)
-        const positionsToOpen = BOT_CONFIG.maxOpenPositions - openPositions.length;
+        const positionsToOpen = runtimeConfig.maxOpenPositions - openPositions.length;
         let tradesExecuted = 0;
+        const openSymbols = new Set(openPositions.map(position => position.symbol));
+        const selectedSymbols = new Set();
         
         // Prioritize by strategy allocation and scores
         const allOpportunities = [
             ...opportunities.scalps.map(o => ({ ...o, strategy: 'deltaNeutralScalping', score: o.scalperScore })),
             ...opportunities.swings.map(o => ({ ...o, strategy: 'directionalSwing', score: o.swingScore })),
             ...opportunities.spreads.map(o => ({ ...o, strategy: 'creditSpreads', score: o.spreadScore }))
-        ].sort((a, b) => b.score - a.score);
+        ];
+
+        const intelligenceAdjusted = await Promise.all(
+            allOpportunities.map(async (opp) => {
+                const setupFamily = deriveOptionsSetupFamily(opp.strategy, opp);
+                const regimeAdjustment = getOptionsRegimeAdjustment(opp.strategy, marketRegime.regime, opp);
+                const expectancyStats = await tradeIntelligenceService.getExpectancyAdjustment({
+                    botType: 'options',
+                    strategyFamily: opp.strategy,
+                    setupFamily,
+                    regime: marketRegime.regime
+                });
+                const intelligenceScoreAdjustment = regimeAdjustment.scoreAdjustment + expectancyStats.scoreAdjustment;
+                const intelligenceSizeMultiplier = regimeAdjustment.sizeMultiplier * (expectancyStats.sizeMultiplier || 1);
+
+                return {
+                    ...opp,
+                    setupFamily,
+                    regime: marketRegime.regime,
+                    expectancyStats,
+                    intelligenceScoreAdjustment,
+                    intelligenceSizeMultiplier,
+                    minimumScore: runtimeConfig.minimums.opportunityScore + regimeAdjustment.thresholdAdjustment,
+                    score: Number((opp.score + intelligenceScoreAdjustment).toFixed(2))
+                };
+            })
+        );
+
+        await Promise.all(
+            intelligenceAdjusted
+                .filter((opp) => opp.score >= opp.minimumScore)
+                .slice(0, 12)
+                .map((opp) => tradeIntelligenceService.recordCandidate(userId, {
+                    botType: 'options',
+                    symbol: opp.symbol,
+                    setupFamily: opp.setupFamily,
+                    strategyFamily: opp.strategy,
+                    regime: opp.regime,
+                    score: opp.score,
+                    scoreAdjustment: opp.intelligenceScoreAdjustment,
+                    sizeMultiplier: opp.intelligenceSizeMultiplier,
+                    expectancy: opp.expectancyStats?.expectancy,
+                    confidence: opp.expectancyStats?.confidence,
+                    metadata: {
+                        baseScore: opp.scalperScore || opp.swingScore || opp.spreadScore || 0,
+                        ivRankLabel: opp.ivRankLabel,
+                        underlyingMomentum: opp.underlyingMomentum,
+                        liquidityScore: opp.liquidityScore,
+                        type: opp.type || null
+                    }
+                }))
+        );
+
+        const qualifiedOpportunities = intelligenceAdjusted
+            .filter((opp) => opp.score >= opp.minimumScore)
+            .filter((opp) => !openSymbols.has(opp.symbol))
+            .sort((a, b) => b.score - a.score);
         
-        for (const opp of allOpportunities) {
+        for (const opp of qualifiedOpportunities) {
             if (tradesExecuted >= positionsToOpen) break;
+            if (selectedSymbols.has(opp.symbol)) continue;
             
-            const contracts = calculateOptionsPositionSize(opp, account.balance, opp.strategy);
-            await executeOptionsTrade(userId, opp, opp.strategy, contracts);
+            const contracts = calculateOptionsPositionSize(opp, account.balance, opp.strategy, runtimeConfig);
+            const adjustedContracts = Math.max(1, Math.floor(contracts * (opp.intelligenceSizeMultiplier || 1)));
+            await executeOptionsTrade(userId, opp, opp.strategy, adjustedContracts);
             tradesExecuted++;
+            selectedSymbols.add(opp.symbol);
         }
         
         logger.info('[Options Bot] Scan complete', { 

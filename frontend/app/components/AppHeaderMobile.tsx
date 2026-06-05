@@ -6,6 +6,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import StockSearch from './StockSearch';
 import ThemeToggle from './ThemeToggle';
 import { clearAuthToken } from '../utils/session';
+import { useNotifications } from '../contexts/NotificationContext';
 
 interface AppHeaderProps {
     onSelectStock?: (symbol: string) => void;
@@ -16,6 +17,7 @@ interface AppHeaderProps {
 const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true, symbols = [] }) => {
     const pathname = usePathname();
     const router = useRouter();
+    const { popupUnreadCount } = useNotifications();
     const [user, setUser] = useState<any>(null);
     const [marketStatus, setMarketStatus] = useState<'open' | 'closed' | 'pre-market' | 'after-hours'>('closed');
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -88,6 +90,20 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
         { href: '/scenarios', label: 'Scenarios', icon: '🎯' },
     ];
 
+    const renderBadge = (count: number) => {
+        if (!count) {
+            return null;
+        }
+
+        return (
+            <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-red-500 px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
+                {count > 99 ? '99+' : count}
+            </span>
+        );
+    };
+
+    const getNavBadge = (href: string) => href === '/alerts' ? popupUnreadCount : 0;
+
     return (
         <>
             {/* Professional Header - Mobile Optimized */}
@@ -147,19 +163,33 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
                         </div>
 
                         {/* Mobile Menu Button */}
-                        <button
-                            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-                            className="lg:hidden p-2 text-white hover:bg-gray-700 rounded-lg transition-colors touch-manipulation"
-                            aria-label="Toggle menu"
-                        >
-                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                {mobileMenuOpen ? (
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                                ) : (
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                        <div className="lg:hidden flex items-center gap-1">
+                            <Link
+                                href="/alerts"
+                                className="relative p-2 text-white hover:bg-gray-700 rounded-lg transition-colors touch-manipulation"
+                                aria-label="Open alerts"
+                            >
+                                <span className="text-lg">🔔</span>
+                                {popupUnreadCount > 0 && (
+                                    <span className="absolute -right-1 -top-1 inline-flex min-w-5 items-center justify-center rounded-full bg-red-500 px-1 py-0.5 text-[10px] font-bold leading-none text-white">
+                                        {popupUnreadCount > 99 ? '99+' : popupUnreadCount}
+                                    </span>
                                 )}
-                            </svg>
-                        </button>
+                            </Link>
+                            <button
+                                onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                                className="p-2 text-white hover:bg-gray-700 rounded-lg transition-colors touch-manipulation"
+                                aria-label="Toggle menu"
+                            >
+                                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    {mobileMenuOpen ? (
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                    ) : (
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                                    )}
+                                </svg>
+                            </button>
+                        </div>
                     </div>
                 </div>
             </header>
@@ -180,6 +210,7 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
                             >
                                 <span>{item.icon}</span>
                                 <span>{item.label}</span>
+                                {renderBadge(getNavBadge(item.href))}
                             </Link>
                         ))}
                     </div>
@@ -199,7 +230,14 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
                                     : 'text-gray-400 active:bg-gray-800'
                             }`}
                         >
-                            <span className="text-xl">{item.icon}</span>
+                            <span className="relative text-xl">
+                                {item.icon}
+                                {getNavBadge(item.href) > 0 && (
+                                    <span className="absolute -right-3 -top-2 inline-flex min-w-4 items-center justify-center rounded-full bg-red-500 px-1 py-0.5 text-[9px] font-bold leading-none text-white">
+                                        {getNavBadge(item.href) > 9 ? '9+' : getNavBadge(item.href)}
+                                    </span>
+                                )}
+                            </span>
                             <span className="text-[10px] font-medium">{item.label.split(' ')[0]}</span>
                         </Link>
                     ))}
@@ -268,6 +306,7 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
                                     >
                                         <span className="text-xl">{item.icon}</span>
                                         <span>{item.label}</span>
+                                        {renderBadge(getNavBadge(item.href))}
                                     </Link>
                                 ))}
                             </nav>

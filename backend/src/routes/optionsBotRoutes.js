@@ -298,12 +298,29 @@ router.get('/performance', async (req, res) => {
  */
 router.post('/manual-scan', async (req, res) => {
     try {
-        // Run bot manually for this user
-        await autonomousOptionsBot.executeAutonomousOptionsTrading(req.userId);
-        
+        await optionsBotScheduler.manualTrigger(req.userId);
         res.json({ success: true, message: 'Manual scan completed' });
     } catch (error) {
         console.error('[Options Bot API] Error in manual scan:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * POST /api/options-bot/prewarm-cache
+ * Manually trigger pre-market options chain collection.
+ * Fetches all universe symbols and stores in DB so market-hours scans
+ * read from local DB instead of hitting Yahoo Finance live.
+ */
+router.post('/prewarm-cache', async (req, res) => {
+    try {
+        // Fire-and-forget — collection takes ~20s, respond immediately
+        optionsBotScheduler.collectOptionsChains().catch(err =>
+            console.error('[Options Bot API] Prewarm error:', err.message)
+        );
+        res.json({ success: true, message: 'Options chain prewarm started — results sent via Telegram' });
+    } catch (error) {
+        console.error('[Options Bot API] Error starting prewarm:', error);
         res.status(500).json({ error: error.message });
     }
 });

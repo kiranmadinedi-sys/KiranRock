@@ -3,7 +3,7 @@
 import { getApiBaseUrl } from '../config';
 
 import { useState, useEffect } from 'react';
-import AppHeader from '../components/AppHeader';
+
 import StockSearch from '../components/StockSearch';
 
 interface ScalpingOpportunity {
@@ -151,7 +151,7 @@ export default function ScalpingPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-gray-100 dark:from-gray-900 dark:via-slate-900 dark:to-gray-900">
-      <AppHeader showSearch={false} />
+
       <div className="max-w-7xl mx-auto px-4 sm:px-6">
         {/* Scalping Criteria Section */}
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 mb-6">

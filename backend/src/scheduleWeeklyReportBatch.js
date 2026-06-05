@@ -1,6 +1,6 @@
 const cron = require('node-cron');
 const telegramLogger = require('./telegramLogger');
-const users = require('../users.json');
+const { getAllTelegramRecipients } = require('./services/telegramService');
 const axios = require('axios');
 
 /**
@@ -10,8 +10,8 @@ async function getWeeklyReport() {
   try {
     // Step 1: Login to get JWT token
     const loginRes = await axios.post('http://localhost:3001/api/auth/login', {
-      username: 'user',
-      password: 'password'
+      username: process.env.BOT_USERNAME || 'user',
+      password: process.env.BOT_PASSWORD || 'password'
     });
     const token = loginRes.data.token;
     if (!token) throw new Error('No token received from login');
@@ -67,8 +67,7 @@ async function sendReportToTelegram() {
   try {
     const report = await getWeeklyReport();
     
-    // Find all users with phone numbers (Telegram configured)
-    const telegramUsers = users.filter(u => u.phone);
+    const telegramUsers = await getAllTelegramRecipients();
     
     if (telegramUsers.length === 0) {
       console.log('[Weekly Report Batch] No users with Telegram configured');
@@ -77,10 +76,12 @@ async function sendReportToTelegram() {
     
     console.log(`[Weekly Report Batch] Sending to ${telegramUsers.length} user(s)...`);
     
-    // Send to Telegram
-    // Using the chat_id from environment variable
-    // Default to personal chat (8574952938) if group chat not available
-    const chatId = process.env.TELEGRAM_CHAT_ID || '8574952938';
+    const chatId = process.env.TELEGRAM_CHAT_ID;
+
+    if (!chatId) {
+      console.warn('[Weekly Report Batch] TELEGRAM_CHAT_ID is not configured. Skipping Telegram send.');
+      return;
+    }
     
     console.log(`[Weekly Report Batch] Attempting to send to chat ID: ${chatId}`);
     console.log(`[Weekly Report Batch] Report length: ${report.length} characters`);

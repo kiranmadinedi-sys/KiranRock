@@ -1,6 +1,5 @@
 const axios = require('axios');
-const { sendTelegramMessage } = require('../src/services/telegramService');
-const users = require('../users.json');
+const { sendTelegramMessage, getPrimaryTelegramRecipient } = require('../src/services/telegramService');
 
 async function login() {
   const res = await axios.post('http://localhost:3001/api/auth/login', {
@@ -44,8 +43,9 @@ function buildPartialReport(predictionsData) {
   const now = new Date();
   const dateStr = now.toLocaleString('en-US');
   let report = `📊 WEEKLY REPORT (Partial)\nGenerated: ${dateStr}\n\n`;
-  if (predictionsData && predictionsData.predictions && predictionsData.predictions.length > 0) {
-    const picks = predictionsData.predictions.slice(0, 5);
+  const reportPicks = predictionsData?.topPicks || predictionsData?.predictions || [];
+  if (reportPicks.length > 0) {
+    const picks = reportPicks.slice(0, 5);
     report += `Top ${picks.length} available picks (partial):\n`;
     picks.forEach((p, i) => {
       report += `${i + 1}. ${p.symbol} - ${p.prediction?.signal || 'N/A'} | Current: $${p.currentPrice || 'N/A'} | Target: ${p.prediction?.targetPrice || 'N/A'}\n`;
@@ -74,15 +74,14 @@ async function forceSend() {
 
     const report = buildPartialReport(data);
 
-    // Send to the configured user's phone (same logic as main sender)
-    const user = users.find(u => u.username === 'user' && u.phone);
-    if (!user) {
-      console.error('[Send] No user with phone found in users.json');
+    const user = await getPrimaryTelegramRecipient('user');
+    if (!user || (!user.telegram_chat_id && !user.phone && !user.username && !user.id)) {
+      console.error('[Send] No Telegram recipient found for username "user" in PostgreSQL');
       return;
     }
 
     console.log('[Send] Sending report to Telegram (may throw if bot not configured)');
-    await sendTelegramMessage(user.phone, report, { parse_mode: 'Markdown' });
+    await sendTelegramMessage(user.telegram_chat_id || user.id || user.username || user.phone, report, { parse_mode: 'Markdown' });
     console.log('[Send] ✅ Forced report sent to Telegram');
   } catch (err) {
     console.error('[ForceSend] Failed:', err.message || err);

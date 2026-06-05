@@ -17,6 +17,59 @@ const {
     calculateATR
 } = require('./technicalIndicators');
 
+const VIX_CACHE_TTL_MS = 30 * 60 * 1000;
+const VIX_FAILURE_COOLDOWN_MS = 15 * 60 * 1000;
+
+let inFlightVixRequest = null;
+let lastKnownVix = null;
+let lastSuccessfulVixFetchAt = 0;
+let lastFailedVixFetchAt = 0;
+
+async function getCachedVixLevel() {
+    const now = Date.now();
+    const cachedVix = cacheService.get('macro:^VIX:value');
+
+    if (typeof cachedVix === 'number') {
+        lastKnownVix = cachedVix;
+        lastSuccessfulVixFetchAt = now;
+        return cachedVix;
+    }
+
+    if (lastKnownVix !== null && (now - lastSuccessfulVixFetchAt) < VIX_CACHE_TTL_MS) {
+        return lastKnownVix;
+    }
+
+    if (inFlightVixRequest) {
+        return inFlightVixRequest;
+    }
+
+    if ((now - lastFailedVixFetchAt) < VIX_FAILURE_COOLDOWN_MS) {
+        return lastKnownVix;
+    }
+
+    inFlightVixRequest = (async () => {
+        try {
+            const vixQuote = await stockDataService.getCurrentPrice('^VIX');
+            if (typeof vixQuote === 'number') {
+                lastKnownVix = vixQuote;
+                lastSuccessfulVixFetchAt = Date.now();
+                cacheService.set('macro:^VIX:value', vixQuote, VIX_CACHE_TTL_MS);
+                return vixQuote;
+            }
+
+            lastFailedVixFetchAt = Date.now();
+            return lastKnownVix;
+        } catch (error) {
+            lastFailedVixFetchAt = Date.now();
+            return lastKnownVix;
+        } finally {
+            inFlightVixRequest = null;
+        }
+    })();
+
+    return inFlightVixRequest;
+}
+
 /**
  * Calculate EMA
  */
@@ -63,8 +116,7 @@ const getEnhancedSignals = async (symbol, interval = '1d', options = {}) => {
     }
     
     // Fetch VIX
-    const vixQuote = await stockDataService.getCurrentPrice('^VIX');
-    const vix = typeof vixQuote === 'number' ? vixQuote : null;
+    const vix = await getCachedVixLevel();
     
     // Calculate all indicators
     const emaShort = calculateEMA(data, shortPeriod);

@@ -89,7 +89,10 @@ function getCacheEntry(cache, scopeKey) {
 }
 
 /**
- * Fetch news from Yahoo Finance for a specific ticker
+ * Fetch news from Yahoo Finance for a specific ticker.
+ * Only articles where the title or Yahoo's own relatedTickers field
+ * actually references the symbol are tagged with that ticker.
+ * Unrelated articles are returned as general market news (tickers: []).
  */
 async function fetchYahooNews(symbol) {
     try {
@@ -106,16 +109,30 @@ async function fetchYahooNews(symbol) {
         });
 
         if (response.data && response.data.news) {
-            return response.data.news.map(item => ({
-                headline: item.title,
-                source: item.publisher || 'Yahoo Finance',
-                published_at: new Date(item.providerPublishTime * 1000).toISOString(),
-                url: item.link,
-                tickers: [symbol],
-                category: 'company',
-                sentiment: 0, // Neutral by default
-                thumbnail: item.thumbnail?.resolutions?.[0]?.url || null
-            }));
+            const symUpper = symbol.toUpperCase();
+            const symLower = symbol.toLowerCase();
+            return response.data.news.map(item => {
+                const title = (item.title || '').toLowerCase();
+                // High confidence: Yahoo's own ticker list mentions the symbol
+                const inYahooTickers = Array.isArray(item.relatedTickers)
+                    && item.relatedTickers.some(t => t.toUpperCase() === symUpper);
+                // Medium confidence: title mentions the ticker by name or with $ prefix
+                const inTitle = title.includes('$' + symLower) || title.includes(symLower + ' stock')
+                    || title.includes(symLower + ' shares') || title.includes(symLower + ' earnings');
+                // Assign ticker only when we have real evidence; otherwise treat as market news
+                const tickers = (inYahooTickers || inTitle) ? [symbol] : [];
+                return {
+                    headline: item.title,
+                    source: item.publisher || 'Yahoo Finance',
+                    published_at: new Date(item.providerPublishTime * 1000).toISOString(),
+                    url: item.link,
+                    tickers,
+                    tickerConfidence: inYahooTickers ? 'high' : inTitle ? 'medium' : 'none',
+                    category: tickers.length ? 'company' : 'macro',
+                    sentiment: 0, // Neutral by default
+                    thumbnail: item.thumbnail?.resolutions?.[0]?.url || null
+                };
+            });
         }
     } catch (error) {
         console.error(`Error fetching Yahoo Finance news for ${symbol}:`, error.message);
@@ -327,6 +344,15 @@ async function fetchFinnhubNews(category = 'general') {
 function calculateMarketImpact(newsItem) {
     let impact = 1; // Default medium impact
 
+    // X/Twitter posts: boost by engagement (viral posts move markets)
+    if (newsItem.source === 'X' && newsItem.engagement) {
+        if (newsItem.engagement > 5000)      impact = 5;
+        else if (newsItem.engagement > 1000) impact = 4;
+        else if (newsItem.engagement > 100)  impact = 3;
+        else                                 impact = 2;
+        return impact;
+    }
+
     // High impact categories
     if (newsItem.category === 'macro' || newsItem.category === 'rates') {
         impact = 3;
@@ -411,14 +437,17 @@ async function aggregateAllNews(tickers = null) {
             });
         }
 
-        // Optional X/Twitter source
+        // X/Twitter — single market-wide search per cycle to stay within free tier (1 req/15 min)
         if (isXConfigured()) {
-            fetchPromises.push(fetchXMarketNews());
-            if (tickers && Array.isArray(tickers)) {
-                tickers.slice(0, 5).forEach(ticker => {
-                    fetchPromises.push(fetchXSymbolNews(ticker));
-                });
-            }
+            fetchPromises.push(
+                fetchXMarketNews().then(posts =>
+                    posts.map(p => ({
+                        ...p,
+                        category: p.tickers && p.tickers.length > 0 ? 'company' : 'macro',
+                        tickers: p.tickers || []
+                    }))
+                ).catch(() => [])
+            );
         }
 
         // Fetch from paid APIs if configured

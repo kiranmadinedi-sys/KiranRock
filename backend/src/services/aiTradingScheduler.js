@@ -1,6 +1,7 @@
 const { query } = require('../config/database');
 const aiTradingBotService = require('./aiTradingBotService');
-const tradingService = require('./tradingService');
+const brokerService = require('./brokerService');
+const tradingServiceDB = require('./tradingServiceDB');
 const userProfileService = require('./userProfileService');
 
 const CHECK_INTERVAL = 5 * 60 * 1000; // 5 minutes
@@ -99,7 +100,7 @@ async function checkStopLossAndTakeProfit(userId) {
         for (const holding of holdingsResult.rows) {
             try {
                 // Get current price
-                const currentPrice = await tradingService.getCurrentPrice(holding.symbol);
+                const currentPrice = await tradingServiceDB.getCurrentPrice(holding.symbol);
                 if (!currentPrice) continue;
                 
                 const purchasePrice = parseFloat(holding.average_price);
@@ -140,18 +141,22 @@ async function checkStopLossAndTakeProfit(userId) {
                 if (shouldSell) {
                     console.log(`[AI Scheduler] ${reason} for ${holding.symbol} - Selling ${holding.quantity} shares`);
                     
-                    const result = await tradingService.executeSellOrder(userId, holding.symbol, parseInt(holding.quantity));
+                    const quantity = parseInt(holding.quantity, 10);
+                    const result = await brokerService.sellMarket(userId, holding.symbol, quantity, {
+                        executedBy: 'AI_SCHEDULER',
+                        reason
+                    });
                     
                     await userProfileService.logAIDecision(userId, {
                         action: 'AUTO_SELL',
                         symbol: holding.symbol,
-                        quantity: parseInt(holding.quantity),
-                        price: result.trade.price,
+                        quantity,
+                        price: result.filledAvgPrice,
                         reason: reason,
                         purchasePrice: purchasePrice,
                         currentPrice: currentPrice,
                         peakPrice: peakPrice,
-                        profitLoss: result.profitLoss,
+                        profitLoss: (result.filledAvgPrice - purchasePrice) * quantity,
                         profitLossPercent: changePercent * 100
                     });
                 }

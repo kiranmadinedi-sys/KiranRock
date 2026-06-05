@@ -3,7 +3,7 @@
 import { getApiBaseUrl } from '../config';
 
 import { useState } from 'react';
-import AppHeader from '../components/AppHeader';
+
 
 interface ScenarioResult {
   scenario: string;
@@ -263,7 +263,6 @@ export default function ScenariosPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-gray-100 dark:from-gray-900 dark:via-slate-900 dark:to-gray-900">
-      <AppHeader showSearch={false} />
       <div className="max-w-7xl mx-auto p-6">
         <div className="mb-8">
           <h1 className="text-4xl font-bold text-gray-900 dark:text-white mb-2">

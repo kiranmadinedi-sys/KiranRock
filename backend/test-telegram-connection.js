@@ -1,6 +1,12 @@
 const TelegramBot = require('node-telegram-bot-api');
 
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8520099950:AAFAAZrQCEK9B6wARjpoYDiqP3zNsaMz52Q';
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TEST_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+if (!TELEGRAM_BOT_TOKEN) {
+    console.error('TELEGRAM_BOT_TOKEN is not set. Export it before running this script.');
+    process.exit(1);
+}
 
 async function testConnection() {
     console.log('🔍 Testing Telegram Bot Connection...\n');
@@ -36,20 +42,23 @@ async function testConnection() {
         
         // Test 3: Send test message
         console.log('\n📨 Test 3: Sending test message...');
-        const chatId = '-1003406286106'; // TradePro supergroup
-        const testMessage = '🧪 *Test Message*\n\nConnection test from KiranRock backend.\n\nTimestamp: ' + new Date().toISOString();
-        
-        try {
-            await bot.sendMessage(chatId, testMessage, { 
-                parse_mode: 'Markdown',
-                disable_web_page_preview: true 
-            });
-            console.log('✓ Test message sent successfully');
-        } catch (sendError) {
-            console.error('✗ Failed to send message:', sendError.message);
-            if (sendError.response) {
-                console.error('   Response:', sendError.response.body);
+        if (TEST_CHAT_ID) {
+            const testMessage = '🧪 *Test Message*\n\nConnection test from KiranRock backend.\n\nTimestamp: ' + new Date().toISOString();
+
+            try {
+                await bot.sendMessage(TEST_CHAT_ID, testMessage, {
+                    parse_mode: 'Markdown',
+                    disable_web_page_preview: true
+                });
+                console.log(`✓ Test message sent successfully to ${TEST_CHAT_ID}`);
+            } catch (sendError) {
+                console.error('✗ Failed to send message:', sendError.message);
+                if (sendError.response) {
+                    console.error('   Response:', sendError.response.body);
+                }
             }
+        } else {
+            console.log('⚠️  TELEGRAM_CHAT_ID not set. Skipping send-message test.');
         }
         
         console.log('\n✅ All tests completed!');

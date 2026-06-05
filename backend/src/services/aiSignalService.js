@@ -9,7 +9,7 @@ const cacheService = require('./cacheService');
  */
 const calculateEMA = (data, period) => {
     const ema = [];
-    if (data.length < period) {
+    if (!data || data.length < period) {
         return ema;
     }
     const multiplier = 2 / (period + 1);

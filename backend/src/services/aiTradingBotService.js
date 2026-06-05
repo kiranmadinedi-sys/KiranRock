@@ -1,10 +1,12 @@
-const YahooFinance = require('yahoo-finance2').default;
-const yahooFinance = new YahooFinance();
-const tradingService = require('./tradingService');
+const dataProvider = require('./dataProvider');
+const brokerService = require('./brokerService');
+const tradingServiceDB = require('./tradingServiceDB');
 const tradingAccountService = require('./tradingAccountService');
 const portfolioTrackingService = require('./portfolioTrackingService');
+const userProfileService = require('./userProfileService');
 const { query } = require('../config/database');
 const { getNewsSentiment } = require('./newsSentimentService');
+const precomputedUniverseService = require('./precomputedUniverseService');
 
 /**
  * AI Trading Bot Service
@@ -39,18 +41,11 @@ const DEFAULT_STRATEGY_CONFIG = {
 // Helper to get user-specific AI trading settings
 async function getUserStrategyConfig(userId) {
     try {
-        const result = await query(
-            'SELECT ai_trading_settings FROM users WHERE id = $1',
-            [userId]
-        );
-        
-        if (result.rows.length > 0 && result.rows[0].ai_trading_settings) {
-            return {
-                ...DEFAULT_STRATEGY_CONFIG,
-                ...result.rows[0].ai_trading_settings
-            };
-        }
-        return DEFAULT_STRATEGY_CONFIG;
+        const settings = await userProfileService.getAITradingSettings(userId);
+        return {
+            ...DEFAULT_STRATEGY_CONFIG,
+            ...settings
+        };
     } catch (err) {
         console.error('Error getting user strategy config:', err);
         return DEFAULT_STRATEGY_CONFIG;
@@ -90,19 +85,16 @@ function calcNewsSentimentImpact(sentimentData) {
  */
 async function analyzeStock(symbol, vixData = null, preloadedSentiment = null) {
     try {
-        // Use quoteSummary instead of quote
-        const result = await yahooFinance.quoteSummary(symbol, {
-            modules: ['price', 'summaryDetail']
-        });
-        
-        if (!result || !result.price || !result.price.regularMarketPrice) {
+        const q = await dataProvider.getQuote(symbol);
+
+        if (!q || !q.price) {
             return null;
         }
 
-        const currentPrice = result.price.regularMarketPrice;
-        const change = result.price.regularMarketChangePercent || 0;
-        const volume = result.price.regularMarketVolume || 0;
-        const avgVolume = result.summaryDetail?.averageDailyVolume10Day || volume;
+        const currentPrice = q.price;
+        const change = q.changePercent || 0; // already in percent (e.g. 2.34 = +2.34%)
+        const volume = q.volume || 0;
+        const avgVolume = q.avgVolume || volume;
 
         // Enhanced momentum score with better weighting
         const momentumScore = change > 2 ? 1 : change > 0.5 ? 0.7 : change > 0 ? 0.4 : change > -2 ? -0.3 : -1;
@@ -202,6 +194,7 @@ async function analyzeStock(symbol, vixData = null, preloadedSentiment = null) {
 
 /**
  * Generate AI-powered portfolio allocation.
+ * Uses nightly scan results instead of hardcoded stock list.
  * Pre-fetches news sentiment for all candidate stocks in parallel.
  */
 async function generatePortfolioAllocation(userId, availableBalance) {
@@ -209,20 +202,48 @@ async function generatePortfolioAllocation(userId, availableBalance) {
     const strategyConfig = await getUserStrategyConfig(userId);
     const investmentAmount = availableBalance * (1 - strategyConfig.minCashReserve);
 
+    // Check if nightly scan results are available
+    const hasPrecomputedData = await precomputedUniverseService.isAvailable(5);
+
+    let candidateStocks;
+    if (hasPrecomputedData) {
+        // Use nightly scan results (STRONG BUY/BUY stocks with score >= 75)
+        candidateStocks = await precomputedUniverseService.loadCandidates({
+            minScore: 75,
+            limit: 20
+        });
+        console.log(`[AI Bot] Using ${candidateStocks.length} stocks from nightly scan`);
+    } else {
+        // Fallback to hardcoded list if nightly scan not available
+        candidateStocks = AI_RECOMMENDED_STOCKS.map(s => ({
+            symbol: s.symbol,
+            sector: s.sector,
+            weight: s.weight,
+            _precomputedScore: 75
+        }));
+        console.log(`[AI Bot] Nightly scan unavailable, using ${candidateStocks.length} fallback stocks`);
+    }
+
     // Pre-fetch sentiment for all candidate symbols in parallel
-    const symbols = AI_RECOMMENDED_STOCKS.map(s => s.symbol);
+    const symbols = candidateStocks.map(s => s.symbol);
     const sentimentMap = {};
     const sentimentResults = await Promise.allSettled(symbols.map(sym => getNewsSentiment(sym)));
     sentimentResults.forEach((res, i) => {
         sentimentMap[symbols[i]] = res.status === 'fulfilled' ? res.value : null;
     });
 
-    for (const stock of AI_RECOMMENDED_STOCKS) {
+    // Calculate dynamic weights based on AI scores from nightly scan
+    const totalScore = candidateStocks.reduce((sum, stock) => sum + (stock._precomputedScore || 75), 0);
+
+    for (const stock of candidateStocks) {
         const analysis = await analyzeStock(stock.symbol, null, sentimentMap[stock.symbol]);
 
         // Only buy stocks with strong signals (BUY or STRONG BUY)
         if (analysis && (analysis.recommendation === 'BUY' || analysis.recommendation === 'STRONG BUY') && analysis.aiScore >= 60) {
-            const targetAmount = investmentAmount * stock.weight;
+            // Dynamic weight based on precomputed score, with max 20% per position
+            const scoreWeight = (stock._precomputedScore || 75) / totalScore;
+            const dynamicWeight = Math.min(scoreWeight, strategyConfig.maxPositionSize);
+            const targetAmount = investmentAmount * dynamicWeight;
             const shares = Math.floor(targetAmount / analysis.price);
 
             if (shares > 0) {
@@ -238,7 +259,8 @@ async function generatePortfolioAllocation(userId, availableBalance) {
                     newsSentiment: analysis.newsSentiment,
                     newsSentimentImpact: analysis.newsSentimentImpact,
                     sector: stock.sector,
-                    weight: stock.weight
+                    weight: dynamicWeight,
+                    precomputedScore: stock._precomputedScore
                 });
             }
         }
@@ -269,10 +291,12 @@ async function initializeAIPortfolio(userId) {
         // Execute buy orders
         for (const allocation of allocations) {
             try {
-                const result = await tradingService.executeBuyOrder(
+                const result = await executeLegacyAIBuyOrder(
                     userId,
                     allocation.symbol,
-                    allocation.targetShares
+                    allocation.targetShares,
+                    allocation.aiScore,
+                    allocation.sector
                 );
                 
                 executedTrades.push({
@@ -325,6 +349,29 @@ async function rebalancePortfolio(userId) {
             return await initializeAIPortfolio(userId);
         }
 
+        // Get current target stocks from nightly scan
+        const hasPrecomputedData = await precomputedUniverseService.isAvailable(5);
+        let candidateStocks = [];
+        let targetWeightMap = {};
+
+        if (hasPrecomputedData) {
+            candidateStocks = await precomputedUniverseService.loadCandidates({
+                minScore: 70,
+                limit: 30
+            });
+            // Calculate dynamic weights based on precomputed scores
+            const totalScore = candidateStocks.reduce((sum, stock) => sum + (stock._precomputedScore || 75), 0);
+            candidateStocks.forEach(stock => {
+                const scoreWeight = (stock._precomputedScore || 75) / totalScore;
+                targetWeightMap[stock.symbol] = Math.min(scoreWeight, strategyConfig.maxPositionSize);
+            });
+        } else {
+            // Fallback to hardcoded weights
+            AI_RECOMMENDED_STOCKS.forEach(stock => {
+                targetWeightMap[stock.symbol] = stock.weight;
+            });
+        }
+
         // Pre-fetch sentiment for all held symbols in parallel
         const heldSymbols = currentHoldings.map(h => h.symbol);
         const sentimentMap = {};
@@ -343,8 +390,7 @@ async function rebalancePortfolio(userId) {
 
             // Calculate current position percentage
             const currentWeight = (holding.marketValue || 0) / totalValue;
-            const targetStock = AI_RECOMMENDED_STOCKS.find(s => s.symbol === holding.symbol);
-            const targetWeight = targetStock ? targetStock.weight : 0;
+            const targetWeight = targetWeightMap[holding.symbol] || 0;
 
             // Check stop loss
             const profitLossPercent = holding.unrealizedPLPercent || 0;
@@ -463,9 +509,9 @@ async function rebalancePortfolio(userId) {
             try {
                 let result;
                 if (action.action === 'BUY') {
-                    result = await tradingService.executeBuyOrder(userId, action.symbol, action.quantity);
+                    result = await executeLegacyAIBuyOrder(userId, action.symbol, action.quantity, action.aiScore || null, action.sector || null);
                 } else {
-                    result = await tradingService.executeSellOrder(userId, action.symbol, action.quantity);
+                    result = await executeLegacyAISellOrder(userId, action.symbol, action.quantity, action.reason || null);
                 }
                 
                 executedActions.push({
@@ -495,20 +541,51 @@ async function rebalancePortfolio(userId) {
 }
 
 /**
- * Get AI trading recommendations
+ * Get AI trading recommendations using nightly scan results
  */
 async function getAIRecommendations(userId) {
     try {
         const recommendations = [];
-        
         const strategyConfig = await getUserStrategyConfig(userId);
-        for (const stock of AI_RECOMMENDED_STOCKS) {
+
+        // Check if nightly scan results are available
+        const hasPrecomputedData = await precomputedUniverseService.isAvailable(5);
+
+        let candidateStocks;
+        if (hasPrecomputedData) {
+            // Use nightly scan results
+            candidateStocks = await precomputedUniverseService.loadCandidates({
+                minScore: 70,
+                limit: 30
+            });
+            console.log(`[AI Recommendations] Using ${candidateStocks.length} stocks from nightly scan`);
+        } else {
+            // Fallback to hardcoded list
+            candidateStocks = AI_RECOMMENDED_STOCKS.map(s => ({
+                symbol: s.symbol,
+                sector: s.sector,
+                weight: s.weight,
+                _precomputedScore: 75
+            }));
+            console.log(`[AI Recommendations] Nightly scan unavailable, using ${candidateStocks.length} fallback stocks`);
+        }
+
+        // Calculate total score for dynamic weight calculation
+        const totalScore = candidateStocks.reduce((sum, stock) => sum + (stock._precomputedScore || 75), 0);
+
+        for (const stock of candidateStocks) {
             const analysis = await analyzeStock(stock.symbol);
             if (analysis) {
+                // Dynamic weight based on precomputed score
+                const scoreWeight = (stock._precomputedScore || 75) / totalScore;
+                const dynamicWeight = Math.min(scoreWeight, strategyConfig.maxPositionSize);
+
                 recommendations.push({
                     ...analysis,
-                    targetWeight: stock.weight,
-                    sector: stock.sector
+                    targetWeight: dynamicWeight,
+                    sector: stock.sector,
+                    precomputedScore: stock._precomputedScore,
+                    sourceData: hasPrecomputedData ? 'nightly_scan' : 'fallback_list'
                 });
             }
         }
@@ -524,6 +601,8 @@ async function getAIRecommendations(userId) {
                 stopLoss: strategyConfig.stopLoss * 100 + '%',
                 takeProfit: strategyConfig.takeProfit * 100 + '%'
             },
+            dataSource: hasPrecomputedData ? 'nightly_scan' : 'fallback_list',
+            candidatesAnalyzed: candidateStocks.length,
             timestamp: new Date()
         };
     } catch (error) {
@@ -561,6 +640,37 @@ async function getAIPortfolioStatus(userId) {
     } catch (error) {
         throw new Error(`Failed to get AI portfolio status: ${error.message}`);
     }
+}
+
+async function executeLegacyAIBuyOrder(userId, symbol, quantity, aiScore = null, sector = null) {
+    const result = await brokerService.buyMarket(userId, symbol.toUpperCase(), quantity, {
+        executedBy: 'AI_BOT',
+        aiScore,
+        sector
+    });
+
+    return {
+        price: result.filledAvgPrice,
+        total: result.total ?? ((result.filledAvgPrice || 0) * quantity),
+        broker: result.broker,
+        orderId: result.orderId,
+        status: result.status
+    };
+}
+
+async function executeLegacyAISellOrder(userId, symbol, quantity, reason = null) {
+    const result = await brokerService.sellMarket(userId, symbol.toUpperCase(), quantity, {
+        executedBy: 'AI_BOT',
+        reason: reason || 'Legacy AI sell order'
+    });
+
+    return {
+        price: result.filledAvgPrice,
+        total: result.total ?? ((result.filledAvgPrice || 0) * quantity),
+        broker: result.broker,
+        orderId: result.orderId,
+        status: result.status
+    };
 }
 
 module.exports = {

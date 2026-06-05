@@ -1,5 +1,6 @@
 const axios = require('axios');
 const { logger } = require('../utils/logger');
+const wa = require('./whatsappAlertService'); // parallel WhatsApp channel — fire-and-forget
 
 /**
  * Telegram Alert Service
@@ -55,12 +56,59 @@ async function getUserTelegramChatId(userId) {
 }
 
 /**
+ * Send a plain message to a user's Telegram (used by scheduler & health check).
+ */
+async function sendMessage(userId, message) {
+    const chatId = await getUserTelegramChatId(userId);
+    if (!chatId) return false;
+    return sendTelegramMessage(chatId, message);
+}
+
+// 60-second cache: multiple alerts firing in the same event (BUY + stop-loss cascade)
+// would otherwise each hit the DB with the same holdings query.
+const _holdingsLineCache = new Map(); // userId → { line: string, expiresAt: number }
+
+/**
+ * Clears the holdings line cache for a user so the next alert reflects
+ * the current (post-sell) portfolio. Call this immediately after any sell.
+ */
+function invalidateHoldingsCache(userId) {
+    _holdingsLineCache.delete(userId);
+}
+
+/**
+ * Returns a formatted single line showing open holding symbols, e.g.
+ *   📦 Holdings: AAPL, MSFT, TSLA (3 open)
+ * Falls back silently to an empty string on any error.
+ */
+async function getHoldingsLine(userId) {
+    const cached = _holdingsLineCache.get(userId);
+    if (cached && Date.now() < cached.expiresAt) return cached.line;
+
+    const { query } = require('../config/database');
+    try {
+        const res = await query(
+            `SELECT symbol FROM holdings WHERE user_id = $1 AND quantity > 0 ORDER BY symbol`,
+            [userId]
+        );
+        const line = res.rows.length
+            ? `📦 Holdings: ${res.rows.map(r => r.symbol).join(', ')} (${res.rows.length} open)`
+            : '📦 Holdings: None';
+        _holdingsLineCache.set(userId, { line, expiresAt: Date.now() + 60_000 });
+        return line;
+    } catch (_) {
+        return '';
+    }
+}
+
+/**
  * Alert: Large Loss (>10%)
  */
 async function alertLargeLoss(userId, symbol, percentLoss, currentPrice, purchasePrice) {
     const chatId = await getUserTelegramChatId(userId);
     if (!chatId) return;
 
+    const holdingsLine = await getHoldingsLine(userId);
     const message = `
 🚨 *LARGE LOSS ALERT*
 
@@ -70,10 +118,12 @@ async function alertLargeLoss(userId, symbol, percentLoss, currentPrice, purchas
 📍 Purchase: $${purchasePrice.toFixed(2)}
 📊 Loss: ${percentLoss.toFixed(2)}%
 
+${holdingsLine}
 ⚠️ Consider reviewing your position
 `;
 
     await sendTelegramMessage(chatId, message);
+    wa.alertLargeLoss(symbol, percentLoss, currentPrice, purchasePrice).catch(() => {});
     logger.riskEvent('LARGE_LOSS', symbol, { percentLoss, currentPrice, purchasePrice });
 }
 
@@ -84,6 +134,7 @@ async function alertStopLossTriggered(userId, symbol, shares, sellPrice, loss) {
     const chatId = await getUserTelegramChatId(userId);
     if (!chatId) return;
 
+    const holdingsLine = await getHoldingsLine(userId);
     const message = `
 🛑 *STOP LOSS TRIGGERED*
 
@@ -92,10 +143,12 @@ Action: SOLD ${shares} shares
 Price: $${sellPrice.toFixed(2)}
 Loss: $${loss.toFixed(2)} (${((loss / (sellPrice * shares + loss)) * 100).toFixed(2)}%)
 
+${holdingsLine}
 ✅ Position closed to prevent further loss
 `;
 
     await sendTelegramMessage(chatId, message);
+    wa.alertStopLossTriggered(symbol, shares, sellPrice, loss).catch(() => {});
 }
 
 /**
@@ -105,6 +158,7 @@ async function alertTakeProfitExecuted(userId, symbol, shares, sellPrice, profit
     const chatId = await getUserTelegramChatId(userId);
     if (!chatId) return;
 
+    const holdingsLine = await getHoldingsLine(userId);
     const message = `
 🎯 *TAKE PROFIT EXECUTED*
 
@@ -113,10 +167,12 @@ Action: SOLD ${shares} shares
 Price: $${sellPrice.toFixed(2)}
 Profit: $${profit.toFixed(2)} (+${percentGain.toFixed(2)}%)
 
+${holdingsLine}
 🎉 Target reached!
 `;
 
     await sendTelegramMessage(chatId, message);
+    wa.alertTakeProfitExecuted(symbol, shares, sellPrice, profit, percentGain).catch(() => {});
 }
 
 /**
@@ -161,6 +217,7 @@ Will resume tomorrow at market open.
 `;
 
     await sendTelegramMessage(chatId, message);
+    wa.alertDailyLossLimitReached(dailyLoss).catch(() => {});
     logger.error('Daily loss limit reached', { userId, dailyLoss });
 }
 
@@ -193,11 +250,13 @@ async function alertTradingStarted(userId, balance, holdings) {
     const chatId = await getUserTelegramChatId(userId);
     if (!chatId) return;
 
+    const holdingsLine = await getHoldingsLine(userId);
     const message = `
 🤖 *AI TRADING STARTED*
 
 💰 Account Balance: $${balance.toFixed(2)}
-📊 Current Holdings: ${holdings} positions
+📊 Open Positions: ${holdings}
+${holdingsLine}
 ⏰ Time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })} ET
 
 ✅ Bot is analyzing market opportunities...
@@ -215,6 +274,7 @@ async function alertTradeExecuted(userId, action, symbol, shares, price, aiScore
 
     const emoji = action === 'BUY' ? '✅' : '📤';
     const total = shares * price;
+    const holdingsLine = await getHoldingsLine(userId);
 
     const message = `
 ${emoji} *TRADE EXECUTED*
@@ -225,10 +285,12 @@ Price: $${price.toFixed(2)}
 Total: $${total.toFixed(2)}
 AI Score: ${aiScore}/100
 
+${holdingsLine}
 ${reasoning ? `📝 ${reasoning}` : ''}
 `;
 
     await sendTelegramMessage(chatId, message);
+    wa.alertTradeExecuted(action, symbol, shares, price, aiScore, reasoning).catch(() => {});
 }
 
 /**
@@ -247,6 +309,7 @@ async function alertNoOpportunities(userId, scanned, vixLevel) {
         return;
     }
 
+    const holdingsLine = await getHoldingsLine(userId);
     const message = `
 ℹ️ *AI TRADING UPDATE*
 
@@ -254,6 +317,7 @@ async function alertNoOpportunities(userId, scanned, vixLevel) {
 🎯 Opportunities: 0
 📈 VIX: ${vixLevel.toFixed(2)}
 
+${holdingsLine}
 No qualifying opportunities at this time.
 Bot will continue monitoring.
 `;
@@ -272,6 +336,7 @@ async function alertDailySummary(userId, stats) {
     if (!chatId) return;
 
     const { trades, profitTrades, lossTrades, totalProfit, winRate, bestTrade, worstTrade } = stats;
+    const holdingsLine = await getHoldingsLine(userId);
 
     const message = `
 📊 *DAILY TRADING SUMMARY*
@@ -285,6 +350,7 @@ async function alertDailySummary(userId, stats) {
 🏆 Best: +$${bestTrade.toFixed(2)}
 📉 Worst: -$${Math.abs(worstTrade).toFixed(2)}
 
+${holdingsLine}
 ${totalProfit > 0 ? '🎉 Profitable day!' : totalProfit < 0 ? '💪 Tomorrow is another day' : '➡️ Break even'}
 `;
 
@@ -431,6 +497,139 @@ Max Positions: ${maxPositions}
 }
 
 /**
+ * Alert: Nightly universe scan failed or had low coverage.
+ */
+async function alertNightlyScanFailure(userId, { analyzed, universe, failed, reason }) {
+    const chatId = await getUserTelegramChatId(userId);
+    if (!chatId) return;
+
+    const coveragePct = universe > 0 ? ((analyzed / universe) * 100).toFixed(1) : '0';
+    const message = `
+🚨 *NIGHTLY SCAN WARNING*
+
+📊 Universe expected: ${universe}
+✅ Analyzed: ${analyzed} (${coveragePct}% coverage)
+❌ Failed: ${failed}
+
+${reason ? `Reason: ${reason}` : ''}
+
+⚠️ Market-hours scan may fall back to live analysis.
+Check server logs for details.
+`;
+    await sendTelegramMessage(chatId, message);
+}
+
+/**
+ * Alert: Edge Gate blocked all new entries for today (once per day).
+ */
+async function alertEdgeGateBlocked(userId, opportunityCount) {
+    const chatId = await getUserTelegramChatId(userId);
+    if (!chatId) return;
+
+    // Rate-limit to once per day — cycle runs every 30 min, no need to spam
+    const todayKey = `edge_gate_${userId}_${new Date().toDateString()}`;
+    if (!global._edgeGateAlerts) global._edgeGateAlerts = {};
+    if (global._edgeGateAlerts[todayKey]) return;
+    global._edgeGateAlerts[todayKey] = true;
+
+    const holdingsLine = await getHoldingsLine(userId);
+    const message = `
+ℹ️ *NO NEW TRADES TODAY*
+
+🔍 Scanned: ${opportunityCount} stocks
+🎯 STRONG BUY signals: 0
+
+All entries skipped — no high-conviction signal found.
+Bot continues monitoring and managing exits.
+
+${holdingsLine}
+`;
+    await sendTelegramMessage(chatId, message);
+}
+
+/**
+ * Alert: Distress mode lifted — normal stop-loss restored.
+ */
+async function alertDistressModeRecovery(userId) {
+    const chatId = await getUserTelegramChatId(userId);
+    if (!chatId) return;
+
+    const holdingsLine = await getHoldingsLine(userId);
+    const message = `
+✅ *DISTRESS MODE LIFTED*
+
+Portfolio stress has eased — fewer than 2 positions remain down >3%.
+Normal stop-loss (-7%) has been restored.
+
+${holdingsLine}
+Monitoring continues as usual.
+`;
+    await sendTelegramMessage(chatId, message);
+}
+
+/**
+ * Alert: Options signal entry — fired when the bot decides to buy a Call or Put.
+ * Shows the full directional thesis so the user understands WHY the trade was taken.
+ */
+async function alertOptionsSignalEntry(userId, details) {
+    const chatId = await getUserTelegramChatId(userId);
+    if (!chatId) return;
+
+    const {
+        symbol, stockPrice, momentum, score, regime,
+        optionType, strike, expiration, dte, price, contracts, totalCost,
+        delta, gamma, theta, ivRankLabel, ivRank, strategy
+    } = details;
+
+    const isBullish = (optionType || '').toUpperCase() === 'CALL';
+    const directionEmoji = isBullish ? '🟢' : '🔴';
+    const directionLabel = isBullish ? 'BULLISH CALL ENTRY' : 'BEARISH PUT ENTRY';
+    const momentumSign = momentum >= 0 ? '+' : '';
+
+    const ivLine = ivRankLabel === 'LOW'
+        ? `✅ IV LOW (Rank: ${ivRank != null ? ivRank.toFixed(0) : 'N/A'}) — cheap premium`
+        : ivRankLabel === 'HIGH'
+        ? `⚠️ IV HIGH (Rank: ${ivRank != null ? ivRank.toFixed(0) : 'N/A'}) — expensive premium`
+        : `📊 IV NORMAL (Rank: ${ivRank != null ? ivRank.toFixed(0) : 'N/A'})`;
+
+    const deltaLabel = Math.abs(delta) >= 0.60
+        ? `${Math.abs(delta).toFixed(3)} ← ITM, high conviction`
+        : `${Math.abs(delta).toFixed(3)} ← near ATM`;
+
+    const whyLine = isBullish
+        ? `Momentum ${momentumSign}${momentum.toFixed(1)}% + ${regime} regime → buying CALL`
+        : `Momentum ${momentumSign}${momentum.toFixed(1)}% + ${regime} regime → buying PUT`;
+
+    const message = `
+${directionEmoji} *${directionLabel} — ${symbol}*
+
+📊 *${symbol}* @ $${Number(stockPrice).toFixed(2)} (${momentumSign}${momentum.toFixed(1)}% today)
+🎯 Signal Score: *${Number(score).toFixed(0)}/100*
+📈 Regime: ${regime}
+
+*Contract:*
+Type: *${(optionType || '').toUpperCase()}*
+Strike: $${Number(strike).toFixed(2)}
+Expiry: ${expiration} (${dte} DTE)
+Price: $${Number(price).toFixed(2)}/contract
+
+📐 *Greeks at entry:*
+• Delta: ${deltaLabel}
+• Gamma: ${gamma.toFixed(3)}
+• Theta: ${theta.toFixed(3)}/day
+• ${ivLine}
+
+💡 *Why:* ${whyLine}
+📋 Strategy: ${strategy}
+
+Contracts: ${contracts} | Cost: $${Number(totalCost).toFixed(2)}
+`;
+
+    await sendTelegramMessage(chatId, message);
+    wa.alertOptionsSignalEntry(details).catch(() => {});
+}
+
+/**
  * Alert: High IV Rank Opportunity
  */
 async function alertHighIVRank(userId, symbol, ivRank, strategy) {
@@ -453,6 +652,9 @@ Recommended: ${strategy}
 
 module.exports = {
     sendTelegramMessage,
+    sendMessage,
+    getUserTelegramChatId,
+    invalidateHoldingsCache,
     alertLargeLoss,
     alertStopLossTriggered,
     alertTakeProfitExecuted,
@@ -463,7 +665,11 @@ module.exports = {
     alertTradeExecuted,
     alertNoOpportunities,
     alertDailySummary,
+    alertNightlyScanFailure,
+    alertEdgeGateBlocked,
+    alertDistressModeRecovery,
     // Options-specific alerts
+    alertOptionsSignalEntry,
     alertOptionsTradeExecuted,
     alertCreditSpreadExecuted,
     alertOptionsPositionClosed,

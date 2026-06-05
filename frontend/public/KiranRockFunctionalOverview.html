@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KiranRock AI Trading – Functional Overview</title>
+  <style>
+    body { font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #0f2027 0%, #2c5364 100%); color: #fff; margin: 0; padding: 0; }
+    .container { max-width: 800px; margin: 0 auto; padding: 24px; }
+    h1 { color: #00cfff; font-size: 2.2em; margin-bottom: 0.2em; }
+    h2 { color: #ffb300; margin-top: 1.5em; }
+    .section { margin-bottom: 2em; }
+    .video-container { position: relative; width: 100%; padding-bottom: 56.25%; margin: 1.5em 0; }
+    .video-container video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; border-radius: 12px; }
+    .avatar-box { display: flex; align-items: center; gap: 18px; margin: 1.5em 0; }
+    .avatar-box img { width: 100px; height: 100px; border-radius: 50%; box-shadow: 0 2px 8px #0004; }
+    .cta { background: #00cfff; color: #101820; padding: 16px 24px; border-radius: 8px; font-size: 1.2em; font-weight: bold; text-align: center; margin: 2em 0; }
+    .features-list, .why-list { list-style: none; padding: 0; }
+    .features-list li, .why-list li { margin-bottom: 0.7em; font-size: 1.08em; }
+    .why-list li:before { content: '★'; color: #00cfff; margin-right: 0.5em; }
+    .audio-box { margin: 1.5em 0; text-align: center; }
+    .tts-btn { background: #ffb300; color: #101820; font-size: 1.1em; font-weight: bold; padding: 10px 24px; border: none; border-radius: 24px; cursor: pointer; margin-top: 1em; }
+    .tts-btn:hover { background: #ff9100; }
+    #ttsStatus { color: #00cfff; font-size: 1em; min-height: 1.5em; margin-top: 0.5em; }
+    @media (max-width: 600px) {
+      .container { padding: 8px; }
+      h1 { font-size: 1.4em; }
+      h2 { font-size: 1.1em; }
+      .cta { font-size: 1em; padding: 12px 8px; }
+      .avatar-box img { width: 60px; height: 60px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>KiranRock AI Trading – Functional Overview</h1>
+    <div class="avatar-box">
+      <img id="avatarAnim" src="https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif" alt="Animated Male Avatar">
+      <button id="playPitchBtn" class="tts-btn">Play Executive Pitch</button>
+    </div>
+    <div id="ttsStatus"></div>
+    <div class="audio-box">
+      <audio controls style="width:100%;max-width:400px;">
+        <source src="/static/kiranrock-functional-overview.mp3" type="audio/mpeg">
+        Your browser does not support the audio element.
+      </audio>
+      <div style="font-size:0.95em;color:#aaa;margin-top:0.5em;">(Listen to the professional voiceover or use the Play Executive Pitch button above for instant narration.)</div>
+    </div>
+    <div class="section">
+      <h2>1. Executive Summary</h2>
+      <p>KiranRock AI Trading is an advanced, fully-automated trading platform leveraging a 5-tier market universe and real-time AI analysis to deliver institutional-grade trading intelligence to all users. The platform is designed for both desktop and mobile, with a focus on transparency, risk management, and user empowerment.</p>
+    </div>
+    <div class="section">
+      <h2>2. Key Features</h2>
+      <ul class="features-list">
+        <li><b>5-Tier Market Universe:</b> ETFs, mega-cap momentum, earnings watch, mid-cap breakouts, speculative/emerging.</li>
+        <li><b>Real-Time AI Analysis:</b> Scans the market every 5 minutes, scores and ranks stocks using technicals, news, and proprietary signals.</li>
+        <li><b>Smart Filtering & Risk Management:</b> Advanced pre-filters, automated stop-loss, sector allocation, position sizing, and circuit breakers.</li>
+        <li><b>User Experience:</b> Paper trading mode, live trading launch in 15 days, mobile-ready, executive presentation with video and narration.</li>
+      </ul>
+    </div>
+    <div class="section">
+      <h2>3. User Benefits</h2>
+      <ul class="why-list">
+        <li>AI-Powered Edge: Outperform traditional screening with institutional-grade intelligence.</li>
+        <li>Fully Automated: No manual intervention required; AI handles end-to-end trade selection and execution.</li>
+        <li>Transparency: Users can see every trade, score, and decision rationale.</li>
+        <li>Security: Strict risk controls and exposure limits.</li>
+        <li>Early Access Offers: Incentives for early adopters and priority onboarding.</li>
+      </ul>
+    </div>
+    <div class="section">
+      <h2>4. Technical Highlights</h2>
+      <ul class="features-list">
+        <li>Node.js backend with modular services for market screening, AI scoring, and trade execution.</li>
+        <li>Frontend supports public marketing pages and authenticated dashboards.</li>
+        <li>All enhancements are backward-compatible and additive—no breaking changes to architecture.</li>
+        <li>Presentation layer includes both video and TTS/voiceover for executive communication.</li>
+      </ul>
+    </div>
+    <div class="section">
+      <h2>5. Go-Live Plan</h2>
+      <ul class="features-list">
+        <li><b>Today:</b> Paper trading open to all users.</li>
+        <li><b>Next 15 Days:</b> User onboarding, feedback collection, and system tuning.</li>
+        <li><b>Go-Live:</b> Full live trading launch with exclusive offers for early users.</li>
+      </ul>
+    </div>
+    <div class="section">
+      <h2>6. Call to Action</h2>
+      <div class="cta">
+        Management is invited to review the live demo at:<br>
+        <a href="http://99.47.183.33:3000/KiranRockTrading.html" style="color:#005bea;">http://99.47.183.33:3000/KiranRockTrading.html</a><br>
+        For a hands-on walkthrough or to discuss business impact, contact the product team.
+      </div>
+    </div>
+  </div>
+  <script>
+    // --- Executive Pitch TTS with Animated Avatar ---
+    const pitchText = `KiranRock AI Trading is an advanced, fully-automated trading platform leveraging a 5-tier market universe and real-time AI analysis to deliver institutional-grade trading intelligence to all users. The platform is designed for both desktop and mobile, with a focus on transparency, risk management, and user empowerment. Key features include: 5-Tier Market Universe, real-time AI analysis, smart filtering and risk management, and a seamless user experience. Users benefit from an AI-powered edge, full automation, transparency, security, and early access offers. Technical highlights: Node.js backend, modular services, mobile-ready frontend, and executive presentation tools. Today, paper trading is open to all users. In 15 days, we go live with exclusive offers for early adopters. Management is invited to review the live demo and contact the product team for a walkthrough.`;
+    const playPitchBtn = document.getElementById('playPitchBtn');
+    const avatarAnim = document.getElementById('avatarAnim');
+    const ttsStatus = document.getElementById('ttsStatus');
+    let ttsUtterance = null;
+    let ttsActive = false;
+    function pickMaleVoice(voices) {
+      const preferred = voices.filter(v => v.lang.startsWith('en') && v.name.match(/(Male|David|Matthew|Joey|Justin|English)/i) && v.gender !== 'female');
+      return preferred[0] || voices.find(v => v.lang.startsWith('en') && v.gender !== 'female') || voices[0];
+    }
+    playPitchBtn.onclick = function() {
+      if (ttsActive && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+        ttsStatus.textContent = 'Pitch stopped.';
+        avatarAnim.src = 'https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif';
+        ttsActive = false;
+        playPitchBtn.textContent = 'Play Executive Pitch';
+        return;
+      }
+      if (!window.speechSynthesis) {
+        ttsStatus.textContent = 'Sorry, your browser does not support speech synthesis.';
+        return;
+      }
+      ttsStatus.textContent = 'Playing executive pitch...';
+      playPitchBtn.textContent = 'Stop Pitch';
+      avatarAnim.src = 'https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif';
+      ttsActive = true;
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.onvoiceschanged = null;
+      const voices = window.speechSynthesis.getVoices();
+      function startTTS() {
+        ttsUtterance = new SpeechSynthesisUtterance(pitchText);
+        const voice = pickMaleVoice(voices);
+        if (voice) ttsUtterance.voice = voice;
+        ttsUtterance.rate = 1.08;
+        ttsUtterance.pitch = 1.05;
+        ttsUtterance.onend = function() {
+          ttsStatus.textContent = 'Pitch complete.';
+          avatarAnim.src = 'https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif';
+          ttsActive = false;
+          playPitchBtn.textContent = 'Play Executive Pitch';
+        };
+        ttsUtterance.onerror = function() {
+          ttsStatus.textContent = 'Error playing pitch.';
+          avatarAnim.src = 'https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif';
+          ttsActive = false;
+          playPitchBtn.textContent = 'Play Executive Pitch';
+        };
+        avatarAnim.src = 'https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif';
+        window.speechSynthesis.speak(ttsUtterance);
+      }
+      if (voices.length > 0) {
+        startTTS();
+      } else {
+        window.speechSynthesis.onvoiceschanged = function() {
+          startTTS();
+        };
+      }
+    };
+  </script>
+</body>
+</html>

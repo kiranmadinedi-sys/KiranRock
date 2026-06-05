@@ -2,7 +2,7 @@
 import { getApiBaseUrl } from '../config';
 
 import { useState, useEffect } from 'react';
-import AppHeader from '../components/AppHeader';
+
 import { Line } from 'react-chartjs-2';
 import {
   Chart as ChartJS,
@@ -213,7 +213,7 @@ export default function BacktestPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-gray-100 dark:from-gray-900 dark:via-slate-900 dark:to-gray-900 pb-20 lg:pb-8">
-      <AppHeader showSearch={false} />
+
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pb-8 pt-6">
         {/* Data Quality Warning for Options */}

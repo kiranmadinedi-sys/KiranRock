@@ -2,19 +2,40 @@ const fs = require('fs').promises;
 const path = require('path');
 const { query, transaction } = require('../config/database');
 
-const USERS_FILE = path.join(__dirname, '../../users.json');
-const STOCKS_FILE = path.join(__dirname, '../../stocks.json');
+function parseCliArgs(argv = process.argv.slice(2)) {
+    const parsed = {};
+
+    for (let index = 0; index < argv.length; index += 1) {
+        const current = argv[index];
+        if (current === '--users-file' && argv[index + 1]) {
+            parsed.usersFile = argv[index + 1];
+            index += 1;
+        }
+    }
+
+    return parsed;
+}
+
+function resolveUsersFilePath(explicitUsersFile) {
+    const candidate = explicitUsersFile || process.env.MIGRATION_USERS_FILE;
+    if (!candidate) {
+        throw new Error('Migration input file is required. Provide --users-file <path> or set MIGRATION_USERS_FILE.');
+    }
+
+    return path.resolve(candidate);
+}
 
 /**
  * Migrate data from JSON files to PostgreSQL
  */
-async function migrateFromJSON() {
+async function migrateFromJSON(options = {}) {
     console.log('\n=== Starting Data Migration from JSON to PostgreSQL ===\n');
 
     try {
-        // Read JSON files
-        const usersData = JSON.parse(await fs.readFile(USERS_FILE, 'utf8'));
-        const stocksData = JSON.parse(await fs.readFile(STOCKS_FILE, 'utf8'));
+        const usersFilePath = resolveUsersFilePath(options.usersFile);
+
+        // Read JSON export file
+        const usersData = JSON.parse(await fs.readFile(usersFilePath, 'utf8'));
 
         console.log(`Found ${usersData.length} users in JSON file`);
 
@@ -184,12 +205,14 @@ async function migrateFromJSON() {
         console.log(`✓ Trades migrated: ${tradesMigrated}`);
         console.log('\n✓ Migration completed successfully!\n');
 
-        // Create backup of JSON files
+        // Create backup of the import file
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        await fs.copyFile(USERS_FILE, `${USERS_FILE}.backup.${timestamp}`);
-        console.log(`✓ Created backup: users.json.backup.${timestamp}\n`);
+        const backupPath = `${usersFilePath}.backup.${timestamp}`;
+        await fs.copyFile(usersFilePath, backupPath);
+        console.log(`✓ Created backup: ${path.basename(backupPath)}\n`);
 
         return {
+            usersFilePath,
             usersMigrated,
             accountsMigrated,
             holdingsMigrated,
@@ -204,7 +227,7 @@ async function migrateFromJSON() {
 
 // Run migration if called directly
 if (require.main === module) {
-    migrateFromJSON()
+    migrateFromJSON(parseCliArgs())
         .then((result) => {
             console.log('Migration completed!', result);
             process.exit(0);
@@ -215,4 +238,4 @@ if (require.main === module) {
         });
 }
 
-module.exports = { migrateFromJSON };
+module.exports = { migrateFromJSON, parseCliArgs, resolveUsersFilePath };

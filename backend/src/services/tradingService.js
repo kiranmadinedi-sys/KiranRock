@@ -1,17 +1,53 @@
 const { query } = require('../config/database');
-const yfClient = require('../utils/yfClient');
+const marketQuoteService = require('./marketQuoteService');
+
+/**
+ * Check if a symbol is a chronic loser for a user (≥3 losing trades in last 30 days,
+ * loss rate ≥60%). Blocks impulsive manual buys into known losing setups.
+ * Returns { blocked: bool, lossRate: number, tradeCount: number }
+ */
+async function checkManualTradeGuard(userId, symbol) {
+    try {
+        const since = new Date();
+        since.setDate(since.getDate() - 30);
+        const res = await query(`
+            WITH buy_avg AS (
+                SELECT user_id, symbol, AVG(price) AS avg_buy_price
+                FROM trades WHERE action = 'BUY' AND trade_date >= $3
+                GROUP BY user_id, symbol
+            ),
+            pnl_trades AS (
+                SELECT CASE WHEN (s.total - b.avg_buy_price * s.quantity) <= 0 THEN 1 ELSE 0 END AS loss
+                FROM trades s
+                JOIN buy_avg b ON s.user_id = b.user_id AND s.symbol = b.symbol
+                WHERE s.action = 'SELL' AND s.user_id = $1
+                  AND s.symbol = $2 AND s.trade_date >= $3
+            )
+            SELECT COUNT(*) AS total_trades,
+                   SUM(loss) AS total_losses
+            FROM pnl_trades
+        `, [userId, symbol.toUpperCase(), since.toISOString().split('T')[0]]);
+
+        const row = res.rows[0];
+        const total = parseInt(row?.total_trades || 0);
+        const losses = parseInt(row?.total_losses || 0);
+        if (total >= 3) {
+            const lossRate = losses / total;
+            if (lossRate >= 0.60) {
+                return { blocked: true, lossRate: Math.round(lossRate * 100), tradeCount: total };
+            }
+        }
+        return { blocked: false, lossRate: 0, tradeCount: total };
+    } catch {
+        return { blocked: false, lossRate: 0, tradeCount: 0 };
+    }
+}
 
 /**
  * Get current market price for a symbol
  */
 const getCurrentPrice = async (symbol) => {
-    try {
-        const quote = await yfClient.quote(symbol);
-        return (quote && (quote.regularMarketPrice || quote.price || quote?.price?.regularMarketPrice)) || null;
-    } catch (error) {
-        console.error(`Error getting price for ${symbol}:`, error && error.message ? error.message : error);
-        throw new Error(`Unable to get current price for ${symbol}`);
-    }
+    return marketQuoteService.getCurrentPrice(symbol);
 };
 
 /**
@@ -21,6 +57,15 @@ const executeBuyOrder = async (userId, symbol, quantity) => {
     try {
         if (quantity <= 0 || !Number.isInteger(quantity)) {
             throw new Error('Quantity must be a positive integer');
+        }
+
+        // IMPROVEMENT: block manual buys into chronically losing symbols
+        const guard = await checkManualTradeGuard(userId, symbol);
+        if (guard.blocked) {
+            throw new Error(
+                `Trade blocked: ${symbol.toUpperCase()} has a ${guard.lossRate}% loss rate over your last ${guard.tradeCount} trades in 30 days. ` +
+                `This symbol is flagged as a chronic loser. Review your strategy before re-entering.`
+            );
         }
         
         // Get current price
@@ -224,29 +269,44 @@ const executeSellOrder = async (userId, symbol, quantity) => {
 /**
  * Get user's trade history
  */
-const getTradeHistory = async (userId, limit = 50) => {
+const getTradeHistory = async (userId, limit = 100) => {
     try {
         const result = await query(
-            `SELECT id, symbol, action as type, quantity, price, total, 
-                    trade_date as timestamp, notes 
-             FROM trades 
-             WHERE user_id = $1 AND action IN ('BUY', 'SELL')
-             ORDER BY trade_date DESC 
+            `SELECT id, symbol, action as type, quantity, price, total,
+                    trade_date as timestamp, notes, executed_by,
+                    ai_score, sector, status, pnl, pnl_percent
+             FROM trades
+             WHERE user_id = $1
+             ORDER BY trade_date DESC
              LIMIT $2`,
             [userId, limit]
         );
-        
-        return result.rows.map(trade => ({
-            id: trade.id.toString(),
-            symbol: trade.symbol,
-            type: trade.type.toUpperCase(),
-            quantity: parseInt(trade.quantity),
-            price: parseFloat(trade.price),
-            totalCost: trade.type === 'BUY' ? parseFloat(trade.total) : undefined,
-            totalProceeds: trade.type === 'SELL' ? parseFloat(trade.total) : undefined,
-            timestamp: trade.timestamp,
-            notes: trade.notes
-        }));
+
+        return result.rows.map(trade => {
+            const type = (trade.type || '').toUpperCase();
+            const total = parseFloat(trade.total) || 0;
+            return {
+                id: trade.id.toString(),
+                symbol: trade.symbol,
+                type,
+                quantity: parseFloat(trade.quantity) || 0,
+                price: parseFloat(trade.price) || 0,
+                total,
+                totalCost:     type === 'BUY'        ? total : undefined,
+                totalProceeds: type === 'SELL'       ? total : undefined,
+                depositAmount: type === 'DEPOSIT'    ? total : undefined,
+                withdrawAmount:type === 'WITHDRAWAL' ? total : undefined,
+                timestamp:   trade.timestamp,
+                notes:       trade.notes,
+                executedBy:  trade.executed_by,
+                aiScore:     trade.ai_score  != null ? parseFloat(trade.ai_score)  : null,
+                sector:      trade.sector,
+                status:      trade.status,
+                pnl:         trade.pnl       != null ? parseFloat(trade.pnl)       : null,
+                pnlPercent:  trade.pnl_percent != null ? parseFloat(trade.pnl_percent) : null,
+                profitLoss:  trade.pnl       != null ? parseFloat(trade.pnl)       : 0
+            };
+        });
     } catch (error) {
         console.error('Error getting trade history:', error);
         throw error;

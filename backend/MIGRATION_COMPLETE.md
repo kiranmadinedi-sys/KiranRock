@@ -274,15 +274,12 @@ Since trades.action only accepts 'BUY' or 'SELL', deposits and withdrawals are h
 
 ---
 
-## Remaining Files Still Using users.json
+## Remaining JSON Import Usage
 
-### Low Priority (Reporting/Testing)
-- scheduleWeeklyReportBatch.js (Telegram reporting)
-- sendWeeklyReportToTelegram.js (Telegram reporting)
-- testTelegramHello.js (Test script)
-- enhancedAITradingRoutes.js (Legacy route)
+### One-Time Import Tooling
+- src/config/migrateData.js accepts an explicit JSON export path via `--users-file` or `MIGRATION_USERS_FILE`
 
-**Note:** These files can continue using users.json for users who exist there, or be migrated separately as they're not critical for core functionality.
+**Note:** Live services, reporting helpers, and legacy AI/manual trading paths are now PostgreSQL-backed rather than reading `users.json` directly.
 
 ---
 

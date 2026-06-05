@@ -1,6 +1,9 @@
 const tradingService = require('./tradingService');
+const marketQuoteService = require('./marketQuoteService');
 const tradingAccountService = require('./tradingAccountService');
 const tradesDb = require('./tradesDatabaseService');
+const { savePortfolioSnapshot } = require('./portfolioSnapshotService');
+const { buildPortfolioHistory } = require('./portfolioHistoryService');
 
 /**
  * Get complete portfolio with real-time valuations
@@ -30,7 +33,7 @@ const getPortfolioSummary = async (userId) => {
                     // Try live price; if unavailable, fall back to cached holding.currentPrice or averagePrice
                     let currentPrice = null;
                     try {
-                        currentPrice = await tradingService.getCurrentPrice(holding.symbol);
+                        currentPrice = await marketQuoteService.getCurrentPrice(holding.symbol);
                     } catch (e) {
                         currentPrice = null;
                     }
@@ -147,7 +150,7 @@ const getPortfolioSummary = async (userId) => {
         const overallPL = totalPortfolioValue - totalInvested;
         const overallReturn = totalInvested > 0 ? (overallPL / totalInvested) * 100 : 0;
         
-        return {
+        const portfolioSummary = {
             account: {
                 cashBalance: account.balance,
                 totalDeposited: account.totalDeposited,
@@ -168,6 +171,14 @@ const getPortfolioSummary = async (userId) => {
                 cashBalance: account.balance
             }
         };
+
+        try {
+            await savePortfolioSnapshot(userId, portfolioSummary.summary, { source: 'portfolio-summary' });
+        } catch (snapshotError) {
+            console.error('Error saving portfolio snapshot:', snapshotError.message);
+        }
+
+        return portfolioSummary;
     } catch (error) {
         console.error('Error getting portfolio summary:', error);
         throw error;
@@ -308,7 +319,7 @@ const getSectorAllocation = async (userId) => {
         const sectorMap = {};
         
         for (const holding of holdings) {
-            const currentPrice = await tradingService.getCurrentPrice(holding.symbol).catch(() => holding.averagePrice);
+            const currentPrice = await marketQuoteService.getCurrentPrice(holding.symbol).catch(() => holding.averagePrice);
             const value = currentPrice * holding.quantity;
             
             // You can enhance this by fetching actual sector from fundamentalsService
@@ -400,28 +411,8 @@ const getRiskMetrics = async (userId) => {
  * Get portfolio value history for charting
  */
 const getPortfolioHistory = async (userId, range = '1D') => {
-    // For demo: generate fake data based on current portfolio value
-    // In production, use actual historical data from trades and prices
     const summary = await getPortfolioSummary(userId);
-    const now = Date.now();
-    let points = [];
-    let intervals = 1;
-    if (range === '1D') intervals = 24;
-    else if (range === '1W') intervals = 7;
-    else if (range === '1M') intervals = 30;
-    else if (range === '3M') intervals = 12;
-    else if (range === 'YTD') intervals = 10;
-    else if (range === '1Y') intervals = 12;
-    for (let i = intervals - 1; i >= 0; i--) {
-        points.push({
-            time: new Date(now - i * 3600 * 1000).toLocaleString(),
-            value: summary.summary.totalPortfolioValue * (1 + (Math.random() - 0.5) * 0.02)
-        });
-    }
-    // Calculate change
-    const changeValue = points[points.length - 1].value - points[0].value;
-    const changePercent = (changeValue / points[0].value) * 100;
-    return { history: points, changeValue, changePercent };
+    return buildPortfolioHistory(userId, range, summary.summary);
 };
 
 module.exports = {

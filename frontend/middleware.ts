@@ -3,55 +3,12 @@ import type { NextRequest } from 'next/server';
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  
-  // Public paths that don't require authentication
-  const publicPaths = ['/login', '/api'];
-  const isPublicPath = publicPaths.some(path => pathname.startsWith(path));
-  
-  // Check for authentication token in cookies
-  const token = request.cookies.get('token')?.value;
-  
-  // If accessing a protected route without token, redirect to login
-  if (!isPublicPath && !token && pathname !== '/') {
-    const loginUrl = new URL('/login', request.url);
-    loginUrl.searchParams.set('redirect', pathname);
-    return NextResponse.redirect(loginUrl);
-  }
-  
-  // If accessing login with valid token, redirect to dashboard
-  if (pathname === '/login' && token) {
-    return NextResponse.redirect(new URL('/dashboard', request.url));
-  }
-  
-  // Clone the request headers
-  const requestHeaders = new Headers(request.headers);
-  
-  // Add origin header if missing (fixes Server Actions error)
-  if (!requestHeaders.has('origin')) {
-    const origin = request.headers.get('host') 
-      ? `${request.nextUrl.protocol}//${request.headers.get('host')}`
-      : request.nextUrl.origin;
-    requestHeaders.set('origin', origin);
+
+  if (pathname === '/') {
+    return NextResponse.redirect(new URL('/login', request.url));
   }
 
-  // Add x-forwarded-host if missing
-  if (!requestHeaders.has('x-forwarded-host')) {
-    requestHeaders.set('x-forwarded-host', request.headers.get('host') || '');
-  }
-
-  // Create response with modified headers
-  const response = NextResponse.next({
-    request: {
-      headers: requestHeaders,
-    },
-  });
-
-  // Add CORS headers for external access
-  response.headers.set('Access-Control-Allow-Origin', '*');
-  response.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  response.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, Origin');
-
-  return response;
+  return NextResponse.next();
 }
 
 export const config = {

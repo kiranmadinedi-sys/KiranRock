@@ -1,13 +1,13 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { Suspense, useState, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { getApiBaseUrl } from '../config';
-import { setAuthToken, isAuthenticated } from '../utils/session';
+import { clearAuthToken, setAuthToken } from '../utils/session';
 
 type ViewMode = 'login' | 'signup' | 'verify';
 
-export default function LoginPage() {
+function LoginPageContent() {
     const [viewMode, setViewMode] = useState<ViewMode>('login');
     const [error, setError] = useState('');
     const [success, setSuccess] = useState('');
@@ -29,18 +29,17 @@ export default function LoginPage() {
             })
             .then(res => {
                 if (res.ok) {
-                    window.location.replace('/dashboard');
+                    const redirect = searchParams.get('redirect') || '/dashboard';
+                    window.location.replace(redirect);
                 } else {
-                    localStorage.removeItem('token');
-                    localStorage.removeItem('user');
+                    clearAuthToken();
                 }
             })
             .catch(() => {
-                localStorage.removeItem('token');
-                localStorage.removeItem('user');
+                clearAuthToken();
             });
         }
-    }, []);
+    }, [searchParams]);
 
     const [loginUsername, setLoginUsername] = useState('');
     const [loginPassword, setLoginPassword] = useState('');
@@ -140,7 +139,7 @@ export default function LoginPage() {
             });
             const data = await response.json();
             if (response.ok) {
-                localStorage.setItem('token', data.token);
+                setAuthToken(data.token);
                 if (data.user) localStorage.setItem('user', JSON.stringify(data.user));
                 setSuccess('Account verified! Redirecting...');
                 setTimeout(() => router.push('/dashboard'), 1500);
@@ -470,5 +469,13 @@ export default function LoginPage() {
                 </p>
             </div>
         </div>
+    );
+}
+
+export default function LoginPage() {
+    return (
+        <Suspense fallback={<div className="login-bg min-h-screen" />}>
+            <LoginPageContent />
+        </Suspense>
     );
 }

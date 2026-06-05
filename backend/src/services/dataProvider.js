@@ -23,6 +23,18 @@ const yahooProvider = (() => {
     const YahooFinance = require('yahoo-finance2').default;
     const yf = new YahooFinance();
 
+    // Use the unpatched originals stored by bootstrapRuntime so yahooProvider never
+    // routes back through the dataProvider patch (prevents infinite recursion when
+    // Alpaca falls back to Yahoo while the patch routes Yahoo → Alpaca → Yahoo → …).
+    function _chart(symbol, opts) {
+        const fn = yf._originalChart || yf.chart;
+        return fn.call(yf, symbol, opts);
+    }
+    function _quote(symbol) {
+        const fn = yf._originalQuote || yf.quote;
+        return fn.call(yf, symbol);
+    }
+
     /**
      * Get OHLCV bars for a symbol
      * @param {string} symbol
@@ -34,7 +46,7 @@ const yahooProvider = (() => {
         const period1 = new Date(Date.now() - lookbackDays * 86400000)
             .toISOString().split('T')[0];
         const period2 = new Date().toISOString().split('T')[0];
-        const result = await yf.chart(symbol, { period1, period2, interval });
+        const result = await _chart(symbol, { period1, period2, interval });
         return (result.quotes || [])
             .filter(q => q.close != null)
             .map(q => ({
@@ -53,7 +65,7 @@ const yahooProvider = (() => {
      * @returns {Promise<{symbol,price,change,changePercent,volume,marketCap,high52w,low52w}>}
      */
     async function getQuote(symbol) {
-        const q = await yf.quote(symbol);
+        const q = await _quote(symbol);
         return {
             symbol,
             price:         q.regularMarketPrice,
@@ -65,7 +77,8 @@ const yahooProvider = (() => {
             high52w:       q.fiftyTwoWeekHigh || q.regularMarketPrice,
             low52w:        q.fiftyTwoWeekLow  || q.regularMarketPrice,
             sector:        q.sector || null,
-            exchange:      q.exchange || null
+            exchange:      q.exchange || null,
+            _fetchedAt:    Date.now()
         };
     }
 
@@ -135,9 +148,22 @@ const alpacaProvider = (() => {
         return symbol.startsWith('^') || symbol.startsWith('=');
     }
 
+    // ETFs not carried by Alpaca IEX free feed — skip directly to real Yahoo to avoid
+    // noisy warn logs. SPY is excluded (works on IEX). QQQ is excluded (withYahooFallback
+    // handles it cleanly now that yahooProvider uses the unpatched chart/quote functions).
+    const YAHOO_ONLY_SYMBOLS = new Set([
+        'DIA','IWM','MDY',
+        'XLK','XLF','XLE','XLV','XLI','XLP','XLY','XLB','XLU',
+        'GLD','SLV','USO','TLT','HYG','LQD','EEM','EFA','VXX'
+    ]);
+
+    function isYahooOnly(symbol) {
+        return isIndexSymbol(symbol) || YAHOO_ONLY_SYMBOLS.has((symbol || '').toUpperCase());
+    }
+
     async function getBars(symbol, interval = '1d', lookbackDays = 90) {
-        // Indices not supported by Alpaca data feed — fall back to Yahoo
-        if (isIndexSymbol(symbol)) return yahooProvider.getBars(symbol, interval, lookbackDays);
+        // Indices/ETFs not supported by Alpaca IEX — fall back to Yahoo
+        if (isYahooOnly(symbol)) return yahooProvider.getBars(symbol, interval, lookbackDays);
 
         const client = getClient();
         const alpacaTimeframe = {
@@ -171,8 +197,8 @@ const alpacaProvider = (() => {
     }
 
     async function getQuote(symbol) {
-        // Indices (^VIX, ^GSPC) not supported by Alpaca — fall back to Yahoo
-        if (isIndexSymbol(symbol)) return yahooProvider.getQuote(symbol);
+        // Indices/ETFs not supported by Alpaca IEX — fall back to Yahoo
+        if (isYahooOnly(symbol)) return yahooProvider.getQuote(symbol);
 
         // Return cached result if fresh (prevents 429 rate-limit errors on burst calls)
         const cached = _quoteCache.get(symbol);
@@ -199,7 +225,8 @@ const alpacaProvider = (() => {
             low52w:        null,
             sector:        null,
             bid:           q.BidPrice || 0,
-            ask:           q.AskPrice || 0
+            ask:           q.AskPrice || 0,
+            _fetchedAt:    Date.now()
         };
         _quoteCache.set(symbol, { data: result, ts: Date.now() });
         return result;
@@ -221,8 +248,17 @@ const alpacaProvider = (() => {
     }
 
     async function getOptionsChain(symbol) {
-        // Alpaca does not yet support options chains — fall back to Yahoo
-        logger.warn('[DataProvider:Alpaca] Options not supported, falling back to Yahoo');
+        // Try Polygon first when key is available — one call returns all contracts
+        // with real Greeks, no per-expiration Yahoo requests needed.
+        // Falls back to Yahoo if Polygon returns nothing (free tier = 403, no options access).
+        if (process.env.POLYGON_API_KEY) {
+            const polygonResult = await polygonProvider.getOptionsChain(symbol);
+            if (polygonResult && Array.isArray(polygonResult.results) && polygonResult.results.length > 0) {
+                return polygonResult;
+            }
+            // Polygon key set but no options data (free tier) — fall through to Yahoo
+            logger.info('[DataProvider:Alpaca] Polygon options unavailable (free tier?), falling back to Yahoo');
+        }
         return yahooProvider.getOptionsChain(symbol);
     }
 
@@ -234,8 +270,12 @@ const polygonProvider = (() => {
     let axios = null;
     const BASE = 'https://api.polygon.io';
 
+    function hasApiKey() {
+        return Boolean(process.env.POLYGON_API_KEY);
+    }
+
     function apiKey() {
-        if (!process.env.POLYGON_API_KEY) {
+        if (!hasApiKey()) {
             throw new Error('POLYGON_API_KEY not set in .env');
         }
         return process.env.POLYGON_API_KEY;
@@ -247,6 +287,10 @@ const polygonProvider = (() => {
     }
 
     async function getBars(symbol, interval = '1d', lookbackDays = 90) {
+        if (!hasApiKey()) {
+            logger.warn('[DataProvider:Polygon] POLYGON_API_KEY missing, falling back to Yahoo bars');
+            return yahooProvider.getBars(symbol, interval, lookbackDays);
+        }
         const multiplier = interval === '1d' ? 1 : interval === '1wk' ? 7 : 1;
         const timespan   = interval === '1m' ? 'minute' :
                            interval === '5m' ? 'minute' :
@@ -269,6 +313,10 @@ const polygonProvider = (() => {
     }
 
     async function getQuote(symbol) {
+        if (!hasApiKey()) {
+            logger.warn('[DataProvider:Polygon] POLYGON_API_KEY missing, falling back to Yahoo quote');
+            return yahooProvider.getQuote(symbol);
+        }
         const url = `${BASE}/v2/snapshot/locale/us/markets/stocks/tickers/${symbol}`;
         const resp = await http().get(url, { params: { apiKey: apiKey() } });
         const t = resp.data.ticker || {};
@@ -290,6 +338,10 @@ const polygonProvider = (() => {
     }
 
     async function searchSymbols(query) {
+        if (!hasApiKey()) {
+            logger.warn('[DataProvider:Polygon] POLYGON_API_KEY missing, falling back to Yahoo symbol search');
+            return yahooProvider.searchSymbols(query);
+        }
         const url = `${BASE}/v3/reference/tickers`;
         const resp = await http().get(url, {
             params: { search: query, apiKey: apiKey(), active: true, limit: 15, market: 'stocks' }
@@ -303,6 +355,10 @@ const polygonProvider = (() => {
     }
 
     async function getOptionsChain(symbol) {
+        if (!hasApiKey()) {
+            logger.warn('[DataProvider:Polygon] POLYGON_API_KEY missing, falling back to Yahoo options chain');
+            return yahooProvider.getOptionsChain(symbol);
+        }
         try {
             const url = `${BASE}/v3/snapshot/options/${symbol}`;
             const resp = await http().get(url, {
@@ -326,28 +382,148 @@ if (!PROVIDERS[PROVIDER]) {
     logger.warn(`[DataProvider] Unknown provider '${PROVIDER}', falling back to Yahoo Finance`);
 }
 
-module.exports = {
+// ─── INDEX SYMBOL CACHE ──────────────────────────────────────────────────────
+// ^VIX, ^GSPC etc. are fetched by multiple services concurrently.
+// Yahoo rate-limits crumb requests (429) when hit in rapid succession.
+// Cache index quotes for 5 minutes process-wide so every caller shares one result.
+const _indexQuoteCache = new Map(); // symbol → { data, ts }
+const INDEX_QUOTE_TTL  = 5 * 60 * 1000; // 5 minutes
+
+async function getIndexQuote(symbol) {
+    const now    = Date.now();
+    const cached = _indexQuoteCache.get(symbol);
+    if (cached && now - cached.ts < INDEX_QUOTE_TTL) return cached.data;
+
+    try {
+        const data = await yahooProvider.getQuote(symbol);
+        _indexQuoteCache.set(symbol, { data, ts: now });
+        return data;
+    } catch (err) {
+        if (cached) {
+            // Return stale value rather than propagating a 429 to all callers
+            logger.warn(`[DataProvider] Index quote stale-served for ${symbol} (${Math.round((now - cached.ts) / 60000)}min old)`, { error: err.message });
+            return cached.data;
+        }
+        throw err;
+    }
+}
+
+// Wrap primary provider calls with Yahoo fallback so a transient Alpaca/Polygon
+// error never takes down the signal pipeline.
+async function withYahooFallback(method, label, ...args) {
+    // Index symbols (^VIX, ^GSPC…) are Yahoo-only and rate-limited — serve from cache
+    if (method === 'getQuote' && args[0] && (args[0].startsWith('^') || args[0].startsWith('='))) {
+        return getIndexQuote(args[0]);
+    }
+    try {
+        return await activeProvider[method](...args);
+    } catch (err) {
+        if (activeProvider === yahooProvider) throw err; // already Yahoo — no fallback
+        logger.warn(`[DataProvider] ${activeProvider.name} ${label} failed, falling back to Yahoo`, {
+            symbol: args[0], error: err.message
+        });
+        return yahooProvider[method](...args);
+    }
+}
+
+// ─── LOCAL DATA WAREHOUSE PROVIDER (Wrapper) ───────────────────────────────────
+const localProvider = (() => {
+    const { query } = require('../config/database');
+    const underlyingProvider = PROVIDER === 'alpaca' ? alpacaProvider : yahooProvider;
+    const name = `Local Cache -> ${underlyingProvider.name}`;
+    logger.info(`[DataProvider] Initializing with main provider: ${name}`);
+
     /**
-     * Get historical OHLCV bars
-     * @param {string} symbol
-     * @param {string} interval  '1d'|'1wk'|'1mo'|'5m'|'1m'
-     * @param {number} lookbackDays
+     * This is a local, simplified version of the function in dataIngestionService
+     * to cache new data fetched from the API to our local database.
      */
-    getBars:        (symbol, interval, lookbackDays) =>
-                        activeProvider.getBars(symbol, interval, lookbackDays),
+    async function cacheBarsToDb(bars, symbol) {
+        if (!bars || bars.length === 0) return 0;
 
-    /** Get real-time quote */
-    getQuote:       (symbol) => activeProvider.getQuote(symbol),
+        const barsWithSymbol = bars.map(bar => ({
+            symbol,
+            date: bar.time,
+            open: bar.open,
+            high: bar.high,
+            low: bar.low,
+            close: bar.close,
+            volume: bar.volume
+        }));
 
-    /** Search symbols by query string */
-    searchSymbols:  (query)  => activeProvider.searchSymbols(query),
+        const insertQuery = `
+            INSERT INTO daily_bars (symbol, timestamp, open, high, low, close, volume)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (symbol, timestamp) DO NOTHING;
+        `;
 
-    /** Get options chain */
-    getOptionsChain:(symbol) => activeProvider.getOptionsChain(symbol),
+        let insertedCount = 0;
+        for (const bar of barsWithSymbol) {
+            if (!bar.date || !bar.symbol || bar.volume === null) continue;
+            try {
+                const result = await query(insertQuery, [
+                    bar.symbol, bar.date, bar.open, bar.high, bar.low, bar.close, bar.volume
+                ]);
+                if (result.rowCount > 0) insertedCount++;
+            } catch (error) {
+                logger.error('Error inserting single historical bar into cache', { symbol: bar.symbol, date: bar.date, error: error.message });
+            }
+        }
+        if (insertedCount > 0) {
+            logger.info(`[DataProvider] Cached ${insertedCount} new bars for ${symbol} to local DB.`);
+        }
+        return insertedCount;
+    }
 
-    /** Name of the active provider (for logging/UI) */
-    providerName:   activeProvider.name,
+    /**
+     * Get OHLCV bars for a symbol, with a local-first strategy.
+     */
+    async function getBars(symbol, interval = '1d', lookbackDays = 90) {
+        if (interval !== '1d') {
+            logger.debug(`[DataProvider] Non-daily interval ('${interval}'). Bypassing local cache for ${symbol}.`);
+            return underlyingProvider.getBars(symbol, interval, lookbackDays);
+        }
 
-    /** Current provider key ('yahoo'|'alpaca'|'polygon') */
-    providerKey:    PROVIDER
+        const startDate = new Date(Date.now() - lookbackDays * 86400000);
+        
+        try {
+            const { rows } = await query(
+                `SELECT timestamp as time, open::float, high::float, low::float, close::float, volume::bigint 
+                 FROM daily_bars WHERE symbol = $1 AND timestamp >= $2 ORDER BY timestamp ASC`,
+                [symbol, startDate.toISOString().split('T')[0]]
+            );
+
+            if (rows.length >= lookbackDays - 5) { // -5 tolerance for weekends/holidays
+                logger.debug(`[DataProvider] Cache hit for ${symbol}. Returning ${rows.length} bars from local DB.`);
+                return rows.map(r => ({ ...r, time: new Date(r.time).toISOString() }));
+            }
+            logger.info(`[DataProvider] Cache miss for ${symbol} (${rows.length} bars found). Fetching from API.`);
+        } catch (error) {
+            logger.error('[DataProvider] Error querying local cache. Falling back to API.', { error: error.message });
+        }
+
+        const apiBars = await underlyingProvider.getBars(symbol, interval, lookbackDays);
+
+        if (apiBars && apiBars.length > 0) {
+            cacheBarsToDb(apiBars, symbol).catch(err => {
+                logger.error(`[DataProvider] Background caching failed for ${symbol}`, { error: err.message });
+            });
+        }
+
+        return apiBars;
+    }
+
+    // --- Pass-through functions that don't use the local cache ---
+    async function getQuote(symbol) { return underlyingProvider.getQuote(symbol); }
+    async function searchSymbols(query) { return underlyingProvider.searchSymbols(query); }
+    async function getOptionsChain(symbol) { return underlyingProvider.getOptionsChain(symbol); }
+
+    return { getBars, getQuote, searchSymbols, getOptionsChain, name };
+})();
+
+module.exports = {
+    getBars:       (...args) => withYahooFallback('getBars', 'bar fetch', ...args),
+    getQuote:      (...args) => withYahooFallback('getQuote', 'quote fetch', ...args),
+    searchSymbols: (...args) => withYahooFallback('searchSymbols', 'symbol search', ...args),
+    getOptionsChain: (...args) => withYahooFallback('getOptionsChain', 'options chain fetch', ...args),
+    getActiveProvider: () => activeProvider
 };

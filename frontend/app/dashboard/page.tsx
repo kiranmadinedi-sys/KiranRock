@@ -3,7 +3,7 @@
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import AppHeader from '../components/AppHeader';
+// import AppHeader from '../components/AppHeader';
 import CandlestickChart from '../components/CandlestickChart';
 import StockSearch from '../components/StockSearch';
 import TickerList from '../components/TickerList';
@@ -58,7 +58,6 @@ export default function DashboardPage() {
             setShowSearchDropdown(false);
             return;
         }
-        
         try {
             const apiUrl = getApiBaseUrl();
             const searchResponse = await fetch(`${apiUrl}/api/stocks/search?q=${encodeURIComponent(query)}`);
@@ -329,8 +328,12 @@ export default function DashboardPage() {
     // Logout handler
     const handleLogout = () => {
         localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        localStorage.removeItem('lastActivity');
+        document.cookie = 'token=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT';
+        sessionStorage.setItem('justLoggedOut', 'true');
         setToken(null);
-        router.push('/login');
+        window.location.replace('/login');
     };
 
     useEffect(() => {
@@ -477,7 +480,6 @@ export default function DashboardPage() {
 
     return (
         <div className="min-h-screen bg-gradient-to-br from-gray-50 via-slate-50 to-gray-100 dark:from-gray-900 dark:via-slate-900 dark:to-gray-900 pb-20 lg:pb-8">
-            <AppHeader showSearch={true} onSelectStock={handleSelectStock} symbols={symbols} />
 
             {/* Main Content - Mobile Optimized */}
             <main className="max-w-full px-0 py-0">

@@ -8,10 +8,120 @@ const rateLimiter = require('../utils/yahooFinanceRateLimiter');
  * Uses free Yahoo Finance API
  */
 
+
+// ─── 5-TIER UNIVERSE CONSTANTS ──────────────────────────────
+const TIER1_ETFS = [
+    'SPY','QQQ','IWM','DIA','MDY',
+    'XLK','XLF','XLE','XLV','XLI','XLB','XLU','XLP','XLY',
+    'SMH','SOXX',
+    'ARKK','ARKG','ARKF',
+    'GLD','TLT','HYG','LQD',
+    'TQQQ','SOXL',
+];
+const TIER5_SPECULATIVE = [
+    'CRSP','BEAM','EDIT','NTLA','RXRX','RKLB','ACHR','ASTS',
+    'JOBY','ARM','ALAB','SMCI','COIN','APP','TTD'
+];
+
 // Cache for screened stocks (refresh daily)
 let cachedStockUniverse = null;
 let lastScreenTime = null;
 const CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
+
+// ── Relative Strength Score ───────────────────────────────────────────────────
+// IBD-style RS proxy using live quote fields only (no extra API calls).
+// Stocks in Stage 2 uptrends naturally score highest:
+//   close to 52wk high + above 200MA + above 50MA + elevated volume
+//
+// Range: ~0.3 (beaten-down) → ~1.3 (at new highs with 3× volume)
+// Used to sort the universe so breakout stocks rank above flat mega-caps.
+function computeRS(quote) {
+    const price  = quote.regularMarketPrice         || 0;
+    const high52 = quote.fiftyTwoWeekHigh            || price || 1;
+    const low52  = quote.fiftyTwoWeekLow             || 0;
+    const ma200  = quote.twoHundredDayAverage        || price || 1;
+    const ma50   = quote.fiftyDayAverage             || price || 1;
+    const vol    = quote.regularMarketVolume         || 0;
+    const avgVol = quote.averageDailyVolume3Month    || 1;
+
+    // Proximity to 52wk high (0–1.15; >1 = new high territory)
+    const prox52H  = Math.min(1.15, price / high52);
+    // Recovery from 52wk low (0–1) — catches stocks recovering off the bottom
+    const recovery = high52 > low52
+        ? Math.min(1, (price - low52) / (high52 - low52))
+        : 0.5;
+    // Trend alignment
+    const vs200MA  = Math.min(1.4, price / ma200);
+    const vs50MA   = Math.min(1.25, price / ma50);
+    // Volume interest (capped at 3× average to avoid distortion)
+    const volScore = Math.min(1, (vol / avgVol) / 3);
+
+    return (
+        prox52H  * 0.35 +   // Stage 2 proximity — most important
+        recovery * 0.20 +   // How far off the bottom (catches "SanDisk" scenario)
+        vs200MA  * 0.25 +   // Long-term trend
+        vs50MA   * 0.10 +   // Medium-term trend
+        volScore * 0.10     // Institutional interest
+    );
+}
+
+// ── Velocity Discovery — live breakout/trending symbols ───────────────────────
+// Supplements the static S&P500/NASDAQ list with stocks Yahoo Finance flags as
+// trending or making significant moves today. This catches stocks not on any
+// static list that are suddenly active (earnings breakouts, FDA approvals, etc.)
+//
+// Returns a Set of uppercase symbols. Failures are silently ignored — the static
+// list remains the stable backbone; velocity adds opportunistic coverage.
+async function getVelocitySymbols() {
+    const symbols = new Set();
+
+    // 1. Yahoo trending symbols — real-time market buzz
+    try {
+        const res = await rateLimiter.execute(() =>
+            yahooFinance.trendingSymbols('US', { count: 40 })
+        );
+        (res?.quotes || []).forEach(q => {
+            const s = (q.symbol || '').toUpperCase();
+            // Exclude options, forex, futures (contain -, =, ^, /)
+            if (s && /^[A-Z]{1,5}$/.test(s)) symbols.add(s);
+        });
+        console.log(`[HERMES:Velocity] trendingSymbols: ${symbols.size} symbols`);
+    } catch (e) {
+        console.log(`[HERMES:Velocity] trendingSymbols unavailable: ${e.message}`);
+    }
+
+    // 2. Day gainers — stocks making the biggest % moves today
+    try {
+        const res = await rateLimiter.execute(() =>
+            yahooFinance.screener({ scrIds: 'day_gainers', count: 30 })
+        );
+        const before = symbols.size;
+        (res?.quotes || []).forEach(q => {
+            const s = (q.symbol || '').toUpperCase();
+            if (s && /^[A-Z]{1,5}$/.test(s)) symbols.add(s);
+        });
+        console.log(`[HERMES:Velocity] day_gainers: +${symbols.size - before} new symbols`);
+    } catch (e) {
+        console.log(`[HERMES:Velocity] day_gainers unavailable: ${e.message}`);
+    }
+
+    // 3. Most actives — highest volume today (institutional accumulation signal)
+    try {
+        const res = await rateLimiter.execute(() =>
+            yahooFinance.screener({ scrIds: 'most_actives', count: 30 })
+        );
+        const before = symbols.size;
+        (res?.quotes || []).forEach(q => {
+            const s = (q.symbol || '').toUpperCase();
+            if (s && /^[A-Z]{1,5}$/.test(s)) symbols.add(s);
+        });
+        console.log(`[HERMES:Velocity] most_actives: +${symbols.size - before} new symbols`);
+    } catch (e) {
+        console.log(`[HERMES:Velocity] most_actives unavailable: ${e.message}`);
+    }
+
+    return symbols;
+}
 
 /**
  * Get all US stocks with market cap > $2B
@@ -27,139 +137,271 @@ async function getStockUniverse() {
     console.log('[Market Screener] Fetching fresh stock universe...');
 
     try {
-        // Allow limiting the universe via env: STOCK_UNIVERSE = 'TOP_200'|'MEGA_CAP'|'ALL'
         const desired = (process.env.STOCK_UNIVERSE || 'ALL').toUpperCase();
-        let symbols = [];
+        let staticSymbols = [];
+        let tierMap = new Map();
 
-        if (desired === 'TOP_200') {
-            const stockUniverse = require('./stockUniverse');
-            symbols = stockUniverse.TOP_200.slice();
-            console.log(`[Market Screener] Using TOP_200 preset (${symbols.length} symbols)`);
-        } else if (desired === 'MEGA_CAP') {
-            const stockUniverse = require('./stockUniverse');
-            symbols = stockUniverse.MEGA_CAP.slice();
-            console.log(`[Market Screener] Using MEGA_CAP preset (${symbols.length} symbols)`);
-        } else {
-            // S&P 500 + Top NASDAQ stocks (guaranteed >$2B market cap)
-            const sp500Symbols = await getSP500Symbols();
-            const nasdaqTop = await getTopNasdaqSymbols();
-            symbols = [...new Set([...sp500Symbols, ...nasdaqTop])];
-            console.log(`[Market Screener] Found ${symbols.length} symbols, filtering by market cap...`);
+        // --- Tier 1: ETFs ---
+        const etfSymbols = TIER1_ETFS.slice();
+        etfSymbols.forEach(sym => tierMap.set(sym, 1));
+
+        // --- Tier 2: Mega-cap (S&P500 + NASDAQ) ---
+        let sp500Symbols = await getSP500Symbols();
+        let nasdaqTop = await getTopNasdaqSymbols();
+        sp500Symbols.forEach(sym => tierMap.set(sym, 2));
+        nasdaqTop.forEach(sym => tierMap.set(sym, 2));
+
+        // --- Tier 4: Mid-cap ---
+        let midCapSymbols = getMidCapSymbols();
+        midCapSymbols.forEach(sym => tierMap.set(sym, 4));
+
+        // --- Tier 5: Speculative ---
+        TIER5_SPECULATIVE.forEach(sym => tierMap.set(sym, 5));
+
+        // --- Tier 3: Earnings watch (tagged later) ---
+
+        // Build static symbol list
+        staticSymbols = [...new Set([...etfSymbols, ...sp500Symbols, ...nasdaqTop, ...midCapSymbols, ...TIER5_SPECULATIVE])];
+
+        // ── DB-driven universe (opt-in, graceful fallback) ────────────────────
+        // Merges Alpaca-sourced symbols from asset_universe_daily into the pool.
+        // If the table is empty (service never ran yet), this is a silent no-op
+        // and the static lists above remain the sole input.
+        let dbUniverseSymbols = [];
+        try {
+            const assetUniverseService = require('./assetUniverseService');
+            dbUniverseSymbols = await assetUniverseService.getDailyUniverseSymbols();
+            if (dbUniverseSymbols.length > 0) {
+                // Add with tier 3 (unknown — will be scored by HERMES like any other)
+                dbUniverseSymbols.forEach(sym => { if (!tierMap.has(sym)) tierMap.set(sym, 3); });
+                staticSymbols = [...new Set([...staticSymbols, ...dbUniverseSymbols])];
+                console.log(`[HERMES] DB universe: +${dbUniverseSymbols.length} Alpaca symbols merged (total static: ${staticSymbols.length})`);
+            }
+        } catch (_) {
+            // Always optional — never block the pipeline
         }
 
-        // Filter by market cap in batches (build full metadata objects)
-        const qualified = [];
-        const batchSize = 10;
-        const minCap = 2000000000; // $2B
-        const fallbackCap = 10000000000; // $10B when upstream omits market cap
+        // Velocity Discovery
+        const velocitySymbols = await getVelocitySymbols();
+        const allSymbols = [...new Set([...staticSymbols, ...velocitySymbols])];
+        console.log(`[HERMES] Symbol pool: ${staticSymbols.length} static + ${velocitySymbols.size} velocity = ${allSymbols.length} unique`);
 
-        for (let i = 0; i < symbols.length; i += batchSize) {
-            const batch = symbols.slice(i, i + batchSize);
+        // HERMES filters
+        const qualified  = [];
+        const batchSize  = 10;
+        const minCap     = parseInt(process.env.HERMES_MIN_MARKET_CAP  || '2000000000', 10);
+        const minCapVel  = parseInt(process.env.HERMES_MIN_CAP_VELOCITY|| '1000000000', 10);
+        const minVolume  = parseInt(process.env.HERMES_MIN_AVG_VOLUME  || '300000',     10);
+        const maxStocks  = parseInt(process.env.HERMES_MAX_STOCKS      || '500',        10); // raised to 500
+        const fallbackCap = 10000000000;
+
+        for (let i = 0; i < allSymbols.length; i += batchSize) {
+            const batch = allSymbols.slice(i, i + batchSize);
             const results = await Promise.allSettled(
                 batch.map(async symbol => {
+                    const isVelocity = velocitySymbols.has(symbol);
+                    const capFloor   = isVelocity ? minCapVel : minCap;
+                    const isETF = TIER1_ETFS.includes(symbol);
+                    const isSpec = TIER5_SPECULATIVE.includes(symbol);
+                    let tier = tierMap.get(symbol) || 3; // default to 3 (earnings watch, tagged below)
                     try {
                         const quote = await rateLimiter.execute(() => yahooFinance.quote(symbol));
-                        const rawMarketCap = quote.marketCap || quote?.price?.marketCap || 0;
-                        const marketCap = rawMarketCap > 0 ? rawMarketCap : fallbackCap;
+                        const rawCap   = quote.marketCap || quote?.price?.marketCap || 0;
+                        const marketCap = rawCap > 0 ? rawCap : (isVelocity ? 0 : fallbackCap);
+                        const avgVol = quote.averageDailyVolume3Month || quote.regularMarketVolume || 0;
+                        let week52High = quote.fiftyTwoWeekHigh || null;
+                        let week52Low = quote.fiftyTwoWeekLow || null;
+                        let price = quote.regularMarketPrice || null;
+                        let rsScore = computeRS(quote);
+                        let sector = quote.sector || 'Unknown';
+                        let industry = quote.industry || 'Unknown';
 
-                        if (marketCap >= minCap) { // $2B
+                        // --- Tier 3: Earnings watch (within 20 days) ---
+                        let daysToEarnings = null;
+                        if (!isETF && !isSpec && tier !== 4 && tier !== 2) {
+                            try {
+                                // Only check for non-ETF, non-speculative, non-midcap, non-megacap
+                                const summary = await yahooFinance.quoteSummary(symbol, { modules: ['calendarEvents'] });
+                                const earningsDate = summary?.calendarEvents?.earnings?.earningsDate?.[0];
+                                if (earningsDate) {
+                                    daysToEarnings = Math.ceil((new Date(earningsDate) - new Date()) / (1000 * 60 * 60 * 24));
+                                    if (daysToEarnings >= 5 && daysToEarnings <= 20) {
+                                        tier = 3;
+                                    }
+                                }
+                            } catch {}
+                        }
+
+                        if (marketCap >= capFloor && avgVol >= minVolume) {
                             return {
                                 symbol,
                                 marketCap,
                                 marketCapFormatted: formatMarketCap(marketCap),
-                                price: quote.regularMarketPrice,
-                                volume: quote.regularMarketVolume,
-                                sector: quote.sector || 'Unknown',
-                                industry: quote.industry || 'Unknown'
+                                price,
+                                volume: quote.regularMarketVolume || 0,
+                                avgVolume: avgVol,
+                                week52High,
+                                week52Low,
+                                sma50: quote.fiftyDayAverage || null,
+                                sma200: quote.twoHundredDayAverage || null,
+                                sector,
+                                industry,
+                                rsScore,
+                                isVelocity,
+                                tier,
+                                isETF,
+                                isSpeculative: isSpec,
+                                daysToEarnings,
                             };
                         }
                         return null;
                     } catch (error) {
                         console.log(`[Market Screener] Error fetching ${symbol}: ${error.message}`);
-                        return {
-                            symbol,
-                            marketCap: fallbackCap,
-                            marketCapFormatted: formatMarketCap(fallbackCap),
-                            price: null,
-                            volume: 0,
-                            sector: 'Unknown',
-                            industry: 'Unknown'
-                        };
+                        if (!isVelocity) {
+                            return {
+                                symbol,
+                                marketCap: fallbackCap,
+                                marketCapFormatted: formatMarketCap(fallbackCap),
+                                price: null, volume: 0, avgVolume: 0,
+                                week52High: null, week52Low: null,
+                                sma50: null, sma200: null,
+                                sector: 'Unknown', industry: 'Unknown',
+                                rsScore: 0.5,
+                                isVelocity: false,
+                                tier,
+                                isETF,
+                                isSpeculative: isSpec,
+                                daysToEarnings: null,
+                            };
+                        }
+                        return null;
                     }
                 })
             );
-
-            results.forEach(result => {
-                if (result.status === 'fulfilled' && result.value) {
-                    qualified.push(result.value);
-                }
+            results.forEach(r => {
+                if (r.status === 'fulfilled' && r.value) qualified.push(r.value);
             });
-
-            // Rate limiting - 2 second delay between batches
-            if (i + batchSize < symbols.length) {
+            if (i + batchSize < allSymbols.length) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
             }
         }
 
-        // Cache results
-        cachedStockUniverse = qualified;
+        // --- Sort: tier priority, then rsScore ---
+        qualified.sort((a, b) => {
+            if ((a.tier || 3) !== (b.tier || 3)) return (a.tier || 3) - (b.tier || 3);
+            return b.rsScore - a.rsScore;
+        });
+        const selected = qualified.slice(0, maxStocks);
+        const velocityCount = selected.filter(s => s.isVelocity).length;
+        cachedStockUniverse = selected;
         lastScreenTime = Date.now();
-
-        console.log(`[Market Screener] ✓ Found ${qualified.length} stocks with market cap > $2B`);
-
-        return qualified;
-
+        console.log(
+            `[HERMES] ✓ Universe: ${selected.length} stocks | ` +
+            `${selected.length - velocityCount} static + ${velocityCount} velocity breakouts | ` +
+            `sorted by Tier + Relative Strength`
+        );
+        return selected;
     } catch (error) {
         console.error('[Market Screener] Error:', error);
-        return cachedStockUniverse || []; // Return cache on error
+        return cachedStockUniverse || [];
     }
+}
+
+/**
+ * Quality mid-cap symbols ($2B–$15B) not covered by the S&P500/NASDAQ-100 lists.
+ * Organised by sector so each cycle has broad diversification.
+ */
+function getMidCapSymbols() {
+    return [
+        // Technology — SaaS / Cloud
+        'APPN', 'PCOR', 'DOMO', 'ZUO', 'SPT', 'NCNO', 'BRZE', 'NTNX', 'JAMF', 'TOST',
+        'GLOB', 'DOCN', 'WK', 'CWAN', 'RDWR', 'TASK', 'AZEK', 'KD', 'PAR', 'ALTR',
+        // Semiconductors (mid-tier)
+        'ACLS', 'ONTO', 'COHU', 'UCTT', 'AMBA', 'ACMR', 'LSCC', 'WOLF', 'PI', 'FORM',
+        // Healthcare & Biotech
+        'ACAD', 'PTCT', 'ALKS', 'ITCI', 'ARVN', 'AUPH', 'PRAX', 'ARQT', 'IMVT', 'ENSG',
+        'LNTH', 'IONS', 'KROS', 'MDXG', 'PRTA', 'RXDX', 'ACRS', 'NKTR', 'INVA', 'TMDX',
+        // Financials — Insurance, specialty finance, regional banks
+        'PIPR', 'SF', 'ESNT', 'NMIH', 'PFSI', 'AGO', 'RDN', 'WTFC', 'CATY', 'FNB',
+        'TFIN', 'BANF', 'CVBF', 'PPBI', 'WSBC', 'HMN', 'UWMC', 'GHLD', 'AMSF', 'IBCP',
+        // Consumer — Restaurants, apparel, specialty retail
+        'WING', 'TXRH', 'SFM', 'CAVA', 'SHAK', 'BROS', 'LEVI', 'CROX', 'SKX', 'BOOT',
+        'EAT', 'BJ', 'ARMK', 'UNFI', 'CHUY', 'CAKE', 'BJRI', 'PLAY', 'USFD', 'PFGC',
+        // Industrials, defense, construction
+        'DRS', 'TRMB', 'MYRG', 'IESC', 'AWI', 'ATKR', 'BECN', 'IBP', 'CSWI', 'TREX',
+        'UFPI', 'NWPX', 'HXL', 'TDG', 'KFRC', 'RXO', 'GXO', 'XPO', 'SAIA', 'ARCB',
+        // Energy — oil & gas, clean energy
+        'ENPH', 'SEDG', 'ARRY', 'BE', 'PLUG', 'RUN', 'CEIX', 'CHRD', 'CIVI', 'SM',
+        'MTDR', 'CRGY', 'VTLE', 'GPRE', 'RES', 'NGL', 'PUMP', 'PTEN', 'NINE', 'KOS',
+        // REITs — specialty mid-cap
+        'COLD', 'IIPR', 'STAG', 'EGP', 'REXR', 'NNN', 'RHP', 'DEA', 'PLYM', 'ROIC',
+    ];
 }
 
 /**
  * Get S&P 500 symbols
  */
 async function getSP500Symbols() {
-    // Top S&P 500 stocks (expanded list)
     return [
-        // Technology
+        // Technology (60)
         'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'NVDA', 'META', 'TSLA', 'AVGO', 'ORCL',
         'ADBE', 'CRM', 'CSCO', 'ACN', 'AMD', 'INTC', 'IBM', 'QCOM', 'TXN', 'INTU',
         'NOW', 'AMAT', 'MU', 'ADI', 'LRCX', 'KLAC', 'SNPS', 'CDNS', 'MCHP', 'FTNT',
-        // Financials
+        'PANW', 'CRWD', 'DDOG', 'NET', 'ZS', 'OKTA', 'PLTR', 'SNOW', 'MDB', 'TEAM',
+        'WDAY', 'VEEV', 'ANSS', 'ADSK', 'ROP', 'KEYS', 'PTC', 'GDDY', 'VRSN', 'AKAM',
+        'GLW', 'JNPR', 'HPQ', 'HPE', 'WDC', 'STX', 'NTAP', 'PSTG', 'DELL', 'SMCI',
+        // Financials (40)
         'JPM', 'V', 'MA', 'BAC', 'WFC', 'MS', 'GS', 'BLK', 'SPGI', 'C',
         'AXP', 'SCHW', 'CB', 'MMC', 'PGR', 'AON', 'TFC', 'USB', 'PNC', 'BK',
-        // Healthcare
+        'MCO', 'ICE', 'CME', 'NDAQ', 'CBOE', 'FIS', 'FI', 'PYPL', 'SQ', 'HOOD',
+        'COF', 'DFS', 'ALLY', 'SYF', 'MTB', 'HBAN', 'RF', 'CFG', 'KEY', 'FITB',
+        // Healthcare (40)
         'UNH', 'JNJ', 'LLY', 'ABBV', 'MRK', 'TMO', 'ABT', 'DHR', 'PFE', 'AMGN',
         'BMY', 'ISRG', 'VRTX', 'GILD', 'CVS', 'CI', 'ELV', 'HCA', 'BSX', 'MDT',
-        // Consumer
-        'AMZN', 'WMT', 'HD', 'MCD', 'NKE', 'COST', 'SBUX', 'TGT', 'LOW', 'TJX',
-        'BKNG', 'CMG', 'MAR', 'ABNB', 'DIS', 'NFLX', 'PG', 'KO', 'PEP', 'PM',
-        // Industrial
+        'REGN', 'ZBH', 'EW', 'DXCM', 'IDXX', 'MTD', 'WAT', 'A', 'IQV', 'CRL',
+        'BIO', 'HOLX', 'PODD', 'INSP', 'ALGN', 'NVCR', 'EXAS', 'NVST', 'TNDM', 'IRTC',
+        // Consumer Discretionary + Staples (40)
+        'WMT', 'HD', 'MCD', 'NKE', 'COST', 'SBUX', 'TGT', 'LOW', 'TJX', 'BKNG',
+        'CMG', 'MAR', 'ABNB', 'DIS', 'NFLX', 'PG', 'KO', 'PEP', 'PM', 'MO',
+        'CL', 'MDLZ', 'GIS', 'K', 'SYY', 'ADM', 'MNST', 'ORLY', 'AZO', 'ULTA',
+        'LULU', 'YUM', 'DPZ', 'EL', 'KMB', 'CHD', 'CLX', 'HRL', 'CAG', 'MKC',
+        // Industrials (30)
         'UNP', 'CAT', 'HON', 'UPS', 'RTX', 'BA', 'GE', 'LMT', 'DE', 'MMM',
-        // Energy
+        'EMR', 'ETN', 'PH', 'ROK', 'AME', 'FDX', 'FAST', 'CTAS', 'PCAR', 'ODFL',
+        'NSC', 'CSX', 'WAB', 'GWW', 'MSI', 'XYL', 'GNRC', 'CPRT', 'VRSK', 'CARR',
+        // Energy (20)
         'XOM', 'CVX', 'COP', 'SLB', 'EOG', 'MPC', 'PSX', 'VLO', 'OXY', 'HES',
-        // Communication
-        'GOOGL', 'META', 'DIS', 'NFLX', 'CMCSA', 'T', 'VZ', 'TMUS',
-        // Utilities
-        'NEE', 'DUK', 'SO', 'D', 'AEP', 'EXC', 'SRE', 'PEG',
-        // Real Estate
-        'AMT', 'PLD', 'CCI', 'EQIX', 'PSA', 'WELL', 'SPG', 'O'
+        'DVN', 'FANG', 'PXD', 'APA', 'MRO', 'HAL', 'BKR', 'NOV', 'LNG', 'WMB',
+        // Communication (15)
+        'CMCSA', 'T', 'VZ', 'TMUS', 'CHTR', 'FOX', 'FOXA', 'PARA', 'WBD', 'OMC',
+        'IPG', 'TTWO', 'EA', 'MTCH', 'ZG',
+        // Utilities + REITs (15)
+        'NEE', 'DUK', 'SO', 'AEP', 'EXC', 'SRE', 'PEG', 'AMT', 'PLD', 'CCI',
+        'EQIX', 'PSA', 'WELL', 'SPG', 'O',
     ];
 }
 
 /**
- * Get top NASDAQ symbols
+ * Get top NASDAQ + growth stocks
  */
 async function getTopNasdaqSymbols() {
-    // Top NASDAQ-100 stocks
     return [
-        'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'NVDA', 'META', 'TSLA', 'AVGO', 'COST',
-        'ASML', 'PEP', 'AZN', 'CSCO', 'TMUS', 'AMD', 'ADBE', 'NFLX', 'CMCSA', 'INTC',
-        'TXN', 'QCOM', 'INTU', 'HON', 'AMGN', 'AMAT', 'ISRG', 'BKNG', 'SBUX', 'ADI',
-        'GILD', 'VRTX', 'MDLZ', 'REGN', 'PYPL', 'ADP', 'MU', 'LRCX', 'PANW', 'MELI',
-        'SNPS', 'KLAC', 'CDNS', 'MNST', 'ORLY', 'CRWD', 'MAR', 'CTAS', 'MRVL', 'FTNT',
-        'ADSK', 'ABNB', 'WDAY', 'NXPI', 'DASH', 'TEAM', 'PCAR', 'PAYX', 'ROST', 'MCHP',
-        'COIN', 'PLTR', 'SNOW', 'DDOG', 'ZS', 'OKTA', 'NET', 'RBLX', 'UBER', 'LYFT'
+        // NASDAQ-100 core
+        'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'AVGO', 'COST', 'ASML',
+        'PEP', 'AZN', 'CSCO', 'TMUS', 'AMD', 'ADBE', 'NFLX', 'INTU', 'HON', 'AMGN',
+        'AMAT', 'ISRG', 'BKNG', 'SBUX', 'ADI', 'GILD', 'VRTX', 'MDLZ', 'REGN', 'ADP',
+        'MU', 'LRCX', 'PANW', 'MELI', 'SNPS', 'KLAC', 'CDNS', 'MNST', 'ORLY', 'CRWD',
+        'MAR', 'CTAS', 'MRVL', 'FTNT', 'ADSK', 'ABNB', 'WDAY', 'NXPI', 'DASH', 'TEAM',
+        'PCAR', 'PAYX', 'ROST', 'MCHP', 'QCOM', 'TXN', 'INTC',
+        // High-growth / breakout candidates
+        'COIN', 'PLTR', 'SNOW', 'DDOG', 'ZS', 'OKTA', 'NET', 'RBLX', 'UBER', 'APP',
+        'TTD', 'TWLO', 'HUBS', 'BILL', 'ZI', 'SMAR', 'ESTC', 'MDB', 'GTLB', 'CFLT',
+        'IOT', 'AEHR', 'ASTS', 'RKLB', 'ACHR', 'JOBY', 'EVTL', 'LIDR', 'LUNR', 'RDW',
+        // AI / Semiconductor cycle
+        'ARM', 'SMCI', 'ALAB', 'NVDA', 'AMD', 'AVGO', 'QCOM', 'MRVL', 'MCHP', 'ON',
+        'TER', 'MKSI', 'ENTG', 'IPGP', 'CEVA', 'SLAB', 'DIOD', 'SITM', 'ALGM', 'MPWR',
+        // Biotech momentum
+        'MRNA', 'BNTX', 'RXRX', 'SANA', 'BEAM', 'EDIT', 'CRSP', 'NTLA', 'FATE', 'KYMR',
     ];
 }
 
@@ -196,6 +438,40 @@ async function getTopLiquidStocks(limit = 50) {
 }
 
 /**
+ * Minervini Trend Template quick pre-filter.
+ *
+ * Eliminates stocks that clearly don't meet swing-trade setup criteria
+ * BEFORE expensive full AI analysis runs on them.
+ * Returns true if the stock passes (should be analyzed further).
+ *
+ * Criteria (relaxed vs strict SEPA — designed for pre-screening):
+ *   1. Price > 50-day SMA proxy (regularMarketPrice > 50-day estimate)
+ *   2. Price within 25% of 52-week high (not deep in base)
+ *   3. Volume ratio ≥ 0.8 (not dead/thin)
+ *   4. Price > $5 (avoid penny stocks)
+ *   5. Average daily volume ≥ 200k (minimum liquidity)
+ */
+function passesQuickFilter(stock) {
+    if (!stock) return false;
+    // Minimum price guard
+    if (stock.price && stock.price < 5) return false;
+    // Minimum liquidity
+    const avgVol = stock.avgVolume || stock.volume || 0;
+    if (avgVol < 200000) return false;
+    // Volume ratio — not completely dead
+    if (stock.volume && stock.avgVolume && stock.avgVolume > 0) {
+        const volRatio = stock.volume / stock.avgVolume;
+        if (volRatio < 0.3) return false;
+    }
+    // ETFs (tier 1) do NOT need to be near 52wk high — they track indices
+    if (!stock.isETF && stock.week52High && stock.price) {
+        const prox = stock.price / stock.week52High;
+        if (prox < 0.60) return false;
+    }
+    return true;
+}
+
+/**
  * Manual refresh of stock universe
  */
 function refreshCache() {
@@ -204,10 +480,47 @@ function refreshCache() {
     console.log('[Market Screener] Cache cleared, will refresh on next request');
 }
 
+/**
+ * Returns the full curated symbol list (ETFs + S&P500 + NASDAQ + midcap + speculative)
+ * with NO Yahoo Finance calls — safe to use during off-hours batch jobs.
+ * The nightly universe scan uses this instead of getStockUniverse() to avoid
+ * hammering Yahoo before the AI analysis phase.
+ */
+async function getStaticSymbolList() {
+    const [sp500, nasdaq, midcap] = await Promise.all([
+        getSP500Symbols(),
+        getTopNasdaqSymbols(),
+        Promise.resolve(getMidCapSymbols())
+    ]);
+    const all = [
+        ...TIER1_ETFS,
+        ...sp500,
+        ...nasdaq,
+        ...midcap,
+        ...TIER5_SPECULATIVE
+    ];
+    return [...new Set(all)];
+}
+
+/**
+ * Same as getStaticSymbolList but excludes ETFs.
+ * ETFs have no earnings/fundamentals so analyzeStockWithAI always returns null for them.
+ * Use this for the nightly AI scan to avoid wasting slots.
+ */
+async function getStockOnlySymbolList() {
+    const etfSet = new Set(TIER1_ETFS);
+    const all = await getStaticSymbolList();
+    return all.filter(sym => !etfSet.has(sym));
+}
+
 module.exports = {
     getStockUniverse,
+    getStaticSymbolList,
+    getStockOnlySymbolList,
     getStocksBySector,
     getTopLiquidStocks,
+    passesQuickFilter,
     refreshCache,
-    formatMarketCap
+    formatMarketCap,
+    computeRS,
 };

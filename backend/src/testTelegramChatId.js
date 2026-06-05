@@ -4,19 +4,36 @@
  */
 
 const TelegramBot = require('node-telegram-bot-api');
-const token = '8520099950:AAFAAZrQCEK9B6wARjpoYDiqP3zNsaMz52Q';
+const token = process.env.TELEGRAM_BOT_TOKEN;
+
+if (!token) {
+  console.error('TELEGRAM_BOT_TOKEN is not set. Export it before running this script.');
+  process.exit(1);
+}
+
 const bot = new TelegramBot(token);
+
+const baseChatId = process.argv[2] || process.env.TELEGRAM_CHAT_ID;
+
+if (!baseChatId) {
+  console.error('Provide a candidate chat ID via TELEGRAM_CHAT_ID or as the first CLI argument.');
+  process.exit(1);
+}
 
 async function testChatIds() {
   const testMessage = '🧪 Test message from KiranRock Trading Platform';
+  const normalizedChatId = String(baseChatId).trim();
+  const unsignedChatId = normalizedChatId.replace(/^-100/, '').replace(/^-/, '');
   
   // Different chat ID formats to try
-  const chatIdsToTry = [
-    '-5063427459',           // Original
-    -5063427459,             // Number format
-    '-1005063427459',        // Supergroup format (add -100 prefix)
-    -1005063427459,          // Supergroup number format
-  ];
+  const chatIdsToTry = [...new Set([
+    normalizedChatId,
+    Number(normalizedChatId),
+    `-${unsignedChatId}`,
+    Number(`-${unsignedChatId}`),
+    `-100${unsignedChatId}`,
+    Number(`-100${unsignedChatId}`)
+  ].filter(chatId => String(chatId) !== 'NaN'))];
 
   console.log('🧪 Testing different chat ID formats...\n');
 

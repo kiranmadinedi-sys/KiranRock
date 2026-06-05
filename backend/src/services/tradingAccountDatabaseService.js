@@ -87,10 +87,46 @@ async function setInitialBalance(userId, amount) {
     return result.rows[0];
 }
 
+/**
+ * Recompute cash balance from trade history.
+ * Useful when the balance column drifts to $0 due to sync issues.
+ * Formula: initial_balance + SELL proceeds - BUY costs - commissions
+ */
+async function syncBalanceFromHistory(userId) {
+    const account = await getTradingAccount(userId);
+    if (!account) throw new Error(`No trading account for user ${userId}`);
+
+    const initialBalance = parseFloat(account.initial_balance || 0);
+
+    const result = await query(`
+        SELECT
+            COALESCE(SUM(CASE WHEN action = 'BUY'  THEN -(total + commission) ELSE 0 END), 0) +
+            COALESCE(SUM(CASE WHEN action = 'SELL' THEN  (total - commission) ELSE 0 END), 0) +
+            COALESCE(SUM(CASE WHEN action = 'DEPOSIT' THEN total ELSE 0 END), 0) +
+            COALESCE(SUM(CASE WHEN action = 'WITHDRAWAL' THEN -total ELSE 0 END), 0)
+            AS net_cash_flow
+        FROM trades
+        WHERE user_id = $1
+          AND action IN ('BUY', 'SELL', 'DEPOSIT', 'WITHDRAWAL')
+    `, [userId]);
+
+    const netFlow = parseFloat(result.rows[0]?.net_cash_flow || 0);
+    const recomputedBalance = Math.max(0, initialBalance + netFlow);
+
+    await query(`
+        UPDATE trading_accounts
+        SET balance = $1, updated_at = NOW()
+        WHERE user_id = $2
+    `, [recomputedBalance, userId]);
+
+    return { userId, initialBalance, netFlow, recomputedBalance };
+}
+
 module.exports = {
     getTradingAccount,
     updateBalance,
     addFunds,
     withdrawFunds,
-    setInitialBalance
+    setInitialBalance,
+    syncBalanceFromHistory
 };

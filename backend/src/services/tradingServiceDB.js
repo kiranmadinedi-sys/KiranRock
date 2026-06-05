@@ -25,7 +25,7 @@ const getCurrentPrice = async (symbol) => {
 /**
  * Execute a buy order
  */
-const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', aiScore = null, sector = null) => {
+const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', aiScore = null, sector = null, notes = null, fillPrice = null) => {
     try {
         if (quantity <= 0 || !Number.isInteger(quantity)) {
             throw new Error('Quantity must be a positive integer');
@@ -125,23 +125,25 @@ const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', 
                 ]);
             }
             
-            // Record trade
+            // Record trade — use fillPrice if supplied (bracket), else currentPrice (market)
+            const recordedPrice = fillPrice || currentPrice;
             const tradeResult = await client.query(`
                 INSERT INTO trades (
                     user_id, symbol, action, quantity, price, total,
-                    commission, executed_by, ai_score, sector
-                ) VALUES ($1, $2, 'BUY', $3, $4, $5, $6, $7, $8, $9)
+                    commission, executed_by, ai_score, sector, notes
+                ) VALUES ($1, $2, 'BUY', $3, $4, $5, $6, $7, $8, $9, $10)
                 RETURNING *
             `, [
                 userId,
                 symbol.toUpperCase(),
                 quantity,
-                currentPrice,
-                totalCost,
+                recordedPrice,
+                recordedPrice * quantity,
                 commission,
                 executedBy,
                 aiScore,
-                sector
+                sector,
+                notes
             ]);
 
             // Persist buy lot for FIFO accounting
@@ -176,14 +178,16 @@ const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', 
 /**
  * Execute a sell order
  */
-const executeSellOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', notes = null) => {
+const executeSellOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', notes = null, fillPrice = null) => {
     try {
         if (quantity <= 0 || !Number.isInteger(quantity)) {
             throw new Error('Quantity must be a positive integer');
         }
-        
-        // Get current price
-        const currentPrice = await getCurrentPrice(symbol);
+
+        // Use broker-confirmed fill price when available; fall back to live quote only when needed.
+        // This prevents a second price fetch from failing (Alpaca returning 0 for thin symbols)
+        // and causing the DB transaction to abort after the broker order already executed.
+        const currentPrice = fillPrice || await getCurrentPrice(symbol);
         if (!currentPrice) {
             throw new Error('Unable to fetch current price');
         }

@@ -4,9 +4,18 @@ const fundamentalsService = require('./fundamentalsService');
 const newsSentimentService = require('./newsSentimentService');
 const { ALL_STOCKS, TOP_200, MEGA_CAP, TOTAL_COUNT } = require('./stockUniverse');
 const cacheService = require('./cacheService');
+const {
+    loadWeeklyPredictionSnapshot,
+    saveWeeklyPredictionSnapshot
+} = require('./weeklyPredictionSnapshotService');
 
 // Cache weekly predictions for 30 minutes — the scan takes minutes, no need to re-run on every page load
 const WEEKLY_CACHE_TTL = 30 * 60 * 1000;
+
+function readPositiveIntEnv(name, fallback) {
+    const value = Number.parseInt(process.env[name] || '', 10);
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+}
 
 /**
  * Weekly Stock Prediction Engine
@@ -44,9 +53,94 @@ function getStockUniverse(universeType = 'DEFAULT') {
     }
 }
 
+/**
+ * Resolve a dynamic universe from HERMES (RS-sorted, live data).
+ * Falls back to the static universe if HERMES or the DB is unavailable.
+ *
+ * Callers should await this and pass the result to the analysis loop
+ * instead of calling getStockUniverse() directly when universe='HERMES'.
+ *
+ * @param {string} universeType
+ * @param {number} limit - max symbols to return (default 300)
+ * @returns {Promise<string[]>}
+ */
+async function resolveDynamicUniverse(universeType = 'DEFAULT', limit = 300) {
+    const upper = universeType.toUpperCase();
+
+    // Only HERMES/DYNAMIC needs async resolution
+    if (upper !== 'HERMES' && upper !== 'DYNAMIC') {
+        return getStockUniverse(universeType);
+    }
+
+    try {
+        // Primary: HERMES live universe (RS-sorted, already filtered for quality)
+        const marketScreenerService = require('./marketScreenerService');
+        const universe = await marketScreenerService.getStockUniverse();
+        if (universe.length > 0) {
+            const symbols = universe.slice(0, limit).map(s => s.symbol);
+            console.log(`[Weekly Predictions] HERMES universe: ${symbols.length} symbols (RS-sorted)`);
+            return symbols;
+        }
+    } catch (_) {}
+
+    // Fallback: asset_universe_daily (Alpaca, no RS sort but broad coverage)
+    try {
+        const { query: dbQuery } = require('../config/database');
+        const result = await dbQuery(`
+            SELECT symbol FROM asset_universe_daily
+            WHERE universe_date = CURRENT_DATE
+            ORDER BY rs_score DESC NULLS LAST
+            LIMIT $1
+        `, [limit]);
+        if (result.rows.length > 0) {
+            const symbols = result.rows.map(r => r.symbol);
+            console.log(`[Weekly Predictions] HERMES fallback (DB): ${symbols.length} symbols`);
+            return symbols;
+        }
+    } catch (_) {}
+
+    // Final fallback: static ALL_STOCKS
+    console.log('[Weekly Predictions] HERMES unavailable — falling back to ALL_STOCKS');
+    return ALL_STOCKS;
+}
+
 console.log(`[Weekly Predictions] Stock universe loaded: ${TOTAL_COUNT} stocks available`);
 console.log(`[Weekly Predictions] Default mode: TOP_200 (${TOP_200.length} stocks)`);
 console.log(`[Weekly Predictions] Available modes: MEGA_CAP (${MEGA_CAP.length}), TOP_200 (${TOP_200.length}), ALL (${TOTAL_COUNT})`);
+
+function buildWeeklyPredictionCacheKey(options = {}) {
+    const {
+        limit = 20,
+        minScore = 60,
+        sectors = null,
+        marketCapMin = null,
+        volatilityMax = null,
+        universe = 'DEFAULT'
+    } = options;
+
+    const sectorKey = Array.isArray(sectors) ? sectors.join(',') : (sectors || 'all');
+    return `weekly_predictions:${String(universe).toUpperCase()}:${minScore}:${limit}:${sectorKey}:${marketCapMin || 0}:${volatilityMax || 0}`;
+}
+
+function resolveWeeklyExecutionProfile(options = {}) {
+    const universe = String(options.universe || 'DEFAULT').toUpperCase();
+    const requestedProfile = String(options.executionProfile || 'default').toLowerCase();
+
+    if (requestedProfile === 'warmup') {
+        const allUniverse = universe === 'ALL' || universe === 'COMPREHENSIVE' || universe === 'FULL';
+        return {
+            name: 'warmup',
+            batchSize: readPositiveIntEnv('WEEKLY_WARMUP_BATCH_SIZE', allUniverse ? 1 : 2),
+            batchDelayMs: readPositiveIntEnv('WEEKLY_WARMUP_BATCH_DELAY_MS', allUniverse ? 5000 : 3000)
+        };
+    }
+
+    return {
+        name: 'default',
+        batchSize: readPositiveIntEnv('WEEKLY_DEFAULT_BATCH_SIZE', 3),
+        batchDelayMs: readPositiveIntEnv('WEEKLY_DEFAULT_BATCH_DELAY_MS', 2000)
+    };
+}
 
 const MAJOR_STOCKS = [
     // This is kept for backwards compatibility but will be replaced by dynamic universe selection
@@ -177,31 +271,49 @@ const getWeeklyPredictions = async (options = {}) => {
     } = options;
 
     // Build a cache key that captures all options that affect results
-    const cacheKey = `weekly_predictions:${universe}:${minScore}:${limit}:${sectors || 'all'}:${marketCapMin || 0}:${volatilityMax || 0}`;
+    const cacheKey = buildWeeklyPredictionCacheKey({
+        limit,
+        minScore,
+        sectors,
+        marketCapMin,
+        volatilityMax,
+        universe
+    });
     const cached = cacheService.get(cacheKey);
     if (cached) {
         console.log(`[Weekly Predictions] Cache HIT for universe=${universe} — returning cached results (${cached.topPicks.length} picks)`);
         return cached;
     }
 
-    // Get appropriate stock universe
-    const stocksToAnalyze = getStockUniverse(universe);
+    const persistedSnapshot = loadWeeklyPredictionSnapshot(cacheKey, WEEKLY_CACHE_TTL);
+    if (persistedSnapshot?.payload) {
+        console.log(`[Weekly Predictions] Snapshot HIT for universe=${universe} — returning persisted results (${persistedSnapshot.payload.topPicks?.length || 0} picks)`);
+        const snapshotPayload = { ...persistedSnapshot.payload, fromCache: true, cacheSource: 'snapshot' };
+        cacheService.set(cacheKey, snapshotPayload, WEEKLY_CACHE_TTL);
+        return snapshotPayload;
+    }
+
+    // Get appropriate stock universe (async for HERMES/DYNAMIC, sync for static modes)
+    const stocksToAnalyze = await resolveDynamicUniverse(universe);
+    const executionProfile = resolveWeeklyExecutionProfile(options);
 
     console.log(`[Weekly Predictions] Cache MISS — starting fresh analysis of ${stocksToAnalyze.length} stocks (universe: ${universe})...`);
+    console.log(`[Weekly Predictions] Execution profile: ${executionProfile.name} (batchSize=${executionProfile.batchSize}, batchDelayMs=${executionProfile.batchDelayMs})`);
     console.log(`[Weekly Predictions] Estimated time: ${Math.ceil(stocksToAnalyze.length / 10)}+ seconds`);
     
     try {
         // Analyze all stocks in parallel (batched to avoid overwhelming APIs)
-        const batchSize = 3;  // Process 3 stocks at a time (reduced from 10 to respect Yahoo rate limits)
         const allPredictions = [];
         
-        for (let i = 0; i < stocksToAnalyze.length; i += batchSize) {
-            const batch = stocksToAnalyze.slice(i, i + batchSize);
+        for (let i = 0; i < stocksToAnalyze.length; i += executionProfile.batchSize) {
+            const batch = stocksToAnalyze.slice(i, i + executionProfile.batchSize);
             const progress = Math.round((i / stocksToAnalyze.length) * 100);
             console.log(`[Weekly] Progress: ${progress}% (${i}/${stocksToAnalyze.length})`);
             
             const batchResults = await Promise.allSettled(
-                batch.map(symbol => analyzeStockForWeek(symbol))
+                batch.map(symbol => analyzeStockForWeek(symbol, {
+                    executionProfile: executionProfile.name
+                }))
             );
             
             batchResults.forEach((result, idx) => {
@@ -213,7 +325,7 @@ const getWeeklyPredictions = async (options = {}) => {
             });
             
             // Longer pause between batches to respect Yahoo Finance rate limits
-            await new Promise(resolve => setTimeout(resolve, 2000)); // 2 seconds between batches
+            await new Promise(resolve => setTimeout(resolve, executionProfile.batchDelayMs));
         }
         
         console.log(`[Weekly Predictions] Analyzed ${allPredictions.length} stocks successfully`);
@@ -229,23 +341,36 @@ const getWeeklyPredictions = async (options = {}) => {
         
         // Filter and sort predictions
         let filtered = dedupedPredictions.filter(p => p.totalScore >= minScore);
-        
+
+        // Exclude only Avoid signals — Hold stays in (watchlist tier)
+        filtered = filtered.filter(p => p.prediction?.signal !== 'Avoid');
+
+        // Require minimum 2:1 reward/risk only for Buy/Strong Buy picks
+        // Hold-signal stocks are exempt so they still appear in lower tiers
+        filtered = filtered.filter(p => {
+            const sig = p.prediction?.signal;
+            if (sig === 'Strong Buy' || sig === 'Buy') {
+                return parseFloat(p.rewardRiskRatio || 0) >= 2.0;
+            }
+            return true; // Hold: include regardless of R/R
+        });
+
         // Apply additional filters if specified
         if (sectors) {
             filtered = filtered.filter(p => sectors.includes(p.sector));
         }
-        
+
         if (marketCapMin) {
             filtered = filtered.filter(p => p.marketCap >= marketCapMin);
         }
-        
+
         if (volatilityMax) {
             filtered = filtered.filter(p => p.volatility <= volatilityMax);
         }
-        
+
         // Sort by total score (highest first)
         filtered.sort((a, b) => b.totalScore - a.totalScore);
-        
+
         // Assign tier ratings
         const withTiers = assignTierRatings(filtered);
         
@@ -267,7 +392,9 @@ const getWeeklyPredictions = async (options = {}) => {
         };
 
         // Cache for 30 minutes — avoids re-running the expensive scan on repeated calls
-        cacheService.set(cacheKey, { ...result, fromCache: true }, WEEKLY_CACHE_TTL);
+        const cachedResult = { ...result, fromCache: true, cacheSource: 'memory' };
+        cacheService.set(cacheKey, cachedResult, WEEKLY_CACHE_TTL);
+        saveWeeklyPredictionSnapshot(cacheKey, cachedResult);
 
         return result;
         
@@ -280,14 +407,15 @@ const getWeeklyPredictions = async (options = {}) => {
 /**
  * Analyze a single stock for weekly performance prediction
  */
-const analyzeStockForWeek = async (symbol) => {
+const analyzeStockForWeek = async (symbol, options = {}) => {
     try {
+        const executionProfile = String(options.executionProfile || 'default').toLowerCase();
         // Get all required data in parallel
         const [stockData, aiPrediction, fundamentals, newsData] = await Promise.allSettled([
             stockDataService.getStockData(symbol, '1d'),
             getMultiModelPrediction(symbol).catch(() => null),
-            fundamentalsService.getFundamentals(symbol).catch(() => null),
-            newsSentimentService.getNewsSentiment(symbol).catch(() => null)
+            fundamentalsService.getFundamentals(symbol, { executionProfile }).catch(() => null),
+            newsSentimentService.getNewsSentiment(symbol, { executionProfile }).catch(() => null)
         ]);
         
         const prices = stockData.status === 'fulfilled' ? stockData.value : [];
@@ -374,7 +502,20 @@ const analyzeStockForWeek = async (symbol) => {
             technicalSignals: getTechnicalSignals(prices),
             analystRatings: fund?.analystRatings || null,
             marketCap: fund?.marketCap || null,
-            sector: fund?.sector || 'Unknown',
+            sector: (() => {
+                const s = fund?.sector;
+                if (s && s !== 'Unknown') return s;
+                // Fallback: check live universe cache (already has Yahoo-sourced sector)
+                try {
+                    const du = require('./dynamicUniverseService');
+                    const cached = du.getScanUniverse();
+                    if (cached) {
+                        const entry = cached.find(e => e.symbol === symbol);
+                        if (entry?.sector && entry.sector !== 'Unknown') return entry.sector;
+                    }
+                } catch (_) {}
+                return 'Unknown';
+            })(),
             volatility: calculateVolatility(prices),
             riskAnalysis: {
                 riskScore: Math.round(riskAnalysis.riskScore),
@@ -398,15 +539,20 @@ const analyzeStockForWeek = async (symbol) => {
  */
 const calculateAIScore = (aiPrediction) => {
     if (!aiPrediction) return 50;
-    
-    const { signal, confidence } = aiPrediction;
-    
+
+    const { signal, confidence, models } = aiPrediction;
+    // Penalise single-model verdicts — multi-model agreement earns more
+    const modelCount = Array.isArray(models) ? models.length : (aiPrediction.modelCount || 1);
+    const diversityFactor = modelCount >= 3 ? 1.0 : modelCount === 2 ? 0.92 : 0.82;
+
     if (signal === 'Buy') {
-        return confidence;
+        // Hard-cap at 88; requires genuine multi-model agreement to approach it
+        return Math.round(Math.min(88, confidence * diversityFactor));
     } else if (signal === 'Sell') {
-        return 100 - confidence;
+        return Math.round(Math.max(12, (100 - confidence) * diversityFactor));
     } else {
-        return 50;
+        // Hold — penalise: ambiguous signal should score below 50
+        return Math.round(45 * diversityFactor);
     }
 };
 
@@ -416,31 +562,50 @@ const calculateAIScore = (aiPrediction) => {
 const calculateTechnicalScore = (prices) => {
     const priceValues = prices.map(p => p.close);
     let score = 50;
-    
-    // SMA alignment
-    const sma5 = calculateSMA(priceValues, 5);
+
+    const sma5  = calculateSMA(priceValues, 5);
     const sma10 = calculateSMA(priceValues, 10);
     const sma20 = calculateSMA(priceValues, 20);
     const sma50 = calculateSMA(priceValues, 50);
     const current = priceValues[priceValues.length - 1];
-    
-    if (current > sma5 && sma5 > sma10 && sma10 > sma20) score += 20;
-    else if (current < sma5 && sma5 < sma10 && sma10 < sma20) score -= 20;
-    
-    if (current > sma50) score += 10;
-    else score -= 10;
-    
-    // RSI
+
+    // SMA stack alignment — full bull stack is rare; partial gets partial credit
+    if (current > sma5 && sma5 > sma10 && sma10 > sma20 && current > sma50) score += 22;
+    else if (current > sma5 && sma5 > sma10 && sma10 > sma20) score += 14;
+    else if (current < sma5 && sma5 < sma10 && sma10 < sma20 && current < sma50) score -= 22;
+    else if (current < sma5 && sma5 < sma10 && sma10 < sma20) score -= 14;
+
+    // SMA50 trend
+    if (current > sma50) score += 8;
+    else score -= 12; // heavier penalty: below 200 = structural weakness
+
+    // RSI — tight ranges. Overbought is a harder penalty than oversold is a bonus.
     const rsi = calculateRSI(priceValues, 14);
-    if (rsi >= 40 && rsi <= 60) score += 10; // Neutral RSI is good for weekly
-    else if (rsi > 70) score -= 15; // Overbought
-    else if (rsi < 30) score += 15; // Oversold - potential bounce
-    
-    // MACD
+    if (rsi >= 45 && rsi <= 65) score += 8;       // ideal weekly entry zone
+    else if (rsi > 75) score -= 18;               // clearly overbought — extended
+    else if (rsi > 70) score -= 12;
+    else if (rsi < 30) score += 10;               // oversold bounce potential
+    else if (rsi < 40) score += 4;
+
+    // MACD — confirms momentum direction
     const macd = calculateMACD(priceValues);
-    if (macd.histogram > 0) score += 10;
-    else score -= 10;
-    
+    if (macd.histogram > 0 && macd.macd > 0) score += 12;   // both positive = strong
+    else if (macd.histogram > 0) score += 6;
+    else if (macd.histogram < 0 && macd.macd < 0) score -= 12;
+    else score -= 5;
+
+    // Extension penalty — price too far above 20-SMA is a pullback risk
+    const extPct = sma20 > 0 ? (current - sma20) / sma20 * 100 : 0;
+    if (extPct > 10) score -= 15;
+    else if (extPct > 6)  score -= 8;
+
+    // Volume confirmation — last 5 bars vs 20-bar avg
+    const volumes = prices.map(p => p.volume || 0);
+    const avgVol20  = volumes.slice(-20).reduce((a, b) => a + b, 0) / Math.min(20, volumes.length);
+    const avgVol5   = volumes.slice(-5).reduce((a, b) => a + b, 0) / 5;
+    if (avgVol5 > avgVol20 * 1.5) score += 8;
+    else if (avgVol5 < avgVol20 * 0.6) score -= 8;
+
     return Math.max(0, Math.min(100, score));
 };
 
@@ -448,33 +613,50 @@ const calculateTechnicalScore = (prices) => {
  * Calculate fundamental score (0-100)
  */
 const calculateFundamentalScore = (fundamentals) => {
-    if (!fundamentals) return 50;
-    
+    if (!fundamentals) return 42; // No data → slight negative bias (unknown ≠ good)
+
     let score = 50;
-    
-    // Analyst ratings
+    let hasRealData = false;
+
+    // Analyst ratings — authoritative when present
     if (fundamentals.analystRatings) {
         const { strongBuy = 0, buy = 0, hold = 0, sell = 0, strongSell = 0 } = fundamentals.analystRatings;
         const total = strongBuy + buy + hold + sell + strongSell;
-        if (total > 0) {
+        if (total >= 3) {
+            hasRealData = true;
             const bullishPct = ((strongBuy * 2 + buy) / (total * 2)) * 100;
             score = bullishPct;
+            // Heavy sell coverage is a red flag beyond just score
+            if (sell + strongSell > total * 0.35) score -= 15;
         }
     }
-    
-    // Price target upside
+
+    // Price target upside vs current price
     if (fundamentals.priceTargets?.average && fundamentals.currentPrice) {
-        const upside = ((fundamentals.priceTargets.average - fundamentals.currentPrice) / 
-                       fundamentals.currentPrice) * 100;
-        if (upside > 10) score += 20;
-        else if (upside > 5) score += 10;
-        else if (upside < -5) score -= 10;
+        hasRealData = true;
+        const upside = ((fundamentals.priceTargets.average - fundamentals.currentPrice) /
+                        fundamentals.currentPrice) * 100;
+        if (upside > 20) score += 18;
+        else if (upside > 10) score += 12;
+        else if (upside > 5)  score += 6;
+        else if (upside < -5) score -= 12;  // Trading above analyst target = extended
+        else if (upside < -15) score -= 20;
     }
-    
-    // Earnings growth
-    if (fundamentals.earningsGrowth > 0.15) score += 10;
-    else if (fundamentals.earningsGrowth < 0) score -= 10;
-    
+
+    // Earnings growth — penalise negative growth harder than reward positive
+    const eg = fundamentals.earningsGrowth;
+    if (typeof eg === 'number') {
+        hasRealData = true;
+        if (eg > 0.25)       score += 14;
+        else if (eg > 0.10)  score += 8;
+        else if (eg > 0)     score += 3;
+        else if (eg < -0.10) score -= 16;
+        else if (eg < 0)     score -= 8;
+    }
+
+    // Penalty: no real data at all → pull toward neutral-bearish
+    if (!hasRealData) score -= 8;
+
     return Math.max(0, Math.min(100, score));
 };
 
@@ -529,12 +711,18 @@ const getRawNewsSentiment = (newsData) => {
 };
 
 const calculateSentimentScore = (newsData) => {
+    // No data / warmup skip / error → neutral with slight negative bias
+    if (!newsData || newsData.error) return 48;
+    if (!newsData.articles || newsData.articles.length === 0) return 48;
+
     const sentiment = getRawNewsSentiment(newsData);
-    if (sentiment === null) return 50;
-    
-    // Convert -100 to 100 sentiment to 0-100 score
+    if (sentiment === null) return 48;
+
+    // Amplify: each 10 points of raw sentiment → 4.5 score points away from neutral.
+    // Old formula: (-100+100)/2 = 0 for very negative → 0 score was mapped as 50 (!).
+    // New formula: -100→5 | -50→28 | -20→41 | 0→50 | +20→59 | +50→73 | +100→95
     const clamped = Math.max(-100, Math.min(100, sentiment));
-    return ((clamped + 100) / 2);
+    return Math.max(5, Math.min(95, Math.round(50 + clamped * 0.45)));
 };
 
 /**
@@ -590,15 +778,20 @@ const calculateExpectedMove = (prices, totalScore) => {
  * Calculate prediction confidence (0-100)
  */
 const calculateConfidence = (aiScore, technicalScore, fundamentalScore) => {
-    // Higher confidence when scores agree
-    const avgScore = (aiScore + technicalScore + fundamentalScore) / 3;
-    const deviation = Math.abs(aiScore - avgScore) + 
-                     Math.abs(technicalScore - avgScore) + 
-                     Math.abs(fundamentalScore - avgScore);
-    
-    const agreement = Math.max(0, 100 - deviation / 3);
-    
-    return Math.min(95, agreement);
+    // AI carries the most weight — it's the primary signal
+    const weightedAvg = aiScore * 0.50 + technicalScore * 0.30 + fundamentalScore * 0.20;
+
+    // Penalise disagreement between signals
+    const spread = Math.max(aiScore, technicalScore, fundamentalScore) -
+                   Math.min(aiScore, technicalScore, fundamentalScore);
+    const spreadPenalty = spread * 0.28;
+
+    // Map weighted average to confidence with steeper slope than before:
+    // 50→30  |  65→58  |  75→70  |  82→81  |  88→90  |  93→95
+    const base = 30 + (weightedAvg - 50) * 1.25;
+    const raw  = base - spreadPenalty;
+
+    return Math.min(95, Math.max(20, Math.round(raw)));
 };
 
 /**
@@ -710,13 +903,18 @@ const getTechnicalSignals = (prices) => {
  */
 const assignTierRatings = (predictions) => {
     return predictions.map(pred => {
+        const sig = pred.prediction?.signal;
         let tier;
-        if (pred.totalScore >= 80) tier = 'A';
-        else if (pred.totalScore >= 70) tier = 'B';
-        else if (pred.totalScore >= 60) tier = 'C';
-        else if (pred.totalScore >= 50) tier = 'D';
+        // Tier A: rare elite setups — strong signal + high score + high confidence
+        if (pred.totalScore >= 82 && pred.prediction?.confidence >= 80 && sig === 'Strong Buy') tier = 'A';
+        // Tier B: good setups
+        else if (pred.totalScore >= 74 && sig !== 'Avoid') tier = 'B';
+        // Tier C: watchlist
+        else if (pred.totalScore >= 66) tier = 'C';
+        // Tier D: marginal
+        else if (pred.totalScore >= 58) tier = 'D';
         else tier = 'F';
-        
+
         return { ...pred, tier };
     });
 };
@@ -1273,5 +1471,9 @@ function generateMarketSummary(sentiment, bullishCount, bearishCount, macroTrend
 module.exports = {
     getWeeklyPredictions,
     analyzeStockForWeek,
+    WEEKLY_CACHE_TTL,
+    buildWeeklyPredictionCacheKey,
+    resolveWeeklyExecutionProfile,
+    resolveDynamicUniverse,
     MAJOR_STOCKS
 };

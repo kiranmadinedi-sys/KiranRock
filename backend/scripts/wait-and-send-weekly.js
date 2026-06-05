@@ -15,8 +15,8 @@ function sleep(ms) {
 
 async function login() {
   const res = await axios.post('http://localhost:3001/api/auth/login', {
-    username: 'user',
-    password: 'password'
+    username: process.env.BOT_USERNAME || 'user',
+    password: process.env.BOT_PASSWORD || 'password'
   }, { 
     timeout: 30000, // Increased to 30 seconds
     validateStatus: (status) => status < 500 // Don't throw on 4xx errors

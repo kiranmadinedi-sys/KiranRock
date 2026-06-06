@@ -10,6 +10,7 @@ const newsMonitoringService = require('./services/newsMonitoringService');
 const stockSignalSnapshotScheduler = require('./services/stockSignalSnapshotScheduler');
 const stockSignalTelegramScheduler = require('./services/stockSignalTelegramScheduler');
 const assetUniverseScheduler       = require('./services/assetUniverseScheduler');
+const newsRescanService            = require('./services/newsRescanService');
 const {
     acquireLeadership,
     releaseLeadership,
@@ -18,7 +19,7 @@ const {
 const { pool } = require('./config/database');
 
 const WORKER_NAME = process.env.WORKER_NAME || 'primary-worker';
-const WORKER_SERVICES = ['enhanced-ai', 'options-scanner', 'options-bot', 'news-monitor', 'telegram-reports', 'stock-signal-snapshots', 'stock-signal-telegram', 'asset-universe'];
+const WORKER_SERVICES = ['enhanced-ai', 'options-scanner', 'options-bot', 'news-monitor', 'telegram-reports', 'stock-signal-snapshots', 'stock-signal-telegram', 'asset-universe', 'news-rescan'];
 const workerInstanceId = `${os.hostname()}-${process.pid}-${Date.now()}`;
 let shuttingDown = false;
 
@@ -60,6 +61,7 @@ async function shutdownWorker(signal, options = {}) {
         stockSignalSnapshotScheduler.stopStockSignalSnapshotScheduler();
         stockSignalTelegramScheduler.stopStockSignalScheduler();
         assetUniverseScheduler.stopAssetUniverseScheduler();
+        newsRescanService.stopNewsRescanService();
     } catch (error) {
         console.error('[Worker] Error while stopping services:', error.message);
     }
@@ -124,6 +126,9 @@ async function startWorker(options = {}) {
 
     console.log('\n🌐 Starting Asset Universe Scheduler (evening + premarket + intraday)...');
     assetUniverseScheduler.startAssetUniverseScheduler();
+
+    console.log('\n📰 Starting News-Triggered Signal Rescan Service...');
+    newsRescanService.startNewsRescanService();
 
     // Load Telegram schedules only after leadership is acquired.
     loadTelegramSchedules();

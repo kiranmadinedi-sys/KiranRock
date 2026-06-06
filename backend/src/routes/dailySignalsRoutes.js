@@ -26,7 +26,7 @@ router.get('/', protect, async (req, res) => {
         const dateExpr = requestedDate ? `$1::date` : LATEST_PASSED_DATE;
         const params   = requestedDate ? [requestedDate] : [];
 
-        const [tickersRes, summaryRes, regimeRes] = await Promise.all([
+        const [tickersRes, summaryRes, regimeRes, metaRes] = await Promise.all([
             // All scored tickers for the date, ordered by score desc
             query(
                 `SELECT
@@ -65,14 +65,38 @@ router.get('/', protect, async (req, res) => {
                  WHERE analysis_date = ${dateExpr} AND regime IS NOT NULL
                  LIMIT 1`,
                 params
+            ).catch(() => ({ rows: [] })),
+
+            // Scan freshness + news-rescan alerts
+            query(
+                `SELECT
+                    MAX(updated_at) AS generated_at,
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'symbol',       symbol,
+                            'rescanAt',     metadata->>'rescanAt',
+                            'rescanReason', metadata->>'rescanReason',
+                            'prevRec',      metadata->>'prevRecommendation'
+                        ) ORDER BY (metadata->>'rescanAt') DESC
+                    ) FILTER (
+                        WHERE metadata->>'rescanAt' IS NOT NULL
+                          AND (metadata->>'rescanAt')::timestamptz >= NOW() - INTERVAL '4 hours'
+                    ) AS rescan_alerts
+                 FROM daily_universe_analysis
+                 WHERE analysis_date = ${dateExpr}`,
+                params
             ).catch(() => ({ rows: [] }))
         ]);
 
-        const summary = summaryRes.rows[0] || { scanDate: null, total: 0, strongBuy: 0, buy: 0, topScore: null, avgScore: null };
-        const regime  = regimeRes.rows[0]?.regime || null;
+        const summary      = summaryRes.rows[0] || { scanDate: null, total: 0, strongBuy: 0, buy: 0, topScore: null, avgScore: null };
+        const regime       = regimeRes.rows[0]?.regime || null;
+        const generatedAt  = metaRes.rows[0]?.generated_at || null;
+        const rescanAlerts = metaRes.rows[0]?.rescan_alerts || [];
 
         res.json({
-            scanDate:  summary.scanDate,
+            scanDate:     summary.scanDate,
+            generatedAt,
+            rescanAlerts,
             regime,
             summary: {
                 total:     parseInt(summary.total) || 0,

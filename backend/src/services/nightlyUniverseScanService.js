@@ -299,4 +299,67 @@ async function runNightlyUniverseScan() {
     }
 }
 
-module.exports = { runNightlyUniverseScan };
+/**
+ * Rescan a single symbol during market hours (news-triggered).
+ * Unlike runNightlyUniverseScan, this is allowed during market hours.
+ *
+ * @param {string} symbol
+ * @param {string} reason  — short description of why rescan was triggered
+ * @returns {{ symbol, changed, prevRec, newRec, newScore, error }}
+ */
+async function rescanSymbol(symbol, reason = 'news') {
+    const today = _todayET();
+    try {
+        const vixLevel = await getVixLevel().catch(() => 15);
+        const analysis = await _analyzeWithRetry(symbol, vixLevel, null);
+        if (!analysis) return { symbol, changed: false, reason: 'no_analysis' };
+
+        // Read previous recommendation before overwriting
+        const prev = await query(
+            `SELECT recommendation, ai_score FROM daily_universe_analysis
+             WHERE symbol = $1 AND analysis_date = $2`,
+            [symbol, today]
+        );
+        const prevRec   = prev.rows[0]?.recommendation ?? null;
+        const prevScore = parseFloat(prev.rows[0]?.ai_score) ?? null;
+
+        // Merge rescan metadata so existing nightly fields are preserved
+        const rescanMeta = {
+            rescanAt:          new Date().toISOString(),
+            rescanReason:      reason.slice(0, 120),
+            prevRecommendation: prevRec,
+            prevScore
+        };
+        await query(
+            `INSERT INTO daily_universe_analysis
+                 (symbol, analysis_date, ai_score, recommendation, setup_family,
+                  sector, market_cap, passed_prescreen, metadata)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,true,$8::jsonb)
+             ON CONFLICT (symbol, analysis_date) DO UPDATE SET
+                 ai_score       = EXCLUDED.ai_score,
+                 recommendation = EXCLUDED.recommendation,
+                 setup_family   = EXCLUDED.setup_family,
+                 sector         = EXCLUDED.sector,
+                 market_cap     = EXCLUDED.market_cap,
+                 passed_prescreen = true,
+                 metadata       = COALESCE(daily_universe_analysis.metadata, '{}') || EXCLUDED.metadata,
+                 updated_at     = NOW()`,
+            [
+                symbol, today,
+                analysis.aiScore       ?? null,
+                analysis.recommendation ?? null,
+                analysis.setupFamily   ?? null,
+                analysis.sector        ?? null,
+                analysis.marketCap     ?? null,
+                JSON.stringify(rescanMeta)
+            ]
+        );
+
+        const changed = !!(prevRec && prevRec !== analysis.recommendation);
+        return { symbol, changed, prevRec, newRec: analysis.recommendation, newScore: analysis.aiScore };
+    } catch (err) {
+        return { symbol, changed: false, error: err.message };
+    }
+}
+
+module.exports = { runNightlyUniverseScan, rescanSymbol };

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { getApiBaseUrl } from '../config';
@@ -15,6 +15,13 @@ interface Ticker {
     scanDate: string;
 }
 
+interface RescanAlert {
+    symbol:       string;
+    rescanAt:     string;
+    rescanReason: string;
+    prevRec:      string | null;
+}
+
 interface Summary {
     total: number;
     strongBuy: number;
@@ -24,10 +31,12 @@ interface Summary {
 }
 
 interface SignalsData {
-    scanDate: string | null;
-    regime: string | null;
-    summary: Summary;
-    tickers: Ticker[];
+    scanDate:     string | null;
+    generatedAt:  string | null;
+    rescanAlerts: RescanAlert[];
+    regime:       string | null;
+    summary:      Summary;
+    tickers:      Ticker[];
 }
 
 interface DateEntry {
@@ -68,14 +77,37 @@ function formatDate(dateStr: string | null) {
     return new Date(dateStr).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 }
 
+/** "Generated 3 hours ago" / "Generated just now" / "Generated 2 days ago" */
+function freshnessLabel(generatedAt: string | null): string {
+    if (!generatedAt) return '';
+    const diffMs  = Date.now() - new Date(generatedAt).getTime();
+    const diffMin = Math.floor(diffMs / 60_000);
+    if (diffMin < 2)   return 'Generated just now';
+    if (diffMin < 60)  return `Generated ${diffMin} min ago`;
+    const diffHrs = Math.floor(diffMin / 60);
+    if (diffHrs < 24)  return `Generated ${diffHrs} hr${diffHrs > 1 ? 's' : ''} ago`;
+    const diffDay = Math.floor(diffHrs / 24);
+    return `Generated ${diffDay} day${diffDay > 1 ? 's' : ''} ago`;
+}
+
+/** True when it's a weekday between 9:30 AM and 4:00 PM ET (browser-side approximation) */
+function isMarketHours(): boolean {
+    const et   = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const day  = et.getDay();
+    const mins = et.getHours() * 60 + et.getMinutes();
+    return day >= 1 && day <= 5 && mins >= 9 * 60 + 30 && mins < 16 * 60;
+}
+
 export default function SignalsPage() {
     const router = useRouter();
-    const [data, setData] = useState<SignalsData | null>(null);
-    const [dates, setDates] = useState<DateEntry[]>([]);
+    const [data, setData]               = useState<SignalsData | null>(null);
+    const [dates, setDates]             = useState<DateEntry[]>([]);
     const [selectedDate, setSelectedDate] = useState<string>('');
-    const [filter, setFilter] = useState<'ALL' | 'STRONG BUY' | 'BUY'>('ALL');
-    const [loading, setLoading] = useState(true);
-    const [copied, setCopied] = useState(false);
+    const [filter, setFilter]           = useState<'ALL' | 'STRONG BUY' | 'BUY'>('ALL');
+    const [loading, setLoading]         = useState(true);
+    const [copied, setCopied]           = useState(false);
+    const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
+    const refreshTimerRef               = useRef<ReturnType<typeof setInterval> | null>(null);
 
     const token = typeof window !== 'undefined' ? getAuthToken() : null;
     const base  = getApiBaseUrl();
@@ -100,13 +132,24 @@ export default function SignalsPage() {
                 : `${base}/api/daily-signals`;
             const r = await fetch(url, { headers: hdrs });
             if (r.status === 401) { handleAuthError(401); return; }
-            if (r.ok) setData(await r.json());
+            if (r.ok) { setData(await r.json()); setLastRefresh(new Date()); }
         } catch { /* no-op */ } finally {
             setLoading(false);
         }
     }, [token]);
 
     useEffect(() => { load(selectedDate || undefined); }, [load, selectedDate]);
+
+    // Auto-refresh every 5 minutes during market hours (adaptive cruise control)
+    useEffect(() => {
+        if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
+        refreshTimerRef.current = setInterval(() => {
+            if (isMarketHours() && !selectedDate) {
+                load(undefined);
+            }
+        }, 5 * 60 * 1000);
+        return () => { if (refreshTimerRef.current) clearInterval(refreshTimerRef.current); };
+    }, [load, selectedDate]);
 
     // Copy tickers to clipboard
     const copyTickers = () => {
@@ -137,6 +180,11 @@ export default function SignalsPage() {
     };
 
     const visibleTickers = data ? filtered(data.tickers) : [];
+
+    // Build a lookup: symbol → rescan alert
+    const rescanMap = new Map<string, RescanAlert>(
+        (data?.rescanAlerts ?? []).map(a => [a.symbol, a])
+    );
 
     return (
         <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
@@ -188,13 +236,30 @@ export default function SignalsPage() {
                     </div>
                 ) : (
                     <>
-                        {/* Scan date + regime */}
+                        {/* Scan date + regime + freshness */}
                         <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-700 px-5 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                             <div>
                                 <div className="text-xs text-gray-500 uppercase tracking-wide font-semibold">Scan Date</div>
                                 <div className="text-base font-semibold text-gray-900 dark:text-white mt-0.5">
                                     {formatDate(data.scanDate)}
                                 </div>
+                                {/* Freshness label */}
+                                {data.generatedAt && (
+                                    <div className="flex items-center gap-2 mt-1.5">
+                                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                                            isMarketHours()
+                                                ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'
+                                                : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400'
+                                        }`}>
+                                            {isMarketHours() ? '⚡ Live' : '🕐'} {freshnessLabel(data.generatedAt)}
+                                        </span>
+                                        {isMarketHours() && !selectedDate && (
+                                            <span className="text-xs text-gray-400 dark:text-gray-500">
+                                                · auto-refreshes every 5 min
+                                            </span>
+                                        )}
+                                    </div>
+                                )}
                             </div>
                             {data.regime && (
                                 <div className="text-right">
@@ -205,6 +270,28 @@ export default function SignalsPage() {
                                 </div>
                             )}
                         </div>
+
+                        {/* News rescan alert banner (shown only when rescans happened today) */}
+                        {data.rescanAlerts.length > 0 && (
+                            <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-xl px-5 py-3 flex items-start gap-3">
+                                <span className="text-xl mt-0.5">📡</span>
+                                <div>
+                                    <div className="text-sm font-semibold text-amber-800 dark:text-amber-300">
+                                        Adaptive rescan triggered for {data.rescanAlerts.length} stock{data.rescanAlerts.length > 1 ? 's' : ''} — scores updated due to breaking news
+                                    </div>
+                                    <div className="flex flex-wrap gap-2 mt-1.5">
+                                        {data.rescanAlerts.map(a => (
+                                            <span key={a.symbol} className="text-xs bg-amber-100 dark:bg-amber-800/40 text-amber-700 dark:text-amber-300 rounded px-2 py-0.5 font-mono font-semibold">
+                                                {a.symbol}
+                                                {a.prevRec && a.prevRec !== data.tickers.find(t => t.symbol === a.symbol)?.recommendation
+                                                    ? ` ${a.prevRec} →`
+                                                    : ''}
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
 
                         {/* Summary cards */}
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
@@ -250,30 +337,47 @@ export default function SignalsPage() {
                                         <span className="text-xs bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-400 rounded-full px-2 py-0.5">{tickers.length}</span>
                                     </div>
                                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
-                                        {tickers.map(t => (
-                                            <div
-                                                key={t.symbol}
-                                                className={`rounded-xl border p-4 flex flex-col gap-1 cursor-default ${scoreBg(t.aiScore)}`}
-                                            >
-                                                {/* Symbol + rec badge */}
-                                                <div className="flex items-start justify-between gap-1">
-                                                    <span className="text-lg font-bold text-gray-900 dark:text-white tracking-wide">
-                                                        {t.symbol}
-                                                    </span>
-                                                    {t.recommendation === 'STRONG BUY' && (
-                                                        <span className="text-[10px] font-bold bg-emerald-500 text-white rounded px-1.5 py-0.5 shrink-0">SB</span>
+                                        {tickers.map(t => {
+                                            const rescan = rescanMap.get(t.symbol);
+                                            return (
+                                                <div
+                                                    key={t.symbol}
+                                                    className={`rounded-xl border p-4 flex flex-col gap-1 cursor-default relative ${scoreBg(t.aiScore)} ${rescan ? 'ring-2 ring-amber-400 dark:ring-amber-500' : ''}`}
+                                                    title={rescan ? `News rescan: ${rescan.rescanReason}` : undefined}
+                                                >
+                                                    {/* News rescan badge */}
+                                                    {rescan && (
+                                                        <div className="absolute top-2 right-2 bg-amber-400 dark:bg-amber-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded leading-none">
+                                                            📡 LIVE
+                                                        </div>
+                                                    )}
+
+                                                    {/* Symbol + rec badge */}
+                                                    <div className="flex items-start justify-between gap-1">
+                                                        <span className="text-lg font-bold text-gray-900 dark:text-white tracking-wide">
+                                                            {t.symbol}
+                                                        </span>
+                                                        {t.recommendation === 'STRONG BUY' && !rescan && (
+                                                            <span className="text-[10px] font-bold bg-emerald-500 text-white rounded px-1.5 py-0.5 shrink-0">SB</span>
+                                                        )}
+                                                    </div>
+                                                    {/* Score */}
+                                                    <div className={`text-2xl font-bold ${scoreColor(t.aiScore)}`}>
+                                                        {t.aiScore.toFixed(0)}
+                                                    </div>
+                                                    {/* Sector */}
+                                                    <div className="text-[11px] text-gray-500 dark:text-gray-400 leading-tight truncate" title={t.sector}>
+                                                        {t.sector}
+                                                    </div>
+                                                    {/* Rescan reason snippet */}
+                                                    {rescan && (
+                                                        <div className="text-[10px] text-amber-600 dark:text-amber-400 leading-tight mt-0.5 line-clamp-2">
+                                                            {rescan.rescanReason}
+                                                        </div>
                                                     )}
                                                 </div>
-                                                {/* Score */}
-                                                <div className={`text-2xl font-bold ${scoreColor(t.aiScore)}`}>
-                                                    {t.aiScore.toFixed(0)}
-                                                </div>
-                                                {/* Sector */}
-                                                <div className="text-[11px] text-gray-500 dark:text-gray-400 leading-tight truncate" title={t.sector}>
-                                                    {t.sector}
-                                                </div>
-                                            </div>
-                                        ))}
+                                            );
+                                        })}
                                     </div>
                                 </div>
                             );

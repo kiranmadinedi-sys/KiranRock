@@ -280,6 +280,37 @@ async function runNightlyUniverseScan() {
 
         console.log(`[NightlyScan] ── Complete in ${elapsedMin} min | analyzed: ${analyzed} | passed: ${passed} | filtered: ${filtered} | failed: ${failed} | new: ${newTickers.length} ──`);
 
+        // ── Background bar backfill ───────────────────────────────────────────────
+        // Store OHLCV bars for every analyzed symbol so future scans and backtests
+        // are served entirely from local daily_bars (zero Yahoo calls for history).
+        // Runs after scan returns — never blocks the scan completion signal.
+        setImmediate(async () => {
+            try {
+                const dailyBarsService = require('./dailyBarsService');
+                // Only backfill symbols missing recent data (cutoff: 3 calendar days)
+                const cutoff = new Date(Date.now() - 3 * 86400000);
+                const freshRes = await query(
+                    `SELECT DISTINCT symbol FROM daily_bars WHERE timestamp > $1`,
+                    [cutoff]
+                );
+                const alreadyFresh = new Set(freshRes.rows.map(r => r.symbol));
+                const toBackfill   = universe
+                    .map(s => s.symbol)
+                    .filter(s => !alreadyFresh.has(s));
+
+                if (toBackfill.length > 0) {
+                    console.log(`[NightlyScan] Queueing bar backfill for ${toBackfill.length} symbols`);
+                    // 365 days of history — feeds the full 200-day SMA window
+                    await dailyBarsService.backfillSymbols(toBackfill, 365, 400);
+                    console.log(`[NightlyScan] Bar backfill complete`);
+                } else {
+                    console.log(`[NightlyScan] Bar cache up-to-date — no backfill needed`);
+                }
+            } catch (err) {
+                console.warn('[NightlyScan] Bar backfill failed (non-fatal):', err.message);
+            }
+        });
+
         return { analyzed, passed, filtered, failed, newTickers, date: today, elapsedMin };
 
     } catch (err) {

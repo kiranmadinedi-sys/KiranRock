@@ -426,95 +426,141 @@ async function withYahooFallback(method, label, ...args) {
     }
 }
 
-// ─── LOCAL DATA WAREHOUSE PROVIDER (Wrapper) ───────────────────────────────────
+// ─── LOCAL DATA WAREHOUSE PROVIDER (Wrapper) ─────────────────────────────────
+// local-first strategy: serve from daily_bars when fresh, delta-fetch only
+// missing tail days, full fetch only on first encounter.
 const localProvider = (() => {
     const { query } = require('../config/database');
     const underlyingProvider = PROVIDER === 'alpaca' ? alpacaProvider : yahooProvider;
     const name = `Local Cache -> ${underlyingProvider.name}`;
     logger.info(`[DataProvider] Initializing with main provider: ${name}`);
 
-    /**
-     * This is a local, simplified version of the function in dataIngestionService
-     * to cache new data fetched from the API to our local database.
-     */
-    async function cacheBarsToDb(bars, symbol) {
-        if (!bars || bars.length === 0) return 0;
-
-        const barsWithSymbol = bars.map(bar => ({
-            symbol,
-            date: bar.time,
-            open: bar.open,
-            high: bar.high,
-            low: bar.low,
-            close: bar.close,
-            volume: bar.volume
-        }));
-
-        const insertQuery = `
-            INSERT INTO daily_bars (symbol, timestamp, open, high, low, close, volume)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (symbol, timestamp) DO NOTHING;
-        `;
-
-        let insertedCount = 0;
-        for (const bar of barsWithSymbol) {
-            if (!bar.date || !bar.symbol || bar.volume === null) continue;
-            try {
-                const result = await query(insertQuery, [
-                    bar.symbol, bar.date, bar.open, bar.high, bar.low, bar.close, bar.volume
-                ]);
-                if (result.rowCount > 0) insertedCount++;
-            } catch (error) {
-                logger.error('Error inserting single historical bar into cache', { symbol: bar.symbol, date: bar.date, error: error.message });
-            }
+    // Batch upsert bars into daily_bars — much faster than one INSERT per row.
+    async function _batchUpsert(bars, symbol) {
+        if (!bars || bars.length === 0) return;
+        const BATCH = 500;
+        const normalized = bars
+            .filter(b => b.time && b.close != null)
+            .map(b => ({
+                symbol,
+                timestamp: new Date(b.time),
+                open:   b.open  ?? b.close,
+                high:   b.high  ?? b.close,
+                low:    b.low   ?? b.close,
+                close:  b.close,
+                volume: Math.round(b.volume || 0),
+            }));
+        if (!normalized.length) return;
+        for (let i = 0; i < normalized.length; i += BATCH) {
+            const chunk = normalized.slice(i, i + BATCH);
+            const vals = [], params = [];
+            let p = 1;
+            chunk.forEach(b => {
+                vals.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++})`);
+                params.push(b.symbol, b.timestamp, b.open, b.high, b.low, b.close, b.volume);
+            });
+            await query(
+                `INSERT INTO daily_bars (symbol, timestamp, open, high, low, close, volume)
+                 VALUES ${vals.join(',')}
+                 ON CONFLICT (symbol, timestamp) DO NOTHING`,
+                params
+            );
         }
-        if (insertedCount > 0) {
-            logger.info(`[DataProvider] Cached ${insertedCount} new bars for ${symbol} to local DB.`);
-        }
-        return insertedCount;
+        logger.debug(`[DataProvider] Stored ${normalized.length} bars for ${symbol}`);
+    }
+
+    // Fire-and-forget cache write — never blocks the caller.
+    function _cacheBg(bars, symbol) {
+        setImmediate(() => _batchUpsert(bars, symbol).catch(err =>
+            logger.error(`[DataProvider] Background cache write failed for ${symbol}`, { error: err.message })
+        ));
     }
 
     /**
-     * Get OHLCV bars for a symbol, with a local-first strategy.
+     * Get OHLCV bars — local-first with smart delta fetch.
+     *
+     * Logic:
+     *   1. Query daily_bars for the requested window.
+     *   2. Have enough trading-day rows?
+     *      a. Tail is fresh (≤ yesterday)?  → serve from DB (zero API call).
+     *      b. Tail is stale?                → delta-fetch only missing days,
+     *                                         merge + cache, serve merged result.
+     *   3. Too few rows?                    → full fetch from provider, cache, serve.
+     *
+     * Why "trading days" not "calendar days":
+     *   lookbackDays=220 calendar days ≈ 157 trading days (weekends + ~10 holidays).
+     *   Old code required 215 rows for a 220-day window — the cache NEVER hit.
      */
     async function getBars(symbol, interval = '1d', lookbackDays = 90) {
         if (interval !== '1d') {
-            logger.debug(`[DataProvider] Non-daily interval ('${interval}'). Bypassing local cache for ${symbol}.`);
             return underlyingProvider.getBars(symbol, interval, lookbackDays);
         }
 
-        const startDate = new Date(Date.now() - lookbackDays * 86400000);
-        
+        const sinceStr = new Date(Date.now() - lookbackDays * 86400000)
+            .toISOString().split('T')[0];
+        // Expected trading days ≈ 5/7 of calendar days, minus 3 for holidays + today's bar
+        const expectedRows = Math.max(5, Math.floor(lookbackDays * 5 / 7) - 3);
+        const yesterday    = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+
         try {
             const { rows } = await query(
-                `SELECT timestamp as time, open::float, high::float, low::float, close::float, volume::bigint 
-                 FROM daily_bars WHERE symbol = $1 AND timestamp >= $2 ORDER BY timestamp ASC`,
-                [symbol, startDate.toISOString().split('T')[0]]
+                `SELECT timestamp AS time,
+                        open::float, high::float, low::float, close::float, volume::bigint
+                 FROM daily_bars
+                 WHERE symbol = $1 AND timestamp >= $2
+                 ORDER BY timestamp ASC`,
+                [symbol, sinceStr]
             );
 
-            if (rows.length >= lookbackDays - 5) { // -5 tolerance for weekends/holidays
-                logger.debug(`[DataProvider] Cache hit for ${symbol}. Returning ${rows.length} bars from local DB.`);
-                return rows.map(r => ({ ...r, time: new Date(r.time).toISOString() }));
+            if (rows.length >= expectedRows) {
+                const latestTs   = rows[rows.length - 1].time;
+                const latestDate = new Date(latestTs).toISOString().split('T')[0];
+
+                if (latestDate >= yesterday) {
+                    // Fully fresh — zero API call
+                    logger.debug(`[DataProvider] Cache hit ${symbol} (${rows.length} bars)`);
+                    return rows.map(r => ({ ...r, time: new Date(r.time).toISOString() }));
+                }
+
+                // Tail stale — delta-fetch only the gap
+                const gapDays = Math.ceil(
+                    (Date.now() - new Date(latestTs).getTime()) / 86400000
+                ) + 2;
+                logger.debug(`[DataProvider] Delta fetch ${symbol}: ${gapDays} days since ${latestDate}`);
+                const newBars = await underlyingProvider.getBars(symbol, interval, gapDays)
+                    .catch(() => []);
+                if (newBars.length) _cacheBg(newBars, symbol);
+
+                // Merge: existing rows + net-new bars (dedup by date string)
+                const knownDates = new Set(
+                    rows.map(r => new Date(r.time).toISOString().split('T')[0])
+                );
+                const fresh = newBars.filter(
+                    b => !knownDates.has(new Date(b.time).toISOString().split('T')[0])
+                );
+                return [
+                    ...rows.map(r => ({ ...r, time: new Date(r.time).toISOString() })),
+                    ...fresh,
+                ];
             }
-            logger.info(`[DataProvider] Cache miss for ${symbol} (${rows.length} bars found). Fetching from API.`);
-        } catch (error) {
-            logger.error('[DataProvider] Error querying local cache. Falling back to API.', { error: error.message });
-        }
 
-        const apiBars = await underlyingProvider.getBars(symbol, interval, lookbackDays);
-
-        if (apiBars && apiBars.length > 0) {
-            cacheBarsToDb(apiBars, symbol).catch(err => {
-                logger.error(`[DataProvider] Background caching failed for ${symbol}`, { error: err.message });
+            logger.info(
+                `[DataProvider] Cache miss ${symbol} (${rows.length}/${expectedRows} bars) — full fetch`
+            );
+        } catch (err) {
+            logger.warn(`[DataProvider] DB query error for ${symbol}, falling back to API`, {
+                error: err.message,
             });
         }
 
+        // Full fetch from provider
+        const apiBars = await underlyingProvider.getBars(symbol, interval, lookbackDays);
+        if (apiBars && apiBars.length > 0) _cacheBg(apiBars, symbol);
         return apiBars;
     }
 
-    // --- Pass-through functions that don't use the local cache ---
-    async function getQuote(symbol) { return underlyingProvider.getQuote(symbol); }
-    async function searchSymbols(query) { return underlyingProvider.searchSymbols(query); }
+    async function getQuote(symbol)        { return underlyingProvider.getQuote(symbol); }
+    async function searchSymbols(q)        { return underlyingProvider.searchSymbols(q); }
     async function getOptionsChain(symbol) { return underlyingProvider.getOptionsChain(symbol); }
 
     return { getBars, getQuote, searchSymbols, getOptionsChain, name };

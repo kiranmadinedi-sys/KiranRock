@@ -710,6 +710,28 @@ async function initializeDatabase() {
         `);
         console.log('✓ Created daily_universe_analysis table');
 
+        // Fundamentals cache — DB-backed, 7-day TTL, survives restarts
+        await query(`
+            CREATE TABLE IF NOT EXISTS fundamentals_cache (
+                symbol           TEXT        PRIMARY KEY,
+                fetched_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                earnings_growth  NUMERIC,
+                revenue_growth   NUMERIC,
+                gross_margins    NUMERIC,
+                pe_ratio         NUMERIC,
+                forward_pe       NUMERIC,
+                peg_ratio        NUMERIC,
+                profit_margin    NUMERIC,
+                return_on_equity NUMERIC,
+                debt_to_equity   NUMERIC,
+                market_cap       BIGINT,
+                sector           TEXT,
+                industry         TEXT,
+                raw_json         JSONB
+            )
+        `);
+        console.log('✓ Created fundamentals_cache table');
+
         // Idempotent: tighten stop-loss defaults for any rows still at the old values
         await query(`
             UPDATE risk_configs

@@ -1058,23 +1058,68 @@ async function getDaysToEarnings(symbol, yahooFinanceInstance = null) {
 }
 
 /**
- * Fetch CANSLIM-relevant fundamentals (EPS & revenue growth) from Yahoo Finance.
- * Cached 4 hours — changes quarterly, so one fetch per half-day is enough.
- * Returns null on any failure so callers can safely skip.
+ * Fetch CANSLIM-relevant fundamentals (EPS & revenue growth).
+ *
+ * Cache hierarchy (fastest → most expensive):
+ *   1. In-process memory (cacheService)  — 4-hour TTL, zero latency
+ *   2. PostgreSQL fundamentals_cache     — 7-day TTL, survives restarts
+ *   3. Yahoo Finance quoteSummary        — live fetch, writes back to both caches
+ *
+ * Fundamentals change quarterly; 7 days is safe and eliminates most API calls.
  */
 async function getFundamentalsQuick(symbol) {
-    const cacheKey = `fundamentals_quick_${symbol}`;
-    const cached   = cacheService.get(cacheKey);
-    if (cached !== null) return cached;
+    const memKey = `fundamentals_quick_${symbol}`;
+    const memHit = cacheService.get(memKey);
+    if (memHit !== null) return memHit;
+
+    // DB cache — check if fresh (< 7 days old)
+    try {
+        const { query: dbQuery } = require('../config/database');
+        const dbRes = await dbQuery(
+            `SELECT earnings_growth, revenue_growth, gross_margins, fetched_at
+             FROM fundamentals_cache
+             WHERE symbol = $1 AND fetched_at > NOW() - INTERVAL '7 days'`,
+            [symbol]
+        );
+        if (dbRes.rows.length > 0) {
+            const r = dbRes.rows[0];
+            const result = {
+                earningsGrowth: r.earnings_growth != null ? parseFloat(r.earnings_growth) : null,
+                revenueGrowth:  r.revenue_growth  != null ? parseFloat(r.revenue_growth)  : null,
+                grossMargins:   r.gross_margins   != null ? parseFloat(r.gross_margins)   : null,
+            };
+            cacheService.set(memKey, result, 4 * 60 * 60 * 1000);
+            return result;
+        }
+    } catch { /* non-fatal — proceed to live fetch */ }
+
+    // Live fetch from Yahoo Finance
     try {
         const summary = await yahooFinance.quoteSummary(symbol, { modules: ['financialData'] });
         const fd      = summary?.financialData || {};
         const result  = {
             earningsGrowth: typeof fd.earningsGrowth === 'number' ? fd.earningsGrowth : null,
             revenueGrowth:  typeof fd.revenueGrowth  === 'number' ? fd.revenueGrowth  : null,
-            grossMargins:   typeof fd.grossMargins   === 'number' ? fd.grossMargins   : null
+            grossMargins:   typeof fd.grossMargins   === 'number' ? fd.grossMargins   : null,
         };
-        cacheService.set(cacheKey, result, 4 * 60 * 60 * 1000);
+        cacheService.set(memKey, result, 4 * 60 * 60 * 1000);
+        // Write-through to DB (fire-and-forget)
+        setImmediate(async () => {
+            try {
+                const { query: dbQuery } = require('../config/database');
+                await dbQuery(
+                    `INSERT INTO fundamentals_cache
+                         (symbol, fetched_at, earnings_growth, revenue_growth, gross_margins)
+                     VALUES ($1, NOW(), $2, $3, $4)
+                     ON CONFLICT (symbol) DO UPDATE SET
+                         fetched_at      = NOW(),
+                         earnings_growth = EXCLUDED.earnings_growth,
+                         revenue_growth  = EXCLUDED.revenue_growth,
+                         gross_margins   = EXCLUDED.gross_margins`,
+                    [symbol, result.earningsGrowth, result.revenueGrowth, result.grossMargins]
+                );
+            } catch { /* non-fatal */ }
+        });
         return result;
     } catch {
         return null;

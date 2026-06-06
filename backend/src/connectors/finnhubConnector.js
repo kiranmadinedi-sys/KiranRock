@@ -70,7 +70,11 @@ class FinnhubConnector {
       const response = await this.api.get('/stock/insider-transactions', {
         params: { symbol, from: fromDate, to: toDate },
       });
-      return response.data.data || [];
+      // Normalize: Finnhub uses `transactionPrice`; sonarService expects `price`
+      return (response.data.data || []).map(tx => ({
+          ...tx,
+          price: tx.transactionPrice ?? tx.price ?? 0
+      }));
     } catch (error) {
       const status = error.response?.status;
       if (status === 403) {

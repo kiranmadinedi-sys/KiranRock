@@ -1,123 +1,186 @@
+/**
+ * SONAR Service — Smart Money & Insider Activity Tracker (PANTHEON)
+ *
+ * Calculates a 0–1 "smart money" score by combining:
+ *   A. Insider transactions (weight 0.7) — SEC Form 4 filings via:
+ *        1. Finnhub (primary, free plan works for insider data)
+ *        2. SEC EDGAR (free, official, fallback when Finnhub fails)
+ *   B. Institutional ownership (weight 0.3) — Finnhub (paid plan)
+ *        Falls back to neutral 0.5 when unavailable.
+ *
+ * Enhanced scoring beyond raw net-buy/sell:
+ *   - CEO / CFO purchases carry 2× weight (highest conviction)
+ *   - Director / VP purchases carry 1.5× weight
+ *   - Cluster buy (3+ distinct insiders buying in 30d) → +15% boost
+ *   - Large single trade (> $500K open-market buy) → +10% boost
+ *   - Recency weighting: last 30d = 1.0×, 30–90d = 0.6×, 90–180d = 0.3×
+ *
+ * The score feeds into PANTHEON Step 12 (±8 pts on the AI score).
+ */
+
 const finnhubConnector = require('../connectors/finnhubConnector');
+const secEdgarConnector = require('../connectors/secEdgarConnector');
 const cacheService = require('./cacheService');
 const { logger } = require('../utils/logger');
 
-const SONAR_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours — institutional data changes slowly
+const SONAR_CACHE_TTL            = 6 * 60 * 60 * 1000;  // 6 h — refreshes intraday
+const INSTITUTIONAL_WEIGHT       = 0.30;
+const INSIDER_WEIGHT             = 0.70;
 
-/**
- * @fileoverview
- * SONAR Service - The Institutional Tracker for the PANTHEON system.
- *
- * This service analyzes "smart money" movements by tracking institutional ownership
- * and significant insider transactions. It provides a score from 0 to 1 indicating
- * the level of smart money interest in a stock.
- */
-
-const INSTITUTIONAL_OWNERSHIP_WEIGHT = 0.6;
-const INSIDER_TRANSACTION_WEIGHT = 0.4;
+// Open-market transaction codes we trust as genuine conviction signals
+const BUY_CODES  = new Set(['P']);           // open-market purchase
+const SELL_CODES = new Set(['S']);           // open-market sale
+const SKIP_CODES = new Set(['M', 'G', 'W', 'A', 'F', 'U', 'J', 'C']);  // options/gifts/etc
 
 class SonarService {
-  /**
-   * Calculates a "smart money" score based on institutional ownership and insider transactions.
-   * @param {string} symbol The stock symbol to analyze.
-   * @returns {Promise<number>} A score between 0 and 1.
-   */
-  async getSmartMoneyScore(symbol) {
-    const cacheKey = `sonar_smart_money_${symbol}`;
-    const cached = cacheService.get(cacheKey);
-    if (cached !== null) return cached;
 
-    try {
-      const [ownershipData, transactionData] = await Promise.all([
-        finnhubConnector.getInstitutionalOwnership(symbol),
-        finnhubConnector.getInsiderTransactions(symbol)
-      ]);
+    async getSmartMoneyScore(symbol) {
+        const cacheKey = `sonar_v2_${symbol}`;
+        const cached = cacheService.get(cacheKey);
+        if (cached !== null) return cached;
 
-      const ownershipScore = this.calculateOwnershipScore(ownershipData);
-      const transactionScore = this.calculateTransactionScore(transactionData);
+        try {
+            const [ownershipData, insiderData] = await Promise.all([
+                finnhubConnector.getInstitutionalOwnership(symbol).catch(() => null),
+                this._fetchInsiderTransactions(symbol)
+            ]);
 
-      const finalScore = (ownershipScore * INSTITUTIONAL_OWNERSHIP_WEIGHT) +
-                         (transactionScore * INSIDER_TRANSACTION_WEIGHT);
+            const ownershipScore   = this.calculateOwnershipScore(ownershipData);
+            const transactionScore = this.calculateTransactionScore(insiderData, symbol);
 
-      cacheService.set(cacheKey, finalScore, SONAR_CACHE_TTL);
-      logger.info(`[SONAR] ${symbol}: ${finalScore.toFixed(2)} (ownership ${ownershipScore.toFixed(2)}, insider ${transactionScore.toFixed(2)})`);
-      return finalScore;
+            const finalScore = (ownershipScore   * INSTITUTIONAL_WEIGHT) +
+                               (transactionScore * INSIDER_WEIGHT);
 
-    } catch (error) {
-      logger.error(`[SONAR] Error for ${symbol}: ${error.message}`);
-      return 0.5; // neutral — don't penalise on API failure
-    }
-  }
+            const safeScore = isNaN(finalScore) ? 0.5 : Math.max(0, Math.min(1, finalScore));
 
-  /**
-   * Scores institutional ownership. Higher total ownership and recent increases are positive.
-   * @param {Array<Object>} ownershipData - Data from Finnhub.
-   * @returns {number} A score between 0 and 1.
-   */
-  calculateOwnershipScore(ownershipData) {
-    if (!ownershipData || ownershipData.length === 0) {
-      return 0.5; // Return a neutral score if no data
+            cacheService.set(cacheKey, safeScore, SONAR_CACHE_TTL);
+            logger.info(`[SONAR] ${symbol}: ${safeScore.toFixed(2)} (ownership ${ownershipScore.toFixed(2)}, insider ${transactionScore.toFixed(2)})`);
+            return safeScore;
+
+        } catch (err) {
+            logger.error(`[SONAR] Error for ${symbol}: ${err.message}`);
+            return 0.5;
+        }
     }
 
-    // Calculate total ownership percentage held by institutions
-    const totalOwnership = ownershipData.reduce((sum, holder) => sum + holder.share, 0);
-    
-    // Calculate net change in shares in the most recent period
-    const latestReportDate = Math.max(...ownershipData.map(d => new Date(d.reportDate).getTime()));
-    const latestHoldings = ownershipData.filter(d => new Date(d.reportDate).getTime() === latestReportDate);
-    const netChange = latestHoldings.reduce((sum, holder) => sum + holder.change, 0);
+    /**
+     * Try Finnhub first (works on free plan for insider data).
+     * Fall back to SEC EDGAR on null/error.
+     */
+    async _fetchInsiderTransactions(symbol) {
+        try {
+            const fh = await finnhubConnector.getInsiderTransactions(symbol);
+            if (fh && fh.length > 0) return fh;
+        } catch { /* fall through */ }
 
-    // Normalize total ownership to a 0-1 scale (capping at 80% for max score)
-    const ownershipValueScore = Math.min(totalOwnership / 80, 1.0);
-
-    // Normalize net change to a -1 to 1 scale, then shift to 0-1
-    // This is a simplified approach; a more complex model would look at % change
-    const totalShares = latestHoldings.reduce((sum, holder) => sum + holder.share, 0);
-    const changeScore = (totalShares > 0) ? Math.max(-1, Math.min(1, netChange / (totalShares * 0.1))) : 0; // Cap change at 10% of total shares
-    const changeValueScore = (changeScore + 1) / 2; // Convert from [-1, 1] to [0, 1]
-
-    // Combine scores, giving more weight to the recent change
-    const finalScore = (ownershipValueScore * 0.4) + (changeValueScore * 0.6);
-    return finalScore;
-  }
-
-  /**
-   * Scores insider transactions. Net buying is positive.
-   * @param {Array<Object>} transactionData - Data from Finnhub.
-   * @returns {number} A score between 0 and 1.
-   */
-  calculateTransactionScore(transactionData) {
-    if (!transactionData || transactionData.length === 0) {
-      return 0.5; // Neutral score if no data
+        // SEC EDGAR fallback — free, official, always available
+        return secEdgarConnector.getInsiderTransactions(symbol).catch(() => []);
     }
 
-    // Sum up the total value of buy vs. sell transactions
-    let totalBuyValue = 0;
-    let totalSellValue = 0;
+    // ── Institutional ownership ───────────────────────────────────────────────
 
-    transactionData.forEach(tx => {
-      // 'change' is the number of shares. 'P' is purchase, 'S' is sale.
-      const value = tx.change * tx.price;
-      if (tx.transactionCode.startsWith('P')) {
-        totalBuyValue += value;
-      } else if (tx.transactionCode.startsWith('S')) {
-        totalSellValue += value;
-      }
-    });
+    calculateOwnershipScore(ownershipData) {
+        if (!ownershipData || !Array.isArray(ownershipData) || ownershipData.length === 0) {
+            return 0.5;   // neutral — Finnhub paid-plan gate; don't penalise
+        }
+        try {
+            const totalOwnership = ownershipData.reduce((s, h) => s + (Number(h.share) || 0), 0);
+            const latestDate     = Math.max(...ownershipData.map(d => new Date(d.reportDate || 0).getTime()));
+            const latestHoldings = ownershipData.filter(d => new Date(d.reportDate || 0).getTime() === latestDate);
+            const netChange      = latestHoldings.reduce((s, h) => s + (Number(h.change) || 0), 0);
+            const totalShares    = latestHoldings.reduce((s, h) => s + (Number(h.share) || 0), 0);
 
-    const netBuyValue = totalBuyValue - totalSellValue;
-    const totalValue = totalBuyValue + totalSellValue;
+            const ownershipValueScore = Math.min(totalOwnership / 80, 1.0);
+            const changeRatio         = totalShares > 0 ? netChange / (totalShares * 0.1) : 0;
+            const changeScore         = Math.max(-1, Math.min(1, changeRatio));
+            const changeValueScore    = (changeScore + 1) / 2;
 
-    if (totalValue === 0) {
-      return 0.5; // No transactions with value
+            const score = (ownershipValueScore * 0.4) + (changeValueScore * 0.6);
+            return isNaN(score) ? 0.5 : Math.max(0, Math.min(1, score));
+        } catch {
+            return 0.5;
+        }
     }
 
-    // Normalize net value to a -1 to 1 scale, then shift to 0-1
-    const score = netBuyValue / totalValue;
-    const finalScore = (score + 1) / 2; // Convert from [-1, 1] to [0, 1]
+    // ── Insider transactions (enhanced) ───────────────────────────────────────
 
-    return finalScore;
-  }
+    calculateTransactionScore(txData, symbol = '') {
+        if (!txData || !Array.isArray(txData) || txData.length === 0) {
+            return 0.5;
+        }
+
+        const now     = Date.now();
+        const MS_30D  = 30  * 24 * 60 * 60 * 1000;
+        const MS_90D  = 90  * 24 * 60 * 60 * 1000;
+        const MS_180D = 180 * 24 * 60 * 60 * 1000;
+
+        let weightedBuyValue  = 0;
+        let weightedSellValue = 0;
+        const recentBuyers    = new Set();   // distinct insiders who bought in 30d
+
+        for (const tx of txData) {
+            const code  = (tx.transactionCode || '').trim();
+            if (SKIP_CODES.has(code)) continue;
+            if (!BUY_CODES.has(code) && !SELL_CODES.has(code)) continue;
+
+            const shares = Math.abs(Number(tx.change) || Number(tx.share) || 0);
+            const price  = Number(tx.price) || Number(tx.transactionPrice) || 0;
+            if (shares === 0) continue;
+
+            const dollarValue = tx.dollarValue ?? (shares * price);
+            const filingMs    = new Date(tx.filingDate || tx.transactionDate || 0).getTime();
+            const ageMs       = now - filingMs;
+
+            // Recency weight
+            let recency = 0;
+            if      (ageMs <= MS_30D)  recency = 1.0;
+            else if (ageMs <= MS_90D)  recency = 0.6;
+            else if (ageMs <= MS_180D) recency = 0.3;
+            else continue;  // older than 6 months — ignore
+
+            // Insider role weight
+            const title  = (tx.insiderTitle || tx.officerTitle || '').toLowerCase();
+            const isCEO  = title.includes('chief executive') || title.includes('ceo') || title.includes('president');
+            const isCFO  = title.includes('chief financial') || title.includes('cfo');
+            const isExec = title.includes('chief') || title.includes('officer') || tx.isOfficer;
+            const isDir  = tx.isDirector;
+
+            let roleWeight = 1.0;
+            if (isCEO || isCFO)   roleWeight = 2.0;
+            else if (isExec)      roleWeight = 1.5;
+            else if (isDir)       roleWeight = 1.2;
+
+            // Large-trade bonus (open-market buys > $500K)
+            const largeTradeBonus = (BUY_CODES.has(code) && dollarValue >= 500_000) ? 1.2 : 1.0;
+
+            const effectiveValue = dollarValue * recency * roleWeight * largeTradeBonus;
+
+            if (BUY_CODES.has(code)) {
+                weightedBuyValue += effectiveValue;
+                if (ageMs <= MS_30D && tx.insiderName) {
+                    recentBuyers.add(tx.insiderName);
+                }
+            } else {
+                weightedSellValue += effectiveValue;
+            }
+        }
+
+        const totalWeighted = weightedBuyValue + weightedSellValue;
+        if (totalWeighted === 0) return 0.5;
+
+        const netScore = (weightedBuyValue - weightedSellValue) / totalWeighted;  // -1 to +1
+        let score      = (netScore + 1) / 2;                                       //  0 to  1
+
+        // Cluster buy boost: 3+ distinct insiders buying in last 30d
+        if (recentBuyers.size >= 3) {
+            score = Math.min(1, score * 1.15);
+            logger.info(`[SONAR] ${symbol}: cluster buy — ${recentBuyers.size} insiders bought in last 30d`);
+        } else if (recentBuyers.size >= 2) {
+            score = Math.min(1, score * 1.08);
+        }
+
+        return isNaN(score) ? 0.5 : Math.max(0, Math.min(1, score));
+    }
 }
 
 module.exports = new SonarService();

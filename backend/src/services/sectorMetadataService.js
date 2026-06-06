@@ -216,6 +216,86 @@ const SECTOR_MAP = {
     AWK:'Utilities', WTRG:'Utilities',AWR:'Utilities', ARTNA:'Utilities',
     SJW:'Utilities', MSEX:'Utilities',
 
+    // ── Technology (additional) ───────────────────────────────────────────────
+    CSCO:'Technology',  DELL:'Technology',  HPE:'Technology',   HPQ:'Technology',
+    STX:'Technology',   WDC:'Technology',   NTAP:'Technology',  GLW:'Technology',
+    JNPR:'Technology',  MSI:'Technology',   IPGP:'Technology',  DIOD:'Technology',
+    KEYS:'Technology',  TER:'Technology',   MKSI:'Technology',  ENTG:'Technology',
+    ALGM:'Technology',  LSCC:'Technology',  NXPI:'Technology',  AMBA:'Technology',
+    SLAB:'Technology',  SITM:'Technology',  CEVA:'Technology',  PI:'Technology',
+    WOLF:'Technology',  ON:'Technology',
+    ADP:'Technology',   ADSK:'Technology',  PAYX:'Technology',  ANSS:'Technology',
+    ALTR:'Technology',  AKAM:'Technology',  VRSN:'Technology',  GDDY:'Technology',
+    OKTA:'Technology',  BRZE:'Technology',  NCNO:'Technology',  CFLT:'Technology',
+    DOMO:'Technology',  DOCN:'Technology',  ESTC:'Technology',  APPN:'Technology',
+    JAMF:'Technology',  WK:'Technology',    ZUO:'Technology',   ZI:'Technology',
+    SPT:'Technology',   SMAR:'Technology',  PCOR:'Technology',  IOT:'Technology',
+    TOST:'Technology',  PAR:'Technology',   TTD:'Technology',   BILL:'Technology',
+    PTC:'Technology',   TRMB:'Technology',  FI:'Technology',    KD:'Technology',
+    PSTG:'Technology',  NTNX:'Technology',  CWAN:'Technology',  RDWR:'Technology',
+    LIDR:'Technology',  TASK:'Technology',  GTLB:'Technology',  APP:'Technology',
+    MRVL:'Technology',  ASML:'Technology',  ACLS:'Technology',  ACMR:'Technology',
+    SEDG:'Technology',  ARRY:'Technology',  ZG:'Real Estate',
+
+    // ── Consumer Discretionary (additional) ──────────────────────────────────
+    AZN:'Healthcare',
+    LULU:'Consumer Discretionary', AZO:'Consumer Discretionary',
+    ORLY:'Consumer Discretionary', ULTA:'Consumer Discretionary',
+    SKX:'Consumer Discretionary',  LEVI:'Consumer Discretionary',
+    CROX:'Consumer Discretionary', BOOT:'Consumer Discretionary',
+    BROS:'Consumer Discretionary', CAVA:'Consumer Discretionary',
+    BJRI:'Consumer Discretionary', CHUY:'Consumer Discretionary',
+    EAT:'Consumer Discretionary',  DPZ:'Consumer Discretionary',
+    PLAY:'Consumer Discretionary', MELI:'Consumer Discretionary',
+
+    // ── Consumer Staples (additional) ────────────────────────────────────────
+    ADM:'Consumer Staples', MNST:'Consumer Staples', BJ:'Consumer Staples',
+    SFM:'Consumer Staples', PFGC:'Consumer Staples', UNFI:'Consumer Staples',
+
+    // ── Healthcare (additional) ───────────────────────────────────────────────
+    A:'Healthcare',    CRL:'Healthcare',   WAT:'Healthcare',   NVST:'Healthcare',
+    ZBH:'Healthcare',  ALGN:'Healthcare',  INSP:'Healthcare',  IRTC:'Healthcare',
+    PODD:'Healthcare', NVCR:'Healthcare',  TMDX:'Healthcare',  TNDM:'Healthcare',
+    ENSG:'Healthcare', LNTH:'Healthcare',  MDXG:'Healthcare',
+    ACAD:'Healthcare', ALKS:'Healthcare',  AUPH:'Healthcare',
+    BEAM:'Healthcare', CRSP:'Healthcare',  EDIT:'Healthcare',  FATE:'Healthcare',
+    ARQT:'Healthcare', ARVN:'Healthcare',  IMVT:'Healthcare',  INVA:'Healthcare',
+    IONS:'Healthcare', ITCI:'Healthcare',  KROS:'Healthcare',  KYMR:'Healthcare',
+    NKTR:'Healthcare', NTLA:'Healthcare',  PRAX:'Healthcare',  PRTA:'Healthcare',
+    PTCT:'Healthcare', RXDX:'Healthcare',  RXRX:'Healthcare',  SANA:'Healthcare',
+    ACRS:'Healthcare', MDXG:'Healthcare',  BIO:'Healthcare',
+
+    // ── Financials (additional) ───────────────────────────────────────────────
+    DFS:'Financials',  AGO:'Financials',   ESNT:'Financials',  NMIH:'Financials',
+    RDN:'Financials',  PFSI:'Financials',  UWMC:'Financials',  GHLD:'Financials',
+    BANF:'Financials', CATY:'Financials',  CVBF:'Financials',  IBCP:'Financials',
+    PPBI:'Financials', WSBC:'Financials',  TFIN:'Financials',  AMSF:'Financials',
+    HMN:'Financials',  PIPR:'Financials',  SF:'Financials',
+
+    // ── Energy (additional) ───────────────────────────────────────────────────
+    LNG:'Energy',   CHRD:'Energy', CIVI:'Energy', CEIX:'Energy',
+    CRGY:'Energy',  MTDR:'Energy', VTLE:'Energy', SM:'Energy',
+    KOS:'Energy',   NGL:'Energy',  NINE:'Energy', PTEN:'Energy',
+    PUMP:'Energy',  RES:'Energy',  GPRE:'Energy',
+
+    // ── Industrials (additional) ──────────────────────────────────────────────
+    MMM:'Industrials',  FAST:'Industrials', GWW:'Industrials',  ROK:'Industrials',
+    WAB:'Industrials',  XYL:'Industrials',  CSWI:'Industrials', GXO:'Industrials',
+    CPRT:'Industrials', TREX:'Industrials', UFPI:'Industrials', AWI:'Industrials',
+    IBP:'Industrials',  BECN:'Industrials', AZEK:'Industrials', HXL:'Industrials',
+    ARMK:'Industrials', DRS:'Industrials',  IESC:'Industrials', MYRG:'Industrials',
+    NWPX:'Industrials', ATKR:'Industrials', CSWI:'Industrials',
+    ACHR:'Industrials', JOBY:'Industrials', RKLB:'Industrials', LUNR:'Industrials',
+    EVTL:'Industrials', RDW:'Industrials',  PLUG:'Industrials', BE:'Industrials',
+    RUN:'Utilities',    PEG:'Utilities',
+
+    // ── Real Estate (additional) ──────────────────────────────────────────────
+    DEA:'Real Estate',  EGP:'Real Estate',  PLYM:'Real Estate',
+    RHP:'Real Estate',  REXR:'Real Estate', STAG:'Real Estate',
+
+    // ── Communication Services (additional) ───────────────────────────────────
+    ASTS:'Communication Services',
+
     // ── ETFs (sector ETFs — keep sector identity so rotation works) ───────────
     XLK:'Technology',             XLC:'Communication Services',
     XLY:'Consumer Discretionary', XLP:'Consumer Staples',
@@ -339,17 +419,63 @@ function getIndustry(symbol) {
     return INDUSTRY_MAP[symbol.toUpperCase()] || null;
 }
 
+// ── Auto-learning cache ───────────────────────────────────────────────────────
+// Persists Yahoo-supplied sectors across restarts so new tickers are remembered
+// without requiring manual updates to SECTOR_MAP.
+// File location: same directory as this service for simplicity.
+
+const path = require('path');
+const fs   = require('fs');
+
+const LEARNED_PATH = path.join(__dirname, 'sectorLearnedCache.json');
+
+let _learned = {};
+try {
+    if (fs.existsSync(LEARNED_PATH)) {
+        _learned = JSON.parse(fs.readFileSync(LEARNED_PATH, 'utf8'));
+    }
+} catch { _learned = {}; }
+
+let _savePending = false;
+function _persistLearned() {
+    if (_savePending) return;
+    _savePending = true;
+    setImmediate(() => {
+        try { fs.writeFileSync(LEARNED_PATH, JSON.stringify(_learned, null, 2)); } catch { /* non-fatal */ }
+        _savePending = false;
+    });
+}
+
 /**
- * Resolve sector with priority: live quote sector > static map > 'Unknown'.
+ * Called by analyzeStockWithAI() when Yahoo returns a valid sector.
+ * Teaches the cache so future scans don't fall back to 'Unknown'.
+ */
+function learnSector(symbol, sector) {
+    if (!symbol || !sector || sector === 'Unknown' || sector === '') return;
+    const key = symbol.toUpperCase();
+    if (_learned[key] !== sector) {
+        _learned[key] = sector;
+        _persistLearned();
+    }
+}
+
+/**
+ * Resolve sector with priority:
+ *   1. Live Yahoo quote sector (most accurate)
+ *   2. Static SECTOR_MAP (curated, ~500 symbols)
+ *   3. Learned cache (auto-populated from past Yahoo quotes)
+ *   4. 'Unknown' (fallback — STANDARD trade profile, no rotation logic)
  * @param {string} symbol
  * @param {string|null} quoteSector
  * @returns {string}
  */
 function resolveSector(symbol, quoteSector) {
     if (quoteSector && quoteSector !== 'Unknown' && quoteSector !== '') {
+        learnSector(symbol, quoteSector);   // teach cache for next time
         return quoteSector;
     }
-    return getSector(symbol) || 'Unknown';
+    const key = symbol ? symbol.toUpperCase() : '';
+    return SECTOR_MAP[key] || _learned[key] || 'Unknown';
 }
 
 /**
@@ -367,4 +493,4 @@ function resolveIndustry(symbol, quoteIndustry) {
     return getIndustry(symbol) || null;
 }
 
-module.exports = { getSector, getIndustry, resolveSector, resolveIndustry, MAX_POSITIONS_PER_INDUSTRY };
+module.exports = { getSector, getIndustry, resolveSector, resolveIndustry, learnSector, MAX_POSITIONS_PER_INDUSTRY };

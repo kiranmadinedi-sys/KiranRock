@@ -6,6 +6,7 @@ const performanceMetricsService = require('./performanceMetricsService');
 const marketRegimeService = require('./marketRegimeService');
 const tradeIntelligenceService = require('./tradeIntelligenceService');
 const dataProvider = require('./dataProvider');
+const globalSentimentService = require('./globalSentimentService');
 const { query } = require('../config/database');
 const YahooFinance = require('yahoo-finance2').default;
 const yahooFinance = new YahooFinance();
@@ -256,12 +257,13 @@ function deriveOptionsSetupFamily(strategy, opportunity) {
     return `${strategy}_${ivRankLabel.toLowerCase()}`;
 }
 
-function getOptionsRegimeAdjustment(strategy, regime, opportunity) {
+function getOptionsRegimeAdjustment(strategy, regime, opportunity, globalSentiment = null) {
     const momentum = Number(opportunity.underlyingMomentum || 0);
     let scoreAdjustment = 0;
     let sizeMultiplier = 1;
     let thresholdAdjustment = 0;
 
+    // Local market regime (BULL / BEAR / NEUTRAL from market breadth)
     if (regime === 'BEAR') {
         sizeMultiplier = 0.8;
         thresholdAdjustment = 5;
@@ -284,6 +286,45 @@ function getOptionsRegimeAdjustment(strategy, regime, opportunity) {
     } else {
         sizeMultiplier = 0.92;
         thresholdAdjustment = 2;
+    }
+
+    // ATLAS global macro overlay — applied on top of local regime adjustments
+    if (globalSentiment) {
+        const atlasLabel = globalSentiment.label;
+
+        if (atlasLabel === 'RISK_OFF') {
+            // Global market in stress — shrink all positions, raise bar to enter
+            sizeMultiplier      *= 0.6;
+            thresholdAdjustment += 8;
+            if (strategy === 'directionalSwing' && momentum > 0) {
+                scoreAdjustment -= 10; // block fresh bullish calls
+            } else if (strategy === 'creditSpreads') {
+                scoreAdjustment += 4;  // defined-risk spreads preferred in RISK_OFF
+            }
+        } else if (atlasLabel === 'BEARISH') {
+            sizeMultiplier      *= 0.8;
+            thresholdAdjustment += 5;
+            if (strategy === 'directionalSwing' && momentum > 0) {
+                scoreAdjustment -= 5;  // reduce bullish call confidence
+            } else if (strategy === 'creditSpreads') {
+                scoreAdjustment += 3;  // spreads more attractive in bearish global
+            }
+        } else if (atlasLabel === 'BULLISH') {
+            if (strategy === 'directionalSwing' && momentum > 0) {
+                scoreAdjustment += 4;
+                sizeMultiplier   *= 1.05;
+            } else if (strategy === 'creditSpreads') {
+                scoreAdjustment += 2;
+            }
+        } else if (atlasLabel === 'STRONG_BULLISH') {
+            if (strategy === 'directionalSwing' && momentum > 0) {
+                scoreAdjustment += 7;
+                sizeMultiplier   *= 1.10;
+            } else if (strategy === 'deltaNeutralScalping') {
+                scoreAdjustment += 3;
+            }
+        }
+        // NEUTRAL → no adjustment (default)
     }
 
     return { scoreAdjustment, sizeMultiplier, thresholdAdjustment };
@@ -1294,15 +1335,26 @@ async function executeAutonomousOptionsTrading(userId) {
             return;
         }
         
-        // Get VIX level
-        const [vix, marketRegime] = await Promise.all([
+        // Get VIX, market regime, and ATLAS global sentiment in parallel
+        const [vix, marketRegime, globalSentiment] = await Promise.all([
             getVixLevel(),
-            marketRegimeService.getMarketRegime()
+            marketRegimeService.getMarketRegime(),
+            globalSentimentService.getGlobalSentiment().catch(() => null)
         ]);
-        logger.info('[Options Bot] Market volatility', {
+
+        // Unify VIX: prefer ATLAS level (same dataProvider cache, avoids duplicate fetch)
+        const atlasVix = globalSentiment?.rawData?.vixLevel;
+        if (atlasVix && atlasVix > 0) {
+            vix.value  = atlasVix;
+            vix.regime = atlasVix < 15 ? 'LOW' : atlasVix < 25 ? 'NORMAL' : atlasVix < 35 ? 'HIGH' : 'EXTREME';
+        }
+
+        logger.info('[Options Bot] Market context', {
             vix: vix.value,
             vixRegime: vix.regime,
-            marketRegime: marketRegime.regime
+            marketRegime: marketRegime.regime,
+            atlasLabel: globalSentiment?.label || 'unavailable',
+            atlasScore: globalSentiment?.globalScore != null ? globalSentiment.globalScore.toFixed(2) : null
         });
         
         // Build universe from nightly scan STRONG BUY signals with good options liquidity.
@@ -1427,7 +1479,7 @@ async function executeAutonomousOptionsTrading(userId) {
         const intelligenceAdjusted = await Promise.all(
             allOpportunities.map(async (opp) => {
                 const setupFamily = deriveOptionsSetupFamily(opp.strategy, opp);
-                const regimeAdjustment = getOptionsRegimeAdjustment(opp.strategy, marketRegime.regime, opp);
+                const regimeAdjustment = getOptionsRegimeAdjustment(opp.strategy, marketRegime.regime, opp, globalSentiment);
                 const expectancyStats = await tradeIntelligenceService.getExpectancyAdjustment({
                     botType: 'options',
                     strategyFamily: opp.strategy,
@@ -1470,7 +1522,9 @@ async function executeAutonomousOptionsTrading(userId) {
                         ivRankLabel: opp.ivRankLabel,
                         underlyingMomentum: opp.underlyingMomentum,
                         liquidityScore: opp.liquidityScore,
-                        type: opp.type || null
+                        type: opp.type || null,
+                        atlasLabel: globalSentiment?.label || null,
+                        atlasScore: globalSentiment?.globalScore ?? null
                     }
                 }))
         );

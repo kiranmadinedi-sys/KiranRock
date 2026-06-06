@@ -37,6 +37,7 @@ const visionService             = require('./visionService');
 const agentHealth               = require('./agentHealthService');
 const localBrain                = require('./localBrainService');
 const evolveService             = require('./evolveService');
+const globalSentimentService    = require('./globalSentimentService');
 
 const AI_NEWS_SCORING_ENABLED = (process.env.AI_NEWS_SCORING_ENABLED || 'true').toLowerCase() === 'true';
 const AI_NEWS_SCORE_WEIGHT = Math.max(0, Math.min(1, parseFloat(process.env.AI_NEWS_SCORE_WEIGHT || '1')));
@@ -1157,7 +1158,7 @@ function getWeeklySignalFromDailyBars(bars) {
 async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null, regime = null) {
     try {
         // Fetch core market data through provider abstraction to avoid Yahoo-specific 429 failures
-        const [quote, historicalData, spyReturn, daysToEarnings, newsData, smartMoneyScore, fundamentals, redditData] = await Promise.all([
+        const [quote, historicalData, spyReturn, daysToEarnings, newsData, smartMoneyScore, fundamentals, redditData, globalSentiment] = await Promise.all([
             dataProvider.getQuote(symbol).catch(() => null),
             dataProvider.getBars(symbol, '1d', 220).catch(() => []), // 220 days needed for 200-day SMA (Weinstein)
             getSPY20DayReturn(),
@@ -1167,7 +1168,8 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
                 : Promise.resolve(null),
             sonarService.getSmartMoneyScore(symbol).catch(() => 0.5),
             getFundamentalsQuick(symbol).catch(() => null),        // CANSLIM — 4hr cache
-            redditAltDataService.getMentionScore(symbol).catch(() => null) // alt data — 15min cache
+            redditAltDataService.getMentionScore(symbol).catch(() => null), // alt data — 15min cache
+            globalSentimentService.getGlobalSentiment().catch(() => null),  // ATLAS — 15min cache
         ]);
 
         if (!quote || !quote.price) {
@@ -1600,6 +1602,34 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             }
         }
 
+        // 22.9. ATLAS Global Market Intelligence (±10) — PANTHEON STEP 8.5
+        // Synthesises international indices, futures, DXY, commodities, and VIX
+        // into a single macro environment score.  Sector-specific overlay adds ±2
+        // on top (e.g. tech penalised on strong dollar, energy boosted on oil surge).
+        // Cache is 15 min — single HTTP call per window regardless of stock count.
+        {
+            let atlasAdj = 0;
+            let atlasReason = '';
+            try {
+                // sector is already resolved above via sectorMetadata
+                const atlasResult = await globalSentimentService.getScoreAdjustment(sector);
+                atlasAdj    = atlasResult.adj;
+                atlasReason = atlasResult.reason;
+            } catch {
+                // non-blocking — leave atlasAdj = 0 if ATLAS unavailable
+                atlasReason = 'unavailable';
+            }
+            // Also check the pre-fetched globalSentiment (fallback if getScoreAdjustment fails)
+            if (atlasAdj === 0 && globalSentiment && globalSentiment.baseAdj !== 0) {
+                atlasAdj    = globalSentiment.baseAdj;
+                atlasReason = globalSentiment.label ?? 'cached';
+            }
+            if (atlasAdj !== 0) {
+                aiScore += atlasAdj;
+                scoringLog.push(`ATLAS: ${atlasAdj >= 0 ? '+' : ''}${atlasAdj} (${atlasReason})`);
+            }
+        }
+
         // Signal Conflict Detector (±6) — penalises mixed conviction
         {
             const votes = [];
@@ -1839,6 +1869,10 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             oracleThesis:     oracleVerdict?.thesis    || null,
             oracleBearCase:   oracleVerdict?.bearCase  || null,
             masterAlignment:  oracleVerdict?.masterAlignment || [],
+            // ATLAS — global macro context at time of scoring
+            atlasLabel:       globalSentiment?.label      || null,
+            atlasScore:       globalSentiment?.globalScore ?? null,
+            atlasRawData:     globalSentiment?.rawData     || null,
             timestamp: new Date()
         };
 
@@ -2095,6 +2129,11 @@ async function executeAutonomousTrading(userId) {
         // COMPASS — prefetch sector RS ranks so the sector rotation scoring is fresh
         compassService.getSectorRanks().catch(e =>
             logger.warn('[COMPASS] Sector rank prefetch failed (non-blocking)', { error: e.message })
+        );
+
+        // ATLAS — pre-warm global market sentiment cache before per-stock scoring begins
+        globalSentimentService.getGlobalSentiment().catch(e =>
+            logger.warn('[ATLAS] Global sentiment prefetch failed (non-blocking)', { error: e.message })
         );
 
         const [globalControl, userControls] = await Promise.all([

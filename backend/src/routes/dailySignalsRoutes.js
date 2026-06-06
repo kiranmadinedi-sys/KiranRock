@@ -10,6 +10,7 @@ const express = require('express');
 const router  = express.Router();
 const { query } = require('../config/database');
 const { protect } = require('../middleware/authMiddleware');
+const globalSentimentService = require('../services/globalSentimentService');
 
 /** Most recent scan date with passed records, within 4 days. */
 const LATEST_PASSED_DATE = `(
@@ -26,7 +27,7 @@ router.get('/', protect, async (req, res) => {
         const dateExpr = requestedDate ? `$1::date` : LATEST_PASSED_DATE;
         const params   = requestedDate ? [requestedDate] : [];
 
-        const [tickersRes, summaryRes, regimeRes, metaRes] = await Promise.all([
+        const [tickersRes, summaryRes, regimeRes, metaRes, atlasSentiment] = await Promise.all([
             // All scored tickers for the date, ordered by score desc
             query(
                 `SELECT
@@ -67,6 +68,9 @@ router.get('/', protect, async (req, res) => {
                 params
             ).catch(() => ({ rows: [] })),
 
+            // Live global market sentiment (ATLAS) — always fresh, 15-min cache
+            globalSentimentService.getGlobalSentiment().catch(() => null),
+
             // Scan freshness + news-rescan alerts
             query(
                 `SELECT
@@ -98,6 +102,12 @@ router.get('/', protect, async (req, res) => {
             generatedAt,
             rescanAlerts,
             regime,
+            globalMarket: atlasSentiment ? {
+                label:       atlasSentiment.label,
+                score:       atlasSentiment.globalScore,
+                breakdown:   atlasSentiment.breakdown,
+                rawData:     atlasSentiment.rawData,
+            } : null,
             summary: {
                 total:     parseInt(summary.total) || 0,
                 strongBuy: parseInt(summary.strongBuy) || 0,

@@ -30,11 +30,43 @@ interface Summary {
     avgScore: number | null;
 }
 
+interface GlobalMarketBreakdown {
+    asia:        number | null;
+    europe:      number | null;
+    futures:     number | null;
+    dollar:      number | null;
+    commodities: number | null;
+    vix:         number | null;
+}
+
+interface GlobalMarketRawData {
+    nikkeiPct:  number | null;
+    hsiPct:     number | null;
+    sensexPct:  number | null;
+    daxPct:     number | null;
+    ftsePct:    number | null;
+    esFutPct:   number | null;
+    nqFutPct:   number | null;
+    dxyPct:     number | null;
+    oilPct:     number | null;
+    goldPct:    number | null;
+    vixLevel:   number | null;
+    vvixLevel:  number | null;
+}
+
+interface GlobalMarketData {
+    label:     string;
+    score:     number;
+    breakdown: GlobalMarketBreakdown;
+    rawData:   GlobalMarketRawData;
+}
+
 interface SignalsData {
     scanDate:     string | null;
     generatedAt:  string | null;
     rescanAlerts: RescanAlert[];
     regime:       string | null;
+    globalMarket: GlobalMarketData | null;
     summary:      Summary;
     tickers:      Ticker[];
 }
@@ -72,6 +104,133 @@ function regimeColor(regime: string | null) {
     return 'text-yellow-600';
 }
 
+function atlasLabelStyle(label: string) {
+    if (label === 'STRONG_BULLISH') return { text: 'text-emerald-700 dark:text-emerald-400', bg: 'bg-emerald-100 dark:bg-emerald-900/30', bar: 'bg-emerald-500' };
+    if (label === 'BULLISH')        return { text: 'text-green-700 dark:text-green-400',   bg: 'bg-green-100 dark:bg-green-900/30',   bar: 'bg-green-500' };
+    if (label === 'BEARISH')        return { text: 'text-orange-700 dark:text-orange-400', bg: 'bg-orange-100 dark:bg-orange-900/30', bar: 'bg-orange-500' };
+    if (label === 'RISK_OFF')       return { text: 'text-red-700 dark:text-red-400',       bg: 'bg-red-100 dark:bg-red-900/30',       bar: 'bg-red-500' };
+    return                                 { text: 'text-gray-600 dark:text-gray-400',     bg: 'bg-gray-100 dark:bg-gray-800',        bar: 'bg-gray-400' };
+}
+
+function pctColor(pct: number | null, invert = false) {
+    if (pct === null) return 'text-gray-400';
+    const positive = invert ? pct < 0 : pct > 0;
+    const negative = invert ? pct > 0 : pct < 0;
+    if (positive) return 'text-green-600 dark:text-green-400';
+    if (negative) return 'text-red-600 dark:text-red-400';
+    return 'text-gray-500';
+}
+
+function fmtPct(pct: number | null): string {
+    if (pct === null) return '—';
+    return (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
+}
+
+/** Mini score bar 0–1 shown as a thin horizontal bar */
+function ScoreBar({ value, barClass }: { value: number | null; barClass: string }) {
+    const pct = value !== null ? Math.round(value * 100) : 50;
+    return (
+        <div className="w-full h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+            <div className={`h-full rounded-full transition-all ${barClass}`} style={{ width: `${pct}%` }} />
+        </div>
+    );
+}
+
+function GlobalMarketPanel({ gm }: { gm: GlobalMarketData }) {
+    const style = atlasLabelStyle(gm.label);
+    const r     = gm.rawData;
+
+    const indices = [
+        { name: 'Nikkei',  val: r.nikkeiPct,  inv: false },
+        { name: 'HSI',     val: r.hsiPct,     inv: false },
+        { name: 'DAX',     val: r.daxPct,     inv: false },
+        { name: 'FTSE',    val: r.ftsePct,    inv: false },
+        { name: 'ES Fut',  val: r.esFutPct,   inv: false },
+        { name: 'DXY',     val: r.dxyPct,     inv: true  },  // dollar up = bad for stocks
+        { name: 'Oil',     val: r.oilPct,     inv: false },
+        { name: 'Gold',    val: r.goldPct,    inv: false },
+    ];
+
+    const components: { name: string; key: keyof GlobalMarketBreakdown }[] = [
+        { name: 'Asia-Pac', key: 'asia' },
+        { name: 'Europe',   key: 'europe' },
+        { name: 'Futures',  key: 'futures' },
+        { name: 'Dollar',   key: 'dollar' },
+        { name: 'Commod',   key: 'commodities' },
+        { name: 'VIX',      key: 'vix' },
+    ];
+
+    return (
+        <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-700 px-5 py-4">
+            {/* Header row */}
+            <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                    <span className="text-base font-bold text-gray-800 dark:text-gray-200">🌍 Global Market</span>
+                    <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${style.bg} ${style.text}`}>
+                        {gm.label.replace('_', ' ')}
+                    </span>
+                </div>
+                <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-400">ATLAS score</span>
+                    <span className={`text-sm font-bold ${style.text}`}>{(gm.score * 100).toFixed(0)}/100</span>
+                </div>
+            </div>
+
+            {/* Index data grid */}
+            <div className="grid grid-cols-4 sm:grid-cols-8 gap-2 mb-3">
+                {indices.map(idx => (
+                    <div key={idx.name} className="flex flex-col items-center bg-gray-50 dark:bg-gray-800 rounded-lg py-1.5 px-1">
+                        <span className="text-[10px] text-gray-500 dark:text-gray-400 font-semibold">{idx.name}</span>
+                        <span className={`text-xs font-bold mt-0.5 ${pctColor(idx.val, idx.inv)}`}>
+                            {idx.name === 'DXY' && r.vixLevel !== null
+                                ? fmtPct(idx.val)  // show % for DXY
+                                : fmtPct(idx.val)}
+                        </span>
+                    </div>
+                ))}
+            </div>
+
+            {/* VIX + VVIX highlight */}
+            <div className="flex items-center gap-4 mb-3">
+                {r.vixLevel !== null && (
+                    <div className="flex items-center gap-1.5">
+                        <span className="text-xs text-gray-500">VIX</span>
+                        <span className={`text-sm font-bold ${r.vixLevel < 15 ? 'text-green-600' : r.vixLevel < 20 ? 'text-yellow-600' : r.vixLevel < 30 ? 'text-orange-600' : 'text-red-600'}`}>
+                            {r.vixLevel.toFixed(1)}
+                        </span>
+                        <span className="text-[10px] text-gray-400">
+                            {r.vixLevel < 15 ? '(calm)' : r.vixLevel < 20 ? '(normal)' : r.vixLevel < 30 ? '(elevated)' : '(fear)'}
+                        </span>
+                    </div>
+                )}
+                {r.vvixLevel !== null && (
+                    <div className="flex items-center gap-1.5">
+                        <span className="text-xs text-gray-500">VVIX</span>
+                        <span className={`text-sm font-bold ${r.vvixLevel > 100 ? 'text-orange-600' : 'text-gray-600 dark:text-gray-400'}`}>
+                            {r.vvixLevel.toFixed(1)}
+                        </span>
+                    </div>
+                )}
+            </div>
+
+            {/* Component breakdown bars */}
+            <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                {components.map(c => (
+                    <div key={c.key} className="flex flex-col gap-1">
+                        <div className="flex items-center justify-between">
+                            <span className="text-[10px] text-gray-500">{c.name}</span>
+                            <span className="text-[10px] text-gray-400">
+                                {gm.breakdown[c.key] !== null ? Math.round((gm.breakdown[c.key] as number) * 100) : '—'}
+                            </span>
+                        </div>
+                        <ScoreBar value={gm.breakdown[c.key]} barClass={style.bar} />
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+}
+
 function formatDate(dateStr: string | null) {
     if (!dateStr) return '—';
     return new Date(dateStr).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -106,7 +265,6 @@ export default function SignalsPage() {
     const [filter, setFilter]           = useState<'ALL' | 'STRONG BUY' | 'BUY'>('ALL');
     const [loading, setLoading]         = useState(true);
     const [copied, setCopied]           = useState(false);
-    const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
     const refreshTimerRef               = useRef<ReturnType<typeof setInterval> | null>(null);
 
     const token = typeof window !== 'undefined' ? getAuthToken() : null;
@@ -132,7 +290,7 @@ export default function SignalsPage() {
                 : `${base}/api/daily-signals`;
             const r = await fetch(url, { headers: hdrs });
             if (r.status === 401) { handleAuthError(401); return; }
-            if (r.ok) { setData(await r.json()); setLastRefresh(new Date()); }
+            if (r.ok) { setData(await r.json()); }
         } catch { /* no-op */ } finally {
             setLoading(false);
         }
@@ -270,6 +428,11 @@ export default function SignalsPage() {
                                 </div>
                             )}
                         </div>
+
+                        {/* ATLAS Global Market Intelligence panel */}
+                        {data.globalMarket && (
+                            <GlobalMarketPanel gm={data.globalMarket} />
+                        )}
 
                         {/* News rescan alert banner (shown only when rescans happened today) */}
                         {data.rescanAlerts.length > 0 && (

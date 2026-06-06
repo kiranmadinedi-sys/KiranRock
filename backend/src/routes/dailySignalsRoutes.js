@@ -68,9 +68,6 @@ router.get('/', protect, async (req, res) => {
                 params
             ).catch(() => ({ rows: [] })),
 
-            // Live global market sentiment (ATLAS) — always fresh, 15-min cache
-            globalSentimentService.getGlobalSentiment().catch(() => null),
-
             // Scan freshness + news-rescan alerts
             query(
                 `SELECT
@@ -89,7 +86,10 @@ router.get('/', protect, async (req, res) => {
                  FROM daily_universe_analysis
                  WHERE analysis_date = ${dateExpr}`,
                 params
-            ).catch(() => ({ rows: [] }))
+            ).catch(() => ({ rows: [] })),
+
+            // Live global market sentiment (ATLAS) — always fresh, 15-min cache
+            globalSentimentService.getGlobalSentiment().catch(() => null)
         ]);
 
         const summary      = summaryRes.rows[0] || { scanDate: null, total: 0, strongBuy: 0, buy: 0, topScore: null, avgScore: null };

@@ -10,6 +10,25 @@ const holdingsDb = require('./holdingsDatabaseService');
 const tradesDb = require('./tradesDatabaseService');
 const { query } = require('../config/database');
 const { logger, aiTradingLogger } = require('../utils/logger');
+
+// Persist live PANTHEON scores to live_score_cache after each scan cycle.
+// Signals page reads these and overlays them on the nightly scan scores during market hours.
+async function _saveLiveScores(analyzed) {
+    if (!analyzed.length) return;
+    const today = new Date().toISOString().slice(0, 10);
+    // Bulk upsert — one query per stock but runs async after trading logic completes
+    await Promise.all(analyzed.map(s =>
+        query(
+            `INSERT INTO live_score_cache (symbol, scan_date, ai_score, recommendation, live_scored_at)
+             VALUES ($1, $2, $3, $4, NOW())
+             ON CONFLICT (symbol, scan_date) DO UPDATE
+             SET ai_score = EXCLUDED.ai_score,
+                 recommendation = EXCLUDED.recommendation,
+                 live_scored_at = NOW()`,
+            [s.symbol, today, s.aiScore ?? null, s.recommendation ?? null]
+        ).catch(() => {})
+    ));
+}
 const alertService = require('./telegramAlertService');
 const performanceService = require('./performanceMetricsService');
 const indicators = require('./technicalIndicators');
@@ -26,12 +45,14 @@ const compassService      = require('./compassService');
 
 const precomputedUniverseService = require('./precomputedUniverseService');
 const sonarService              = require('./sonarService');
+const positionSizingService     = require('./positionSizingService');
 const geminiPulseService        = require('./geminiPulseService');
 const fredMacroService          = require('./fredMacroService');
 const redditAltDataService      = require('./redditAltDataService');
 const prophetService            = require('./prophetService');
 const { detectOraclePatterns }  = require('./patternDetectionService');
 const sageService               = require('./sageService');
+const scoreCalibratorService    = require('./scoreCalibratorService');
 const oracleService             = require('./oracleService');
 const visionService             = require('./visionService');
 const agentHealth               = require('./agentHealthService');
@@ -239,7 +260,7 @@ const DEFAULT_RISK_CONFIG = {
     maxPortfolioRisk: 0.60,       // Max 60% invested (40% cash reserve)
     
     // Entry/Exit rules
-    minBuyScore: 80,              // Swing mode: 80 threshold (82 was blocking precomputed STRONG BUY entries)
+    minBuyScore: 85,              // Quality floor: 85+ required; DB per-user value overrides this default
     stopLoss: -0.07,              // Hard stop at -7% from entry (covers normal daily volatility)
     trailingStopPercent: 0.07,    // Base trailing stop — overridden dynamically by getDynamicTrailingStop()
     takeProfitPercent: 0.35,      // Swing: full exit at 35% gain (let winners run multi-day)
@@ -915,15 +936,15 @@ async function checkMaxDrawdown(userId, currentPortfolioValue) {
 async function checkDailyLossLimit(userId, riskConfig, totalPortfolioValue = 0) {
     try {
         const dailyLoss = await performanceService.getTodayLoss(userId);
-        // PANTHEON: dynamic % of portfolio, not a hardcoded dollar amount.
-        // DB-stored dailyLossLimit is negative dollars; fall back to 5% of portfolio.
-        const pctLimit  = totalPortfolioValue * (riskConfig.dailyLossPct || 0.05);
-        const lossLimit = (riskConfig.dailyLossLimit < 0)
-            ? riskConfig.dailyLossLimit
-            : -pctLimit;
+
+        // Dynamic limit: 1% of current account value, minimum $15 floor.
+        // This scales correctly as the account grows — a fixed $25 stops trading
+        // after a single bad fill on a small account, while 1% scales proportionally.
+        const onePct   = totalPortfolioValue * 0.01;
+        const lossLimit = -(Math.max(15, onePct));
 
         if (dailyLoss <= lossLimit) {
-            logger.error('Daily loss limit reached', { userId, dailyLoss, lossLimit });
+            logger.error('Daily loss limit reached', { userId, dailyLoss, lossLimit, accountValue: totalPortfolioValue });
             await alertService.alertDailyLossLimitReached(userId, dailyLoss);
             return true;
         }
@@ -1228,14 +1249,19 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         const marketCap = quote.marketCap || 0;
         const sector = sectorMetadata.resolveSector(symbol, quote.sector);
         const tradeProfile = getSectorTradeProfile(sector);
-        const week52High = quote.high52w || price;
 
         const quotes = (historicalData || []).filter(q => q.close != null);
         const closes = quotes.map(q => q.close).filter(Boolean);
         const highs  = quotes.map(q => q.high).filter(Boolean);
         const lows   = quotes.map(q => q.low).filter(Boolean);
 
-        if (closes.length < 20) return null;
+        if (closes.length < 50) return null; // require ~10 weeks of history; rejects micro-caps with 1-7 bars
+
+        // 52-week high: prefer pre-baked field (Yahoo), otherwise compute from up to 252 trading
+        // days of bar data (already loaded). Alpaca and Polygon snapshots return null for high52w.
+        // Falling back to `price` caused every stock to score highProximity=1.0 (+7 pts inflation).
+        const week52High = quote.high52w ||
+            (highs.length > 0 ? Math.max(...highs.slice(-252)) : price);
 
         // PULSE — Gemini headline analysis (cached 30 min; returns null instantly when key absent)
         const headlines    = (newsData?.articles || []).map(a => a.title || a.headline || '').filter(Boolean);
@@ -1309,14 +1335,25 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             }
         }
 
-        // 1. Momentum (±10) — today's price change from the quote
-        const momentum = quote.changePercent / 100;
-        if (momentum > 0.03)       { aiScore += 10; scoringLog.push('Momentum: +10 (strong up)'); }
-        else if (momentum > 0.01)  { aiScore += 6;  scoringLog.push('Momentum: +6'); }
-        else if (momentum > 0)     { aiScore += 2;  scoringLog.push('Momentum: +2'); }
-        else if (momentum < -0.03) { aiScore -= 10; scoringLog.push('Momentum: -10 (strong down)'); }
-        else if (momentum < -0.01) { aiScore -= 6;  scoringLog.push('Momentum: -6'); }
-        else                       { aiScore -= 2;  scoringLog.push('Momentum: -2'); }
+        // 1. Momentum (±10) — 10-day Rate of Change, aligned with MACD/RSI timeframe
+        // Single-day change caused false "strong down momentum" when a bullish stock pulled back
+        // 1% on the scan day. 10-day ROC is consistent with the 12/26/9 MACD and RSI(14) windows.
+        const price10dAgo = closes.length >= 10 ? closes[closes.length - 10] : closes[0];
+        const momentum10d = price10dAgo > 0 ? (price - price10dAgo) / price10dAgo : 0;
+        const momentum = momentum10d; // alias used by deriveStockSetupFamily, ensemble gate, and return object
+        if      (momentum10d >  0.06)  { aiScore += 10; scoringLog.push(`Momentum: +10 (10d ROC +${(momentum10d*100).toFixed(1)}%, strong up)`); }
+        else if (momentum10d >  0.02)  { aiScore += 6;  scoringLog.push(`Momentum: +6 (10d ROC +${(momentum10d*100).toFixed(1)}%)`); }
+        else if (momentum10d >  0)     { aiScore += 2;  scoringLog.push(`Momentum: +2 (10d ROC +${(momentum10d*100).toFixed(1)}%)`); }
+        else if (momentum10d < -0.06)  { aiScore -= 10; scoringLog.push(`Momentum: -10 (10d ROC ${(momentum10d*100).toFixed(1)}%, strong down)`); }
+        else if (momentum10d < -0.02)  { aiScore -= 6;  scoringLog.push(`Momentum: -6 (10d ROC ${(momentum10d*100).toFixed(1)}%)`); }
+        else                           { aiScore -= 2;  scoringLog.push(`Momentum: -2 (10d ROC ${(momentum10d*100).toFixed(1)}%)`); }
+
+        // 1a. DayChange (±3) — today's intraday move; secondary signal, lower weight than trend
+        const dayChange = quote.changePercent / 100;
+        if      (dayChange >  0.03)  { aiScore += 3; scoringLog.push(`DayChange: +3 (today +${(dayChange*100).toFixed(1)}%)`); }
+        else if (dayChange >  0.01)  { aiScore += 1; scoringLog.push(`DayChange: +1 (today +${(dayChange*100).toFixed(1)}%)`); }
+        else if (dayChange < -0.03)  { aiScore -= 3; scoringLog.push(`DayChange: -3 (today ${(dayChange*100).toFixed(1)}%)`); }
+        else if (dayChange < -0.01)  { aiScore -= 1; scoringLog.push(`DayChange: -1 (today ${(dayChange*100).toFixed(1)}%)`); }
 
 
         // 2. Volume (±10) — vs avg volume from the quote
@@ -1372,9 +1409,27 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             const mrAdj = Math.round(Math.min(10, Math.abs(distFromSma20Pct) * 0.75));
             aiScore += mrAdj;
             scoringLog.push(`MeanRev: +${mrAdj} (${distFromSma20Pct.toFixed(1)}% below SMA20)`);
-        } else if (distFromSma20Pct > 8) {
+        } else if (distFromSma20Pct > 8 && distFromSma20Pct <= 15) {
             aiScore -= 5;
             scoringLog.push(`MeanRev: -5 (${distFromSma20Pct.toFixed(1)}% above SMA20, overextended)`);
+        } else if (distFromSma20Pct > 15) {
+            // Severely overbought — data shows high-score entries at this extension lose money
+            // (BKNG +15% above SMA scored 95 but was the worst trade). Hard penalise.
+            aiScore -= 12;
+            scoringLog.push(`MeanRev: -12 (${distFromSma20Pct.toFixed(1)}% above SMA20, severely overbought — high reversal risk)`);
+        }
+
+        // 5b. 5-day momentum overbought guard: if price up >8% in 5 days AND already above SMA20,
+        // apply an additional penalty. This catches the "chasing a breakout" pattern that produces
+        // high AI scores but buys at the top (the BKNG / high-score loss pattern in our data).
+        if (closes.length >= 5) {
+            const price5dAgo = closes[closes.length - 5];
+            const gain5d = price5dAgo > 0 ? ((price - price5dAgo) / price5dAgo) * 100 : 0;
+            if (gain5d > 8 && distFromSma20Pct > 3) {
+                const momentumPenalty = Math.round(Math.min(10, gain5d * 0.6));
+                aiScore -= momentumPenalty;
+                scoringLog.push(`OverboughtGuard: -${momentumPenalty} (up ${gain5d.toFixed(1)}% in 5d while extended — buying-at-top risk)`);
+            }
         }
 
         // 6. Relative Strength vs SPY (±8) — NEW
@@ -1887,6 +1942,12 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             bbSignal: bbInterpretation?.signal || 'NEUTRAL',
             relativeStrength: relativeStrength.toFixed(2),
             week52HighProximity: (highProximity * 100).toFixed(1) + '%',
+            // Relative strength fields — used by entry gate in runTradingSession
+            ma50:        sma50  != null ? Number(sma50.toFixed(2))  : null,
+            ma200:       sma200 != null ? Number(sma200.toFixed(2)) : null,
+            aboveMa50:   sma50  != null ? price >= sma50  : null,
+            aboveMa200:  sma200 != null ? price >= sma200 : null,
+            goldenCross: (sma50 != null && sma200 != null) ? sma50 >= sma200 : null,
             earningsFlag,
             earningsSetup,
             daysToEarnings,
@@ -1926,7 +1987,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             rsi: rsiInterpretation.signal,
             macd: macdInterpretation?.signal || 'NEUTRAL',
             volumeRatio: volumeRatio.toFixed(2),
-            momentum: (momentum * 100).toFixed(2) + '%',
+            momentum: (momentum10d * 100).toFixed(2) + '%',
             newsSentiment: newsSentiment.toFixed(1),
             newsAdjustment: newsScoreAdjustment.toFixed(2),
             newsSources: String(newsSourceCount || 0),
@@ -1958,6 +2019,13 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
     const riskConfig = await getUserRiskConfig(userId);
     const minBuyScore = overrideMinScore !== null ? overrideMinScore : riskConfig.minBuyScore;
 
+    // Score calibration — runs once per day as a background suggestion, never auto-applies.
+    // The calibrator reads closed trade history and sends a Telegram suggestion when the
+    // data recommends a different floor. The user reviews and approves any changes manually.
+    scoreCalibratorService.runDailySuggestion(userId, minBuyScore).catch(e =>
+        logger.warn('[ScoreCalibrator] Daily suggestion failed (non-blocking)', { error: e.message })
+    );
+
     // Universe selection — three-tier fallback:
     // Tier 1 (best): Nightly pre-scored candidates from daily_universe_analysis.
     //   Overnight scan covered ALL tickers; market hours only re-analyzes top ~120 for fresh prices.
@@ -1969,7 +2037,7 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
         const precomputedReady = await precomputedUniverseService.isAvailable();
         if (precomputedReady) {
             const precomputedList = await precomputedUniverseService.loadCandidates({
-                minScore: Math.max(60, minBuyScore - 15), // wider band — live analysis sharpens
+                minScore: Math.max(80, minBuyScore - 5), // quality floor: ≥80 removes noise while keeping stocks that gap up intraday
                 limit:    120
             });
             if (precomputedList.length >= 10) {
@@ -2077,6 +2145,11 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
     // Refresh sector rotation cache from this scan (applied as boost/penalty in the next cycle)
     if (allAnalyzed.length > 0) {
         refreshSectorRotationCache(allAnalyzed);
+        // Persist live PANTHEON scores to DB so the Signals page shows intraday re-scores.
+        // Fire-and-forget — a cache miss is harmless, Signals page falls back to nightly score.
+        _saveLiveScores(allAnalyzed).catch(e =>
+            logger.warn('[LiveCache] Failed to save live scores', { err: e.message })
+        );
     }
 
     const intelligenceAdjusted = await Promise.all(
@@ -2215,23 +2288,44 @@ async function executeAutonomousTrading(userId) {
             return { success: false, message: 'Market is closed' };
         }
 
-        // Data-freshness guard (senior-backend pattern): verify live quote is recent
-        // before allowing any trades — stale data during Alpaca outages causes bad fills
+        // Data-freshness guard: verify live quote is reachable before allowing trades.
+        // Falls back to Yahoo Finance if the primary provider (Alpaca) is temporarily down
+        // so a single API outage doesn't kill an entire trading day.
         const DATA_MAX_AGE_MS = parseInt(process.env.DATA_MAX_AGE_MS || '120000'); // 2 min default
-        try {
-            const testQuote = await dataProvider.getQuote('SPY');
-            const quoteAge = Date.now() - (testQuote._fetchedAt || 0);
-            if (testQuote._fetchedAt && quoteAge > DATA_MAX_AGE_MS) {
-                logger.error('[DataGuard] Quote data is stale, halting trading', {
-                    userId, ageMs: quoteAge, maxAgeMs: DATA_MAX_AGE_MS
+        {
+            let dataOk = false;
+            try {
+                const testQuote = await dataProvider.getQuote('SPY');
+                const quoteAge = Date.now() - (testQuote._fetchedAt || 0);
+                if (testQuote._fetchedAt && quoteAge > DATA_MAX_AGE_MS) {
+                    logger.error('[DataGuard] Quote data is stale, halting trading', {
+                        userId, ageMs: quoteAge, maxAgeMs: DATA_MAX_AGE_MS
+                    });
+                    return { success: false, message: `Market data is stale (${Math.round(quoteAge / 1000)}s old). Trading paused until fresh data available.` };
+                }
+                dataOk = true;
+            } catch (dataErr) {
+                logger.warn('[DataGuard] Primary provider unreachable — trying Yahoo Finance fallback', {
+                    userId, error: dataErr.message
                 });
-                return { success: false, message: `Market data is stale (${Math.round(quoteAge / 1000)}s old). Trading paused until fresh data available.` };
             }
-        } catch (dataErr) {
-            logger.error('[DataGuard] Cannot reach data provider, halting trading', {
-                userId, error: dataErr.message
-            });
-            return { success: false, message: 'Data provider unreachable. Trading paused to avoid stale-price fills.' };
+            if (!dataOk) {
+                // Yahoo Finance fallback — free, no API key required
+                try {
+                    const { default: yf } = require('yahoo-finance2');
+                    const fn = yf._originalQuote || yf.quote;
+                    await fn.call(yf, 'SPY');
+                    logger.info('[DataGuard] Yahoo Finance fallback succeeded — proceeding with trading', { userId });
+                    dataOk = true;
+                } catch (yahooErr) {
+                    logger.error('[DataGuard] Both providers unreachable — halting trading', {
+                        userId, error: yahooErr.message
+                    });
+                }
+            }
+            if (!dataOk) {
+                return { success: false, message: 'Data provider unreachable. Trading paused to avoid stale-price fills.' };
+            }
         }
 
         const [riskConfig, regime] = await Promise.all([
@@ -2343,30 +2437,48 @@ async function executeAutonomousTrading(userId) {
 
         let availableBalance = parseFloat(account.balance);
         const currentHoldings = portfolio.holdings || [];
-        const totalPortfolioValue = portfolio.totalPortfolioValue || availableBalance;
 
-        // Broker cash verification — always cap against Alpaca's actual buying power.
-        // The DB balance is an internal accounting figure; Alpaca may have less cash
-        // available due to pending settlements, margin calls, or out-of-band withdrawals.
-        // If we can't reach Alpaca, we log a warning and proceed with the DB figure
-        // (fail-open for availability, rely on broker-side rejection as the last guard).
+        // For Alpaca broker: fetch live account values FIRST so that StrategyScale,
+        // sector allocation checks, and the daily loss circuit breaker all operate on
+        // the real portfolio value — not a stale DB figure that may be 100× too large
+        // (e.g. a $500 live account that has a $200K paper balance in the DB).
+        let totalPortfolioValue = portfolio.totalPortfolioValue || availableBalance;
         if (process.env.BROKER === 'alpaca') {
             try {
                 const brokerAcct = await brokerService.getAccountInfo(userId);
-                if (brokerAcct.buyingPower < availableBalance) {
-                    logger.warn('[CashGuard] DB balance exceeds Alpaca buying power — capping available capital', {
-                        userId,
-                        dbBalance:          availableBalance.toFixed(2),
-                        alpacaBuyingPower:  brokerAcct.buyingPower.toFixed(2),
-                        cappedTo:           brokerAcct.buyingPower.toFixed(2)
-                    });
-                    availableBalance = brokerAcct.buyingPower;
-                }
+                totalPortfolioValue = brokerAcct.portfolioValue || brokerAcct.buyingPower || availableBalance;
+                availableBalance    = brokerAcct.buyingPower;
+                logger.info('[CashGuard] Synced from Alpaca', {
+                    userId,
+                    portfolioValue:    totalPortfolioValue.toFixed(2),
+                    buyingPower:       availableBalance.toFixed(2),
+                });
             } catch (bpErr) {
-                logger.warn('[CashGuard] Could not verify Alpaca buying power — using DB balance', {
+                logger.warn('[CashGuard] Could not fetch Alpaca account — using DB balance', {
                     userId, err: bpErr.message
                 });
             }
+        }
+
+        // Strategy vs Amount: dynamically cap maxOpenPositions and maxOrderNotional
+        // proportional to the actual portfolio value. Ensures every user runs the same
+        // strategy quality (minBuyScore unchanged) while position scale reflects balance.
+        {
+            const pv = totalPortfolioValue;
+            const dynamicMaxPos = pv < 15000 ? 5 : pv < 30000 ? 8 : pv < 75000 ? 10 : pv < 150000 ? 12 : 15;
+            const dynamicMaxNotional = Math.min(20000, Math.max(300, Math.round(pv * 0.07 / 100) * 100));
+            // Only tighten — never let DB config exceed what the balance can support
+            if (sessionRiskConfig.maxOpenPositions > dynamicMaxPos) {
+                sessionRiskConfig.maxOpenPositions = dynamicMaxPos;
+            }
+            if (sessionRiskConfig.maxOrderNotional > dynamicMaxNotional) {
+                sessionRiskConfig.maxOrderNotional = dynamicMaxNotional;
+            }
+            logger.info('[StrategyScale] Proportional limits applied', {
+                userId, portfolioValue: pv.toFixed(2),
+                maxOpenPositions: sessionRiskConfig.maxOpenPositions,
+                maxOrderNotional: sessionRiskConfig.maxOrderNotional
+            });
         }
 
         logger.info('Account status', {
@@ -2642,11 +2754,30 @@ async function executeAutonomousTrading(userId) {
             return { success: true, message: 'After 3:30 PM ET — swing-only mode, exits managed' };
         }
 
+        // Opening volatility block: no new entries in the first 30 min of the session.
+        // 9:30-10:00 AM ET is price discovery — wide spreads, stop hunts, and gap fills
+        // make entries statistically worse. Exits and position management still run.
+        const _isOpeningWindow = _etMinutes >= 9 * 60 + 30 && _etMinutes < 10 * 60;
+        if (_isOpeningWindow) {
+            logger.info('[OpenGuard] Before 10:00 AM ET — skipping new entries, managing exits only', { userId });
+            await manageExistingPositions(userId);
+            return { success: true, message: 'Before 10:00 AM ET — opening volatility window, exits managed' };
+        }
+
         // Regime-aware per-cycle new-position cap.
         // Bear/Choppy/Neutral: hard cap. Bull: scale with signal breadth so wide conviction
         // (many STRONG BUY signals) unlocks more positions while thin conviction stays conservative.
         const _REGIME_POS_CAP = { BEAR: 1, NEUTRAL: 2, CHOPPY: 2 };
         const _regimeUpper = (regime.regime || '').toUpperCase();
+
+        // Regime-gated TOTAL open-position limit (portfolio-wide cap, not just per-cycle).
+        // Separate from regimeNewPosCap which governs how many NEW entries per trading cycle.
+        const _isBearRegime = _regimeUpper.includes('BEAR') || _regimeUpper === 'RISK_OFF' || _regimeUpper === 'PANIC';
+        const _REGIME_TOTAL_POS = {
+            BEAR: 2, BEAR_QUIET: 3, BEAR_MILD: 4, RISK_OFF: 3, PANIC: 2, NEUTRAL: 6, CHOPPY: 5
+        };
+        const regimeMaxPositions = _REGIME_TOTAL_POS[_regimeUpper]
+            ?? (_regimeUpper.includes('BULL_MILD') ? 6 : sessionRiskConfig.maxOpenPositions);
         let regimeNewPosCap;
         if (_REGIME_POS_CAP[_regimeUpper] !== undefined) {
             regimeNewPosCap = _REGIME_POS_CAP[_regimeUpper];
@@ -2685,7 +2816,7 @@ async function executeAutonomousTrading(userId) {
         for (const opportunity of newOpportunities) {
             if (trades.length >= sessionRiskConfig.maxDailyTrades) break;
             if (remainingCapital < 100) break;
-            if (currentHoldings.length + trades.length >= sessionRiskConfig.maxOpenPositions) break;
+            if (currentHoldings.length + trades.length >= regimeMaxPositions) break;
             if (trades.length >= regimeNewPosCap) { // regime cap: BEAR=1, NEUTRAL/CHOPPY=2, BULL=breadth
                 logger.info('[RegimeCap] New-position cap reached for this cycle', {
                     userId, cap: regimeNewPosCap, regime: regime.regime
@@ -2791,6 +2922,30 @@ async function executeAutonomousTrading(userId) {
                     });
                     continue;
                 }
+
+                // Moderate gap penalty (3-12%): stock moved since nightly scan flagged it.
+                // Entry is now stale — apply a score haircut proportional to the gap.
+                // 3% gap → -3 pts, 8% gap → -8 pts, 12% gap → -12 pts (capped).
+                if (todayChangePct > 3 && todayChangePct <= 12) {
+                    const gapPenalty = Math.round(Math.min(12, todayChangePct));
+                    const effectiveScore = (opportunity.aiScore || 0) - gapPenalty;
+                    const _gapMinScore = sessionRiskConfig.minBuyScore;
+                    if (effectiveScore < _gapMinScore) {
+                        logger.info('[GapFilter] Skipping — moderate gap reduces effective score below threshold', {
+                            userId, symbol: opportunity.symbol,
+                            changePct: todayChangePct.toFixed(1),
+                            originalScore: opportunity.aiScore,
+                            gapPenalty, effectiveScore, minBuyScore: _gapMinScore
+                        });
+                        continue;
+                    }
+                    logger.info('[GapFilter] Moderate gap — applying score haircut but proceeding', {
+                        userId, symbol: opportunity.symbol,
+                        changePct: todayChangePct.toFixed(1),
+                        originalScore: opportunity.aiScore,
+                        gapPenalty, effectiveScore
+                    });
+                }
             }
 
             // Regime gate: breakout_leader setups require a trending bullish regime.
@@ -2821,6 +2976,47 @@ async function executeAutonomousTrading(userId) {
                         _bumpGateStat(userId, 'volumeGate');
                         continue;
                     }
+                }
+            }
+
+            // Earnings protection: hard block within 7 days of earnings.
+            // Even a high-scoring setup can be destroyed by an earnings gap.
+            // The scoring already applies a -15 penalty inside analyzeStockWithAI, but an
+            // explicit block here ensures no stock slips through at the minimum score gate.
+            {
+                const _dte = opportunity.daysToEarnings;
+                if (_dte !== null && _dte !== undefined && _dte <= 7) {
+                    logger.info('[EarningsGuard] Skipping — earnings within 7 days', {
+                        userId, symbol: opportunity.symbol,
+                        daysToEarnings: _dte, score: opportunity.aiScore
+                    });
+                    continue;
+                }
+            }
+
+            // Relative strength gate: require price above 50-day MA for standard entries.
+            // Stocks below both MAs are in a downtrend — the setup may look good on a
+            // short-term bounce but lacks structural tailwinds.
+            // Exception: ultra-high conviction (score ≥ 92) may override — could be a
+            // Stage 1→2 breakout that hasn't reclaimed the MA yet.
+            {
+                const _above50  = opportunity.aboveMa50;
+                const _above200 = opportunity.aboveMa200;
+                const _score    = opportunity.aiScore || 0;
+                if (_above50 === false && _above200 === false && _score < 92) {
+                    logger.info('[RSFilter] Skipping — price below both 50MA and 200MA', {
+                        userId, symbol: opportunity.symbol,
+                        price: opportunity.price,
+                        ma50: opportunity.ma50, ma200: opportunity.ma200, score: _score
+                    });
+                    continue;
+                }
+                if (_above50 === false && _score < 88) {
+                    logger.info('[RSFilter] Skipping — price below 50MA, requires score ≥88', {
+                        userId, symbol: opportunity.symbol,
+                        price: opportunity.price, ma50: opportunity.ma50, score: _score
+                    });
+                    continue;
                 }
             }
 
@@ -2909,7 +3105,47 @@ async function executeAutonomousTrading(userId) {
 
             // Apply regime and streak multipliers to the fraction.
             const expectancySizeMultiplier = opportunity.expectancyStats?.sizeMultiplier || 1;
-            const combinedMultiplier = effectiveSizeMultiplier * streakBreaker.multiplier * expectancySizeMultiplier;
+
+            // Score-tier multiplier — scales position size with conviction level.
+            // Target allocations (approximate, subject to Kelly/ATR/regime caps):
+            //   85-89 → ~3% of portfolio (probe size — quality but not exceptional)
+            //   90-94 → ~5% of portfolio (standard size — strong conviction)
+            //   95+   → ~7-9% of portfolio (overweight — rare, highest quality)
+            // Scores below 85 are blocked by the 85 min_buy_score gate — multiplier
+            // for 80-84 kept for edge cases (live cache may boost a borderline score).
+            const _oppScore = opportunity.aiScore || opportunity.confidence || 50;
+            const scoreTierMultiplier = _oppScore >= 95 ? 1.8 :
+                                        _oppScore >= 90 ? 1.3 :
+                                        _oppScore >= 85 ? 0.9 :
+                                        _oppScore >= 80 ? 0.7 : 0.5;
+
+            // Signal-clarity multiplier: adjusts size based on bull/bear attribution ratio.
+            // A score of 90 with a 4:1 bull/bear ratio is a much cleaner setup than a 90 with
+            // a 1.1:1 ratio (barely net-positive). Same raw score, different bet quality.
+            //   ratio ≥ 2.0 → clear signal, full multiplier
+            //   ratio 1.5–2.0 → minor friction, unchanged (0% adj)
+            //   ratio 1.2–1.5 → mixed, reduce 10%
+            //   ratio < 1.2 → nearly balanced, reduce 20%
+            let signalClarityMultiplier = 1.0;
+            let _bullBearRatio = null;
+            if (Array.isArray(opportunity.scoringLog) && opportunity.scoringLog.length > 0) {
+                let grossBull = 0, grossBear = 0;
+                for (const line of opportunity.scoringLog) {
+                    const m = line.match(/([+-]\d+)/);
+                    if (!m) continue;
+                    const pts = parseInt(m[1]);
+                    if (pts > 0) grossBull += pts;
+                    else if (pts < 0) grossBear += Math.abs(pts);
+                }
+                if (grossBear > 0) {
+                    _bullBearRatio = grossBull / grossBear;
+                    signalClarityMultiplier = _bullBearRatio >= 2.0 ? 1.0 :
+                                             _bullBearRatio >= 1.5 ? 1.0 :
+                                             _bullBearRatio >= 1.2 ? 0.9 : 0.8;
+                }
+            }
+
+            const combinedMultiplier = effectiveSizeMultiplier * streakBreaker.multiplier * expectancySizeMultiplier * scoreTierMultiplier * signalClarityMultiplier;
             let positionFraction = kellyFraction * combinedMultiplier;
 
             // Calculate the dollar amount for the position.
@@ -2932,8 +3168,10 @@ async function executeAutonomousTrading(userId) {
                 const baseRisk         = riskConfig.minPositionSize || 0.02;
                 const confidenceFactor = Math.max(0.3, (opportunity.confidence || 50) / 100);
                 const regimeFactor     = effectiveSizeMultiplier; // regime.positionSizeMultiplier (0.25–1.0)
-                const sectorStopMult   = SECTOR_TRADE_PROFILES[opportunity.tradeProfile]?.stopMult
-                                      ?? riskConfig.atrStopMultiplier ?? 1.5;
+                // Tighten stop by 20% in bear/risk-off regimes — exit faster before deeper drawdown
+                const _bearStopFactor  = _isBearRegime ? 0.8 : 1.0;
+                const sectorStopMult   = (SECTOR_TRADE_PROFILES[opportunity.tradeProfile]?.stopMult
+                                      ?? riskConfig.atrStopMultiplier ?? 1.5) * _bearStopFactor;
 
                 const riskDollars  = accountTotalValue * baseRisk * confidenceFactor * regimeFactor;
                 const stopDistance = parseFloat(opportunity.atr) * sectorStopMult;
@@ -2970,7 +3208,10 @@ async function executeAutonomousTrading(userId) {
                 confidence: ((opportunity.confidence || 50) / 100).toFixed(2),
                 streakMultiplier: streakBreaker.multiplier,
                 regimeMultiplier: effectiveSizeMultiplier,
+                scoreTierMultiplier,
                 expectancyMultiplier: expectancySizeMultiplier,
+                signalClarityMultiplier,
+                bullBearRatio: _bullBearRatio !== null ? parseFloat(_bullBearRatio.toFixed(2)) : 'n/a',
                 tradeProfile: opportunity.tradeProfile || 'STANDARD',
                 atr: opportunity.atr,
                 finalFraction: (positionSize / accountTotalValue).toFixed(4),
@@ -2999,6 +3240,59 @@ async function executeAutonomousTrading(userId) {
             }
 
             let shares = Math.floor(positionSize / opportunity.price);
+
+            // Small-account floor: Kelly fraction on a $500 account rounds to 0 shares for stocks >$53.
+            // Allow 1 share if the stock price fits within the max order notional — we'd rather
+            // make a minimum-size trade than skip entirely and hold idle cash.
+            if (shares === 0 && opportunity.price > 0 && opportunity.price <= (riskConfig.maxOrderNotional || 150)) {
+                shares = 1;
+                logger.info('[MinShareFloor] Kelly rounds to 0 — bumped to 1 share (small account)', {
+                    userId, symbol: opportunity.symbol,
+                    price: opportunity.price, positionSize: positionSize.toFixed(2),
+                    maxOrderNotional: riskConfig.maxOrderNotional
+                });
+            }
+
+            // Fractional buy: stock price exceeds maxOrderNotional so even 1 whole share is too expensive.
+            // Use Alpaca's notional (dollar-amount) market order instead — buys a fractional quantity.
+            // Standalone stop-loss + take-profit are placed after fill; the trailing stop service
+            // raises the stop exactly as it does for whole-share positions.
+            if (shares === 0 && opportunity.price > (riskConfig.maxOrderNotional || 150) && positionSize >= 1) {
+                logger.info('[FractionalBuy] Price exceeds max notional — using notional buy', {
+                    userId, symbol: opportunity.symbol,
+                    price: opportunity.price, notional: positionSize.toFixed(2),
+                    maxOrderNotional: riskConfig.maxOrderNotional
+                });
+                try {
+                    const fracResult = await brokerService.buyFractional(userId, opportunity.symbol, positionSize, {
+                        executedBy:  'AI_BOT',
+                        aiScore:     opportunity.aiScore,
+                        sector:      opportunity.sector,
+                        stopPrice:   opportunity.stop,
+                        targetPrice: opportunity.target,
+                        signalPrice: opportunity.price,
+                        regime:      regime?.regime || null,
+                    });
+                    _incrementOrderCount(userId, opportunity.symbol);
+                    const fracShares = fracResult.filledQty || 0;
+                    if (fracShares > 0) {
+                        trades.push({
+                            action: 'BUY', symbol: opportunity.symbol,
+                            shares: fracShares, price: fracResult.filledAvgPrice,
+                            total: fracResult.filledAvgPrice * fracShares,
+                            aiScore: opportunity.aiScore, sector: opportunity.sector,
+                            broker: fracResult.broker, fractional: true
+                        });
+                        remainingCapital -= fracResult.filledAvgPrice * fracShares;
+                        const sec = opportunity.sector || 'Unknown';
+                        sectorAllocations[sec] = (sectorAllocations[sec] || 0) + fracResult.filledAvgPrice * fracShares;
+                        sectorCounts[sec]      = (sectorCounts[sec] || 0) + 1;
+                    }
+                } catch (err) {
+                    logger.warn('[FractionalBuy] Failed', { userId, symbol: opportunity.symbol, err: err.message });
+                }
+                continue; // skip the whole-share buyBracket path below
+            }
 
             // Pre-execution liquidity check: cap order at 0.5% of average daily dollar volume.
             // Prevents market-impact slippage on thinly traded names.
@@ -3171,6 +3465,10 @@ async function executeAutonomousTrading(userId) {
                                 rsiInterpretation: opportunity.rsiInterpretation,
                                 macdSignal: opportunity.macdSignal,
                                 scoringLog: opportunity.scoringLog,
+                                // Attribution metrics — stored explicitly so calibrator can slice
+                                // by ratio bucket without recomputing from scoringLog each time.
+                                bullBearRatio: _bullBearRatio !== null ? parseFloat(_bullBearRatio.toFixed(2)) : null,
+                                signalClarityMultiplier,
                                 signalPrice: opportunity.price,
                                 slippage: Number((filledPrice - opportunity.price).toFixed(4)),
                                 slippagePct: opportunity.price > 0
@@ -3400,6 +3698,31 @@ async function manageExistingPositions(userId) {
                     await alertService.alertLargeLoss(userId, holding.symbol, changePercent * 100, currentPrice, purchasePrice);
                 }
 
+                // Earnings proximity exit: if earnings are ≤2 days away, exit the position now.
+                // Earnings gaps are unpredictable; even a bullish setup can gap -20% overnight.
+                // This check overrides the swing-trade minimum hold (tooNew) — risk management wins.
+                if (!shouldSell) {
+                    try {
+                        const _earningsDte = await getDaysToEarnings(holding.symbol);
+                        if (_earningsDte !== null && _earningsDte <= 2) {
+                            shouldSell = true;
+                            reason = `Earnings protection exit — earnings in ${_earningsDte} day(s), closing to avoid gap risk`;
+                            logger.warn('[EarningsExit] Closing position before earnings', {
+                                userId, symbol: holding.symbol,
+                                daysToEarnings: _earningsDte,
+                                gainPct: (changePercent * 100).toFixed(2)
+                            });
+                            try {
+                                await alertService.sendMessage(userId,
+                                    `⚠️ *Earnings Exit* — ${holding.symbol}\n` +
+                                    `Earnings in ${_earningsDte} day(s) — closing to avoid gap risk\n` +
+                                    `_Current P&L: ${changePercent >= 0 ? '+' : ''}${(changePercent * 100).toFixed(2)}%_`
+                                );
+                            } catch (_) {}
+                        }
+                    } catch (_earningsErr) { /* non-blocking — if lookup fails, hold the position */ }
+                }
+
                 // Hard stop-loss (normally -7%, tightened to -5% in distress mode when ≥2 positions red)
                 if (changePercent <= effectiveStopLoss) {
                     shouldSell = true;
@@ -3447,29 +3770,26 @@ async function manageExistingPositions(userId) {
                     }
                 }
 
-                // ── Swing Trade Max Hold (20 trading days = 480h) ──────────────────────
-                // Force-exit any position held longer than 4 weeks while still in profit.
-                // Prevents legacy long-term holds from blocking capital for new swing setups.
-                // Fires even on entry day guard (swing max-hold overrides the 72h new-position lock).
-                else if (holdAgeHrs >= 480 && changePercent > 0) {
+                // ── Swing Trade Max Hold (7 trading days = 168h) ──────────────────────
+                // Tightened from 20d → 7d based on trade data: 5-day holds averaged +8-10%
+                // while 18-20 day holds averaged only +1-6%. Time-limiting frees capital
+                // for fresh high-conviction setups and improves Sharpe by cutting dead money.
+                else if (holdAgeHrs >= 168 && changePercent > 0) {
                     shouldSell = true;
                     const holdDays = Math.round(holdAgeHrs / 24);
-                    reason = `Swing max-hold: ${holdDays}d held (limit 20d) — closing to redeploy capital [gain: +${(changePercent * 100).toFixed(2)}%]`;
+                    reason = `Swing max-hold: ${holdDays}d held (limit 7d) — closing to redeploy capital [gain: +${(changePercent * 100).toFixed(2)}%]`;
                     logger.info('[SwingExit] Max-hold reached', { userId, symbol: holding.symbol, holdDays, gainPct: (changePercent * 100).toFixed(2) });
-                    // Deferred — fires only after the sell order succeeds
                     pendingAlert = () => alertService.sendMessage(userId, `⏰ *Swing Max-Hold Exit*\n${holding.symbol}: held ${holdDays} days | +${(changePercent * 100).toFixed(2)}% | Releasing capital for new signals`);
                 }
 
-                // ── Slow Mover Eject (10+ days, gain < 3%) ─────────────────────────────
-                // Capital parked in a position that hasn't moved in 10 days is dead money.
-                // Exit and redeploy into this week's high-conviction STRONG BUY candidates.
-                // Only fires after the 72h minimum hold (won't stop out a fresh entry).
-                else if (!tooNew && holdAgeHrs >= 240 && changePercent >= 0 && changePercent < 0.03) {
+                // ── Slow Mover Eject (5+ days, gain < 2%) ──────────────────────────────
+                // Tightened from 10d/<3% → 5d/<2%: USB held 18 days for +1% — dead money.
+                // Exit earlier and redeploy into this week's high-conviction candidates.
+                else if (!tooNew && holdAgeHrs >= 120 && changePercent >= 0 && changePercent < 0.02) {
                     shouldSell = true;
                     const holdDays = Math.round(holdAgeHrs / 24);
                     reason = `Slow mover: ${holdDays}d held with only +${(changePercent * 100).toFixed(2)}% — deploying capital to stronger signals`;
                     logger.info('[SwingExit] Slow mover ejected', { userId, symbol: holding.symbol, holdDays, gainPct: (changePercent * 100).toFixed(2) });
-                    // Deferred — fires only after the sell order succeeds
                     pendingAlert = () => alertService.sendMessage(userId, `🐌 *Slow Mover Exit*\n${holding.symbol}: ${holdDays}d stall at +${(changePercent * 100).toFixed(2)}% — capital redeployed`);
                 }
 
@@ -3581,10 +3901,22 @@ async function manageExistingPositions(userId) {
                         await alertService.alertTradeExecuted(userId, 'SELL', holding.symbol, sellQuantity, exitPrice, holding.aiScore || '', aiReasoning);
 
                         const sellSlippage = exitPrice - currentPrice; // positive = worse fill
+                        // Classify the exit into a clean category for hypothesis analytics
+                        const _exitCategory = reason.startsWith('Stop-loss')            ? 'stop_loss'
+                            : reason.startsWith('Trailing stop')                        ? 'trailing_stop'
+                            : reason.startsWith('Partial take-profit')                  ? 'partial_take_profit'
+                            : reason.startsWith('Early partial take-profit')            ? 'partial_take_profit'
+                            : reason.startsWith('Take-profit')                          ? 'take_profit'
+                            : reason.startsWith('Break-even')                           ? 'break_even'
+                            : reason.startsWith('Pre-earnings')                         ? 'pre_earnings_exit'
+                            : reason.startsWith('Swing max-hold')                       ? 'max_hold_time'
+                            : reason.startsWith('Slow mover')                           ? 'slow_mover'
+                            : 'other';
+
                         await tradeIntelligenceService.closeLatestOpenExecution(userId, {
                             botType: 'stock', symbol: holding.symbol, exitPrice, pnl: profitLoss, pnlPercent,
                             metadata: {
-                                reason, sellQuantity, purchasePrice,
+                                reason, exitReason: _exitCategory, sellQuantity, purchasePrice,
                                 exitRegime: exitThresholds.regime,
                                 signalPrice: currentPrice,
                                 slippage: Number(sellSlippage.toFixed(4)),

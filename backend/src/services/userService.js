@@ -4,7 +4,7 @@ const { v4: uuidv4 } = require('uuid');
 const findUserByUsername = async (username) => {
     try {
         const result = await query(
-            'SELECT id, username, password, email, full_name, phone, ai_trading_enabled, created_at FROM users WHERE username = $1',
+            'SELECT id, username, password, email, full_name, phone, ai_trading_enabled, created_at FROM users WHERE LOWER(username) = LOWER($1)',
             [username]
         );
         
@@ -92,10 +92,11 @@ const createUser = async (username, password, additionalData = {}) => {
     try {
         const userId = uuidv4();
         const fullName = `${additionalData.firstName || ''} ${additionalData.lastName || ''}`.trim();
-        
+        const normalizedUsername = username.toLowerCase();
+
         const result = await query(
             'INSERT INTO users (id, username, password, email, full_name, phone, ai_trading_enabled, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW()) RETURNING id, username, email, full_name, phone, created_at',
-            [userId, username, password, additionalData.email || '', fullName, additionalData.phone || '', false]
+            [userId, normalizedUsername, password, additionalData.email || '', fullName, additionalData.phone || '', false]
         );
         
         const user = result.rows[0];

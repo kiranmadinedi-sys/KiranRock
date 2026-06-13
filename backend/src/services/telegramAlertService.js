@@ -24,14 +24,28 @@ async function sendTelegramMessage(chatId, message, parseMode = 'Markdown') {
             return false;
         }
 
-        const response = await axios.post(`${TELEGRAM_API_URL}/sendMessage`, {
-            chat_id: chatId,
-            text: message,
-            parse_mode: parseMode
-        });
-
-        logger.info('Telegram alert sent', { chatId, success: response.data.ok });
-        return response.data.ok;
+        try {
+            const response = await axios.post(`${TELEGRAM_API_URL}/sendMessage`, {
+                chat_id: chatId,
+                text: message,
+                parse_mode: parseMode
+            });
+            logger.info('Telegram alert sent', { chatId, success: response.data.ok });
+            return response.data.ok;
+        } catch (err) {
+            // 400 = Telegram rejected the Markdown formatting — retry as plain text so
+            // the message is never silently lost due to a formatting edge case.
+            if (err.response?.status === 400 && parseMode) {
+                logger.warn('Telegram Markdown parse failed, retrying as plain text', { chatId, status: 400 });
+                const plain = await axios.post(`${TELEGRAM_API_URL}/sendMessage`, {
+                    chat_id: chatId,
+                    text: message.replace(/[*_`\[\]]/g, '')   // strip Markdown symbols
+                });
+                logger.info('Telegram alert sent (plain fallback)', { chatId, success: plain.data.ok });
+                return plain.data.ok;
+            }
+            throw err;
+        }
     } catch (error) {
         logger.error('Failed to send Telegram alert', { error: error.message, chatId });
         return false;
@@ -52,6 +66,24 @@ async function getUserTelegramChatId(userId) {
     } catch (error) {
         logger.error('Failed to get user Telegram chat ID', { userId, error: error.message });
         return null;
+    }
+}
+
+// 5-minute cache — avoids a DB hit on every alert for the same user
+const _userInfoCache = new Map();
+async function getUserInfo(userId) {
+    const cached = _userInfoCache.get(userId);
+    if (cached && Date.now() < cached.expiresAt) return cached.info;
+    const { query } = require('../config/database');
+    try {
+        const r = await query('SELECT username, email FROM users WHERE id = $1', [userId]);
+        const username = r.rows[0]?.username || r.rows[0]?.email || 'unknown';
+        const shortId  = String(userId).slice(0, 8);
+        const info = { display: `${username} \`(${shortId}...)\`` };
+        _userInfoCache.set(userId, { info, expiresAt: Date.now() + 300_000 });
+        return info;
+    } catch (_) {
+        return { display: `\`${String(userId).slice(0, 8)}...\`` };
     }
 }
 
@@ -108,9 +140,10 @@ async function alertLargeLoss(userId, symbol, percentLoss, currentPrice, purchas
     const chatId = await getUserTelegramChatId(userId);
     if (!chatId) return;
 
-    const holdingsLine = await getHoldingsLine(userId);
+    const [holdingsLine, { display }] = await Promise.all([getHoldingsLine(userId), getUserInfo(userId)]);
     const message = `
 🚨 *LARGE LOSS ALERT*
+👤 User: ${display}
 
 📉 *${symbol}* is down *${Math.abs(percentLoss).toFixed(2)}%*
 
@@ -134,9 +167,10 @@ async function alertStopLossTriggered(userId, symbol, shares, sellPrice, loss) {
     const chatId = await getUserTelegramChatId(userId);
     if (!chatId) return;
 
-    const holdingsLine = await getHoldingsLine(userId);
+    const [holdingsLine, { display }] = await Promise.all([getHoldingsLine(userId), getUserInfo(userId)]);
     const message = `
 🛑 *STOP LOSS TRIGGERED*
+👤 User: ${display}
 
 Symbol: *${symbol}*
 Action: SOLD ${shares} shares
@@ -158,9 +192,10 @@ async function alertTakeProfitExecuted(userId, symbol, shares, sellPrice, profit
     const chatId = await getUserTelegramChatId(userId);
     if (!chatId) return;
 
-    const holdingsLine = await getHoldingsLine(userId);
+    const [holdingsLine, { display }] = await Promise.all([getHoldingsLine(userId), getUserInfo(userId)]);
     const message = `
 🎯 *TAKE PROFIT EXECUTED*
+👤 User: ${display}
 
 Symbol: *${symbol}*
 Action: SOLD ${shares} shares
@@ -183,9 +218,11 @@ async function alertDailyLossWarning(userId, dailyLoss, limit) {
     if (!chatId) return;
 
     const percentOfLimit = (Math.abs(dailyLoss) / Math.abs(limit)) * 100;
+    const { display } = await getUserInfo(userId);
 
     const message = `
 ⚠️ *DAILY LOSS WARNING*
+👤 User: ${display}
 
 Today's Loss: $${Math.abs(dailyLoss).toFixed(2)}
 Limit: $${Math.abs(limit).toFixed(2)}
@@ -204,8 +241,10 @@ async function alertDailyLossLimitReached(userId, dailyLoss) {
     const chatId = await getUserTelegramChatId(userId);
     if (!chatId) return;
 
+    const { display } = await getUserInfo(userId);
     const message = `
 🔴 *DAILY LOSS LIMIT REACHED*
+👤 User: ${display}
 
 Today's Loss: $${Math.abs(dailyLoss).toFixed(2)}
 
@@ -228,8 +267,10 @@ async function alertHighVIX(userId, vixLevel) {
     const chatId = await getUserTelegramChatId(userId);
     if (!chatId) return;
 
+    const { display } = await getUserInfo(userId);
     const message = `
 ⚠️ *HIGH VOLATILITY WARNING*
+👤 User: ${display}
 
 VIX Level: ${vixLevel.toFixed(2)}
 
@@ -250,9 +291,10 @@ async function alertTradingStarted(userId, balance, holdings) {
     const chatId = await getUserTelegramChatId(userId);
     if (!chatId) return;
 
-    const holdingsLine = await getHoldingsLine(userId);
+    const [holdingsLine, { display }] = await Promise.all([getHoldingsLine(userId), getUserInfo(userId)]);
     const message = `
 🤖 *AI TRADING STARTED*
+👤 User: ${display}
 
 💰 Account Balance: $${balance.toFixed(2)}
 📊 Open Positions: ${holdings}
@@ -274,10 +316,11 @@ async function alertTradeExecuted(userId, action, symbol, shares, price, aiScore
 
     const emoji = action === 'BUY' ? '✅' : '📤';
     const total = shares * price;
-    const holdingsLine = await getHoldingsLine(userId);
+    const [holdingsLine, { display }] = await Promise.all([getHoldingsLine(userId), getUserInfo(userId)]);
 
     const message = `
 ${emoji} *TRADE EXECUTED*
+👤 User: ${display}
 
 Action: *${action} ${shares} shares*
 Symbol: *${symbol}*
@@ -309,9 +352,10 @@ async function alertNoOpportunities(userId, scanned, vixLevel) {
         return;
     }
 
-    const holdingsLine = await getHoldingsLine(userId);
+    const [holdingsLine, { display }] = await Promise.all([getHoldingsLine(userId), getUserInfo(userId)]);
     const message = `
 ℹ️ *AI TRADING UPDATE*
+👤 User: ${display}
 
 📊 Analyzed: ${scanned} stocks
 🎯 Opportunities: 0
@@ -336,10 +380,11 @@ async function alertDailySummary(userId, stats) {
     if (!chatId) return;
 
     const { trades, profitTrades, lossTrades, totalProfit, winRate, bestTrade, worstTrade } = stats;
-    const holdingsLine = await getHoldingsLine(userId);
+    const [holdingsLine, { display }] = await Promise.all([getHoldingsLine(userId), getUserInfo(userId)]);
 
     const message = `
 📊 *DAILY TRADING SUMMARY*
+👤 User: ${display}
 
 🔢 Trades: ${trades}
 ✅ Wins: ${profitTrades}
@@ -365,7 +410,7 @@ async function alertOptionsTradeExecuted(userId, tradeDetails) {
     if (!chatId) return;
 
     const { action, symbol, contracts, strike, expiration, optionType, price, totalCost, strategy, greeks } = tradeDetails;
-    
+    const { display } = await getUserInfo(userId);
     const emoji = action === 'BUY' ? '📈' : '📉';
     const strategyEmoji = {
         deltaNeutralScalping: '⚡',
@@ -376,6 +421,7 @@ async function alertOptionsTradeExecuted(userId, tradeDetails) {
 
     const message = `
 ${emoji} *OPTIONS TRADE EXECUTED* ${strategyEmoji}
+👤 User: ${display}
 
 Action: *${action}*
 Symbol: *${symbol}*
@@ -407,9 +453,11 @@ async function alertCreditSpreadExecuted(userId, spreadDetails) {
     if (!chatId) return;
 
     const { type, symbol, contracts, shortLeg, longLeg, credit, maxRisk, returnOnRisk, expiration } = spreadDetails;
+    const { display } = await getUserInfo(userId);
 
     const message = `
 💰 *CREDIT SPREAD EXECUTED*
+👤 User: ${display}
 
 Type: ${type}
 Symbol: *${symbol}*
@@ -439,7 +487,7 @@ async function alertOptionsPositionClosed(userId, closeDetails) {
     if (!chatId) return;
 
     const { symbol, strike, expiration, contracts, entryPrice, exitPrice, pnl, pnlPercent, reason } = closeDetails;
-    
+    const { display } = await getUserInfo(userId);
     const emoji = pnl > 0 ? '✅' : '❌';
     const reasonEmoji = {
         TAKE_PROFIT: '🎯',
@@ -450,6 +498,7 @@ async function alertOptionsPositionClosed(userId, closeDetails) {
 
     const message = `
 ${emoji} *OPTIONS POSITION CLOSED* ${reasonEmoji}
+👤 User: ${display}
 
 Symbol: *${symbol}*
 Strike: $${strike}
@@ -475,9 +524,11 @@ async function alertOptionsBotStarted(userId, config) {
     if (!chatId) return;
 
     const { balance, strategies, maxPositions, vix } = config;
+    const { display } = await getUserInfo(userId);
 
     const message = `
 🤖 *OPTIONS BOT STARTED*
+👤 User: ${display}
 
 💰 Account: $${balance.toFixed(2)}
 📊 VIX: ${vix.toFixed(2)}
@@ -504,8 +555,10 @@ async function alertNightlyScanFailure(userId, { analyzed, universe, failed, rea
     if (!chatId) return;
 
     const coveragePct = universe > 0 ? ((analyzed / universe) * 100).toFixed(1) : '0';
+    const { display } = await getUserInfo(userId);
     const message = `
 🚨 *NIGHTLY SCAN WARNING*
+👤 User: ${display}
 
 📊 Universe expected: ${universe}
 ✅ Analyzed: ${analyzed} (${coveragePct}% coverage)
@@ -532,9 +585,10 @@ async function alertEdgeGateBlocked(userId, opportunityCount) {
     if (global._edgeGateAlerts[todayKey]) return;
     global._edgeGateAlerts[todayKey] = true;
 
-    const holdingsLine = await getHoldingsLine(userId);
+    const [holdingsLine, { display }] = await Promise.all([getHoldingsLine(userId), getUserInfo(userId)]);
     const message = `
 ℹ️ *NO NEW TRADES TODAY*
+👤 User: ${display}
 
 🔍 Scanned: ${opportunityCount} stocks
 🎯 STRONG BUY signals: 0
@@ -554,9 +608,10 @@ async function alertDistressModeRecovery(userId) {
     const chatId = await getUserTelegramChatId(userId);
     if (!chatId) return;
 
-    const holdingsLine = await getHoldingsLine(userId);
+    const [holdingsLine, { display }] = await Promise.all([getHoldingsLine(userId), getUserInfo(userId)]);
     const message = `
 ✅ *DISTRESS MODE LIFTED*
+👤 User: ${display}
 
 Portfolio stress has eased — fewer than 2 positions remain down >3%.
 Normal stop-loss (-7%) has been restored.
@@ -581,6 +636,7 @@ async function alertOptionsSignalEntry(userId, details) {
         delta, gamma, theta, ivRankLabel, ivRank, strategy
     } = details;
 
+    const { display } = await getUserInfo(userId);
     const isBullish = (optionType || '').toUpperCase() === 'CALL';
     const directionEmoji = isBullish ? '🟢' : '🔴';
     const directionLabel = isBullish ? 'BULLISH CALL ENTRY' : 'BEARISH PUT ENTRY';
@@ -602,6 +658,7 @@ async function alertOptionsSignalEntry(userId, details) {
 
     const message = `
 ${directionEmoji} *${directionLabel} — ${symbol}*
+👤 User: ${display}
 
 📊 *${symbol}* @ $${Number(stockPrice).toFixed(2)} (${momentumSign}${momentum.toFixed(1)}% today)
 🎯 Signal Score: *${Number(score).toFixed(0)}/100*
@@ -636,8 +693,10 @@ async function alertHighIVRank(userId, symbol, ivRank, strategy) {
     const chatId = await getUserTelegramChatId(userId);
     if (!chatId) return;
 
+    const { display } = await getUserInfo(userId);
     const message = `
 🔥 *HIGH IV OPPORTUNITY*
+👤 User: ${display}
 
 Symbol: *${symbol}*
 IV Rank: ${ivRank.toFixed(1)}%

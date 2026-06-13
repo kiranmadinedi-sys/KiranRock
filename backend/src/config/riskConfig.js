@@ -23,7 +23,9 @@ const riskConfig = {
 
   // The minimum percentage of portfolio capital to allocate to a position.
   // This prevents the bot from opening impractically small positions.
-  minPositionSize: 0.02, // 2% of portfolio
+  // Raised from 2% → 5%: ATR sizing was floor-capping positions to 1 share
+  // because baseRisk=2% × confidence × regime was producing ~$244 notional.
+  minPositionSize: 0.05, // 5% of portfolio
 
   // The minimum required risk/reward ratio for a trade to be considered.
   // A value of 2.0 means the potential profit must be at least twice the potential loss.

@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Logo from '../components/Logo';
 import ThemeToggle from '../components/ThemeToggle';
@@ -34,7 +33,6 @@ function formatCurrency(value?: number) {
 }
 
 export default function ProfilePage() {
-    const router = useRouter();
     const [token, setToken] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
@@ -50,7 +48,16 @@ export default function ProfilePage() {
     const [passwordError, setPasswordError] = useState('');
     const [aiTradingEnabled, setAiTradingEnabled] = useState(false);
     const [aiTradingLoading, setAiTradingLoading] = useState(false);
-    const [activeSection, setActiveSection] = useState<'profile' | 'password' | 'account' | 'ai'>('profile');
+    const [activeSection, setActiveSection] = useState<'profile' | 'password' | 'account' | 'ai' | 'broker'>('profile');
+
+    // Broker settings state
+    interface BrokerStatus { configured: boolean; source: 'user' | 'env'; keyId: string | null; isPaper: boolean; }
+    const [brokerStatus, setBrokerStatus] = useState<BrokerStatus | null>(null);
+    const [brokerKeyId, setBrokerKeyId] = useState('');
+    const [brokerSecretKey, setBrokerSecretKey] = useState('');
+    const [brokerIsPaper, setBrokerIsPaper] = useState(true);
+    const [brokerSaving, setBrokerSaving] = useState(false);
+    const [brokerMsg, setBrokerMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
     useEffect(() => {
         const storedToken = localStorage.getItem('token');
@@ -68,6 +75,7 @@ export default function ProfilePage() {
         }
 
         fetchProfile();
+        fetchBrokerStatus(token);
     }, [token]);
 
     const fetchProfile = async () => {
@@ -205,6 +213,70 @@ export default function ProfilePage() {
         }
     };
 
+    const fetchBrokerStatus = async (tok: string) => {
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/profile/broker`, {
+                headers: { Authorization: `Bearer ${tok}` }
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setBrokerStatus(data);
+                setBrokerIsPaper(data.isPaper !== false);
+                if (data.configured && data.keyId) setBrokerKeyId(data.keyId); // pre-fill only user's own key
+            }
+        } catch (_) {}
+    };
+
+    const handleSaveBroker = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!brokerKeyId.trim()) { setBrokerMsg({ ok: false, text: 'Alpaca Key ID is required.' }); return; }
+        setBrokerSaving(true);
+        setBrokerMsg(null);
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/profile/broker`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                body: JSON.stringify({ keyId: brokerKeyId.trim(), secretKey: brokerSecretKey || undefined, isPaper: brokerIsPaper })
+            });
+            const data = await res.json();
+            if (res.ok) {
+                setBrokerMsg({ ok: data.ok, text: data.message });
+                await fetchBrokerStatus(token!);
+                setBrokerSecretKey(''); // clear secret from form after save
+            } else {
+                setBrokerMsg({ ok: false, text: data.error || 'Save failed.' });
+            }
+        } catch (_) {
+            setBrokerMsg({ ok: false, text: 'Network error.' });
+        } finally {
+            setBrokerSaving(false);
+        }
+    };
+
+    const handleClearBroker = async () => {
+        if (!confirm('Remove your personal Alpaca credentials and revert to the shared paper account?')) return;
+        setBrokerSaving(true);
+        setBrokerMsg(null);
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/profile/broker`, {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            const data = await res.json();
+            if (res.ok) {
+                setBrokerMsg({ ok: true, text: data.message });
+                setBrokerKeyId('');
+                await fetchBrokerStatus(token!);
+            } else {
+                setBrokerMsg({ ok: false, text: data.error || 'Clear failed.' });
+            }
+        } catch (_) {
+            setBrokerMsg({ ok: false, text: 'Network error.' });
+        } finally {
+            setBrokerSaving(false);
+        }
+    };
+
     const handleLogout = () => {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
@@ -256,6 +328,7 @@ export default function ProfilePage() {
                         <button onClick={() => setActiveSection('password')} className={`w-full text-left px-4 py-3 rounded-xl font-semibold transition-colors ${activeSection === 'password' ? 'bg-[var(--color-accent)] text-white' : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)]'}`}>Password</button>
                         <button onClick={() => setActiveSection('account')} className={`w-full text-left px-4 py-3 rounded-xl font-semibold transition-colors ${activeSection === 'account' ? 'bg-[var(--color-accent)] text-white' : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)]'}`}>Trading Account</button>
                         <button onClick={() => setActiveSection('ai')} className={`w-full text-left px-4 py-3 rounded-xl font-semibold transition-colors ${activeSection === 'ai' ? 'bg-[var(--color-accent)] text-white' : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)]'}`}>AI Automation</button>
+                        <button onClick={() => setActiveSection('broker')} className={`w-full text-left px-4 py-3 rounded-xl font-semibold transition-colors ${activeSection === 'broker' ? 'bg-[var(--color-accent)] text-white' : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)]'}`}>Broker Settings</button>
                     </div>
                 </aside>
 
@@ -444,6 +517,120 @@ export default function ProfilePage() {
                             <Link href="/ai-trading" className="inline-block bg-[var(--color-accent)] text-white px-6 py-3 rounded-lg font-semibold hover:opacity-90 transition-opacity">
                                 Open AI Trading Dashboard →
                             </Link>
+                        </div>
+                    )}
+                    {activeSection === 'broker' && (
+                        <div className="bg-[var(--color-card)] rounded-2xl border border-[var(--color-border)] p-6">
+                            <h1 className="text-2xl font-bold text-[var(--color-text-primary)] mb-2">Broker Settings</h1>
+                            <p className="text-sm text-[var(--color-text-secondary)] mb-6">
+                                Store your personal Alpaca credentials here. In paper-trading mode all users share a single practice account — your keys will be used when you are ready to switch to live trading.
+                            </p>
+
+                            {/* Current status banner */}
+                            <div className={`rounded-xl px-5 py-4 border mb-6 ${brokerStatus?.configured ? 'bg-green-500/10 border-green-500' : 'bg-blue-500/10 border-blue-500'}`}>
+                                <div className="flex items-center gap-3">
+                                    <span className="text-xl">{brokerStatus?.configured ? '🔑' : '🔗'}</span>
+                                    <div>
+                                        <div className={`font-semibold ${brokerStatus?.configured ? 'text-green-500' : 'text-blue-500'}`}>
+                                            {brokerStatus?.configured
+                                                ? `Using your personal Alpaca account (${brokerStatus.isPaper ? 'Paper' : 'Live'})`
+                                                : 'Using shared paper-trading account (all users)'}
+                                        </div>
+                                        {brokerStatus?.configured && brokerStatus.keyId && (
+                                            <div className="text-xs text-[var(--color-text-secondary)] mt-0.5">Key: {brokerStatus.keyId}</div>
+                                        )}
+                                        {!brokerStatus?.configured && (
+                                            <div className="text-xs text-[var(--color-text-secondary)] mt-0.5">
+                                                Add your Alpaca API keys below to link your personal account for live trading.
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Info callout */}
+                            <div className="bg-yellow-500/10 border border-yellow-500 rounded-xl px-5 py-4 mb-6 text-sm text-[var(--color-text-secondary)]">
+                                <span className="font-semibold text-yellow-500">How to get your Alpaca API keys:</span>
+                                {' '}Log in to alpaca.markets → Your account → API Keys → Generate New Key. Copy both the <em>Key ID</em> and the <em>Secret Key</em> — the secret is shown only once.
+                            </div>
+
+                            {/* Credential form */}
+                            <form onSubmit={handleSaveBroker} className="space-y-4 max-w-xl">
+                                <div>
+                                    <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-2">Alpaca Key ID</label>
+                                    <input
+                                        value={brokerKeyId}
+                                        onChange={e => setBrokerKeyId(e.target.value)}
+                                        placeholder="e.g. PKXXXXXXXXXXXXXXXX"
+                                        autoComplete="off"
+                                        className="w-full px-4 py-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] font-mono text-sm"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-2">
+                                        Secret Key <span className="text-[var(--color-text-secondary)] font-normal">(leave blank to keep existing)</span>
+                                    </label>
+                                    <input
+                                        type="password"
+                                        value={brokerSecretKey}
+                                        onChange={e => setBrokerSecretKey(e.target.value)}
+                                        placeholder="Paste your secret key here"
+                                        autoComplete="new-password"
+                                        className="w-full px-4 py-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-primary)] font-mono text-sm"
+                                    />
+                                    <p className="text-xs text-[var(--color-text-secondary)] mt-1">Stored encrypted. Never displayed again after saving.</p>
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-3">Account Type</label>
+                                    <div className="flex gap-3">
+                                        <button
+                                            type="button"
+                                            onClick={() => setBrokerIsPaper(true)}
+                                            className={`px-5 py-2.5 rounded-xl font-semibold text-sm transition-colors border ${brokerIsPaper ? 'bg-blue-500 text-white border-blue-500' : 'border-[var(--color-border)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-tertiary)]'}`}
+                                        >
+                                            Paper Trading
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setBrokerIsPaper(false)}
+                                            className={`px-5 py-2.5 rounded-xl font-semibold text-sm transition-colors border ${!brokerIsPaper ? 'bg-orange-500 text-white border-orange-500' : 'border-[var(--color-border)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-tertiary)]'}`}
+                                        >
+                                            Live Trading
+                                        </button>
+                                    </div>
+                                    {!brokerIsPaper && (
+                                        <div className="mt-3 rounded-xl bg-red-500/10 border border-red-500 px-4 py-3 text-sm text-red-500 font-semibold">
+                                            Live trading uses real money. Make sure you have completed paper-trading validation before switching.
+                                        </div>
+                                    )}
+                                </div>
+
+                                {brokerMsg && (
+                                    <div className={`rounded-xl px-4 py-3 text-sm border ${brokerMsg.ok ? 'bg-green-500/10 border-green-500 text-green-600' : 'bg-red-500/10 border-red-500 text-red-600'}`}>
+                                        {brokerMsg.text}
+                                    </div>
+                                )}
+
+                                <div className="flex gap-3 pt-1">
+                                    <button
+                                        type="submit"
+                                        disabled={brokerSaving}
+                                        className="px-6 py-3 rounded-xl bg-[var(--color-accent)] text-white font-semibold hover:opacity-90 transition-opacity disabled:opacity-50"
+                                    >
+                                        {brokerSaving ? 'Saving...' : 'Save & Test Connection'}
+                                    </button>
+                                    {brokerStatus?.configured && (
+                                        <button
+                                            type="button"
+                                            onClick={handleClearBroker}
+                                            disabled={brokerSaving}
+                                            className="px-6 py-3 rounded-xl border border-[var(--color-border)] text-[var(--color-text-secondary)] font-semibold hover:bg-[var(--color-bg-tertiary)] transition-colors disabled:opacity-50"
+                                        >
+                                            Revert to Shared Account
+                                        </button>
+                                    )}
+                                </div>
+                            </form>
                         </div>
                     )}
                 </div>

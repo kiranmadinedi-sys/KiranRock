@@ -234,6 +234,15 @@ function Get-ProjectProcesses {
             return $false
         }
 
+        # Skip VS Code / Claude Code processes — they reference the project path but
+        # are not KiranRock services. Must not be killed.
+        $procName = [string]$_.Name
+        if ($procName.ToLowerInvariant() -eq 'code.exe') { return $false }
+        $normalizedCL = $commandLine.ToLowerInvariant()
+        if ($normalizedCL -match 'extensionhost|\.vscode\\|shellintegration|claude-code|claude\.exe') {
+            return $false
+        }
+
         $normalizedCommandLine = $commandLine.ToLowerInvariant()
         return $normalizedCommandLine.Contains($normalizedProjectRoot) -or
             $normalizedCommandLine.Contains($normalizedBackendPath) -or
@@ -468,6 +477,25 @@ if (-not $projectProcessesStopped -and $remainingProjectProcesses.Count -gt 0) {
 Write-ShutdownSummary -PassSummaries $shutdownPassSummaries
 Write-Host ""
 
+# ----------------------------------------------------------------
+#  Cloudflare Tunnel (getmytbot.com -> localhost:3000)
+# ----------------------------------------------------------------
+Write-Host "[CF] Ensuring Cloudflare tunnel is running..." -ForegroundColor Cyan
+$cfExe    = "C:\Program Files (x86)\cloudflared\cloudflared.exe"
+$cfConfig = "C:\Users\kiran\.cloudflared\config.yml"
+if (Test-Path $cfExe) {
+    $cfRunning = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
+    if ($cfRunning) {
+        Write-Host "      Cloudflare tunnel already running (PID: $($cfRunning.Id))" -ForegroundColor DarkGray
+    } else {
+        $cfProcess = Start-Process -FilePath $cfExe -ArgumentList "tunnel", "--config", $cfConfig, "run" -WindowStyle Hidden -PassThru
+        Write-Host "      Cloudflare tunnel started (PID: $($cfProcess.Id))" -ForegroundColor Green
+    }
+} else {
+    Write-Host "      cloudflared.exe not found at $cfExe - skipping tunnel" -ForegroundColor Yellow
+}
+Write-Host ""
+
 # Secrets injected into backend environment
 $telegramBotToken = Resolve-SecretValue -Name "TELEGRAM_BOT_TOKEN"
 $telegramChatId   = Resolve-SecretValue -Name "TELEGRAM_CHAT_ID"
@@ -700,7 +728,7 @@ if ($frontendReady) {
     Write-Host "      Frontend is ready!" -ForegroundColor Green
 } elseif ($frontendFailure) {
     $frontendFailureMessage = if ($frontendFailure.message) { $frontendFailure.message } else { 'Frontend child process reported a build failure.' }
-    $frontendFailureExitCode = if ($frontendFailure.exitCode -ne $null) { [int]$frontendFailure.exitCode } else { 1 }
+    $frontendFailureExitCode = if ($null -ne $frontendFailure.exitCode) { [int]$frontendFailure.exitCode } else { 1 }
     Write-Host "      Frontend failed before startup: $frontendFailureMessage" -ForegroundColor Red
     Write-Error "Frontend startup failed in child process. See frontend terminal for build details."
     exit $frontendFailureExitCode
@@ -723,11 +751,13 @@ Write-Host "   ALL SERVICES STARTED" -ForegroundColor Green
 Write-Host "===============================================" -ForegroundColor Green
 Write-Host "   Local:    http://localhost:3000" -ForegroundColor White
 Write-Host "   Network:  http://99.47.183.33:3000" -ForegroundColor White
+Write-Host "   Domain:   https://getmytbot.com" -ForegroundColor Green
 Write-Host "   Backend:  http://localhost:3001" -ForegroundColor White
 Write-Host "   Worker:   background schedulers running in separate terminal" -ForegroundColor White
 Write-Host "   Signals:  one startup real-delivery pass in separate terminal" -ForegroundColor White
 Write-Host "   Health:   http://localhost:3001/health" -ForegroundColor White
-Write-Host "   PIDs:     backend=$($backendProcess.Id) | worker=$($workerProcess.Id) | delivery=$($signalDeliveryProcess.Id) | frontend=$($frontendProcess.Id)" -ForegroundColor White
+$cfPid = (Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue | Select-Object -First 1).Id
+Write-Host "   PIDs:     backend=$($backendProcess.Id) | worker=$($workerProcess.Id) | delivery=$($signalDeliveryProcess.Id) | frontend=$($frontendProcess.Id) | tunnel=$cfPid" -ForegroundColor White
 Write-Host "-----------------------------------------------" -ForegroundColor Green
 Write-Host "   Telegram: @KiranTradePro_bot" -ForegroundColor White
 Write-Host "   Reports:  Mon-Fri 7:00 AM (predictions) + 4:15 PM (AI bot summary) | Sun 8 AM (weekly buy list) + 9 AM (weekly recap)" -ForegroundColor White

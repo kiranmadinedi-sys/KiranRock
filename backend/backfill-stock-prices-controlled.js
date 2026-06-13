@@ -25,7 +25,7 @@ async function upsertCandle(symbol, candle) {
     const high   = candle.high;
     const low    = candle.low;
     const close  = candle.close;
-    const volume = candle.volume;
+    const volume = Math.round(candle.volume); // bigint column — Polygon may return fractional volumes
 
     // stock_prices — legacy table
     await query(`

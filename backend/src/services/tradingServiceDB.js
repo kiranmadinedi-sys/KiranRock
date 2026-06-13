@@ -254,12 +254,12 @@ const executeSellOrder = async (userId, symbol, quantity, executedBy = 'MANUAL',
                 ]);
             }
             
-            // Record trade
+            // Record trade — include realized P/L computed above
             const tradeResult = await client.query(`
                 INSERT INTO trades (
                     user_id, symbol, action, quantity, price, total,
-                    commission, executed_by, notes
-                ) VALUES ($1, $2, 'SELL', $3, $4, $5, $6, $7, $8)
+                    commission, executed_by, notes, pnl, pnl_percent
+                ) VALUES ($1, $2, 'SELL', $3, $4, $5, $6, $7, $8, $9, $10)
                 RETURNING *
             `, [
                 userId,
@@ -269,7 +269,9 @@ const executeSellOrder = async (userId, symbol, quantity, executedBy = 'MANUAL',
                 totalProceeds,
                 commission,
                 executedBy,
-                notes
+                notes,
+                parseFloat(profitLoss.toFixed(4)),
+                parseFloat(profitLossPercent.toFixed(4))
             ]);
 
             // Consume buy lots (FIFO) for this sell

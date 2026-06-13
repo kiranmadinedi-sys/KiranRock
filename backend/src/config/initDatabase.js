@@ -34,6 +34,11 @@ async function initializeDatabase() {
             ADD COLUMN IF NOT EXISTS ai_trading_settings JSONB DEFAULT '{}'::jsonb
         `);
 
+        // Per-user Alpaca broker credentials (optional — falls back to .env when not set)
+        await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS alpaca_key_id TEXT`);
+        await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS alpaca_secret_key TEXT`);
+        await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS alpaca_paper BOOLEAN DEFAULT true`);
+
         // 2. Create Trading Accounts table
         await query(`
             CREATE TABLE IF NOT EXISTS trading_accounts (
@@ -710,6 +715,24 @@ async function initializeDatabase() {
         `);
         console.log('✓ Created daily_universe_analysis table');
 
+        // Live PANTHEON score cache — written by the bot every 5-min cycle during market hours.
+        // Signals page prefers these over nightly scores when fresher than 10 minutes.
+        await query(`
+            CREATE TABLE IF NOT EXISTS live_score_cache (
+                symbol          TEXT    NOT NULL,
+                scan_date       DATE    NOT NULL,
+                ai_score        NUMERIC,
+                recommendation  TEXT,
+                live_scored_at  TIMESTAMPTZ DEFAULT NOW(),
+                PRIMARY KEY (symbol, scan_date)
+            )
+        `);
+        await query(`
+            CREATE INDEX IF NOT EXISTS idx_lsc_date_score
+            ON live_score_cache(scan_date, ai_score DESC)
+        `);
+        console.log('✓ Created live_score_cache table');
+
         // Fundamentals cache — DB-backed, 7-day TTL, survives restarts
         await query(`
             CREATE TABLE IF NOT EXISTS fundamentals_cache (
@@ -769,7 +792,30 @@ async function initializeDatabase() {
             CREATE INDEX IF NOT EXISTS idx_recon_log_user_date
             ON position_reconciliation_log(user_id, reconciled_at DESC)
         `);
+        // Add acknowledged column for SENTINEL reset without data deletion
+        await query(`
+            ALTER TABLE position_reconciliation_log
+            ADD COLUMN IF NOT EXISTS acknowledged      BOOLEAN     DEFAULT FALSE,
+            ADD COLUMN IF NOT EXISTS acknowledged_at   TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS acknowledged_reason TEXT
+        `);
         console.log('✓ Created position_reconciliation_log table');
+
+        // SENTINEL acknowledgements for order_audit_log (append-only — can't add columns)
+        await query(`
+            CREATE TABLE IF NOT EXISTS sentinel_order_acknowledgements (
+                id                SERIAL PRIMARY KEY,
+                idempotency_key   TEXT        NOT NULL UNIQUE,
+                acknowledged_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                acknowledged_by   TEXT,
+                reason            TEXT
+            )
+        `);
+        await query(`
+            CREATE INDEX IF NOT EXISTS idx_sentinel_ack_key
+            ON sentinel_order_acknowledgements(idempotency_key)
+        `);
+        console.log('✓ Created sentinel_order_acknowledgements table');
 
         console.log('\n✓ Database initialization completed successfully!\n');
         return true;

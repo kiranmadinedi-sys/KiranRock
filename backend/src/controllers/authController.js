@@ -38,7 +38,7 @@ const login = async (req, res) => {
             await userDb.updateLastLogin(user.id);
             
             // Sign a token with user id
-            const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+            const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
             console.log('Login successful for user:', username);
             
             // Return token and user details
@@ -59,7 +59,7 @@ const login = async (req, res) => {
         }
     } catch (error) {
         console.error('Login error:', error);
-        res.status(500).json({ error: 'Login failed' });
+        res.status(500).json({ error: 'Login failed', detail: error.message });
     }
 };
 
@@ -157,7 +157,7 @@ const verifySignup = async (req, res) => {
         pendingSignups.delete(email);
 
         // Generate token
-        const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+        const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
         console.log(`[Signup] User created successfully: ${signupData.username}`);
         res.json({ 

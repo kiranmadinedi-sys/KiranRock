@@ -19,25 +19,27 @@ const alertService           = require('./telegramAlertService');
 const precomputedSvc         = require('./precomputedUniverseService');
 const { analyzeStockWithAI, getVixLevel } = require('./enhancedAITradingBot');
 
-// One symbol at a time with a 6-second pause — ~10 stocks/min.
-// After-hours accuracy matters more than speed; this keeps Yahoo Finance
-// well under its rate limit and virtually eliminates 429 null returns.
+// One symbol at a time with a 10-second pause — ~6 stocks/min.
+// 10s (not 6s) gives Yahoo Finance headroom after a day of heavy usage
+// and prevents 429 rate-limit cascades that produce 12-hour null loops.
 const BATCH_SIZE     = 1;
-const BATCH_DELAY_MS = 6_000;
+const BATCH_DELAY_MS = 10_000;
 
 let _scanRunning = false;
 
 /**
  * Calls analyzeStockWithAI with retry on null result, 429 rate-limits, or any transient error.
  *
- * Retry schedule (maxRetries = 2 → up to 3 total attempts):
- *   null result  → wait 12s then 24s  (soft failure — data not ready yet)
- *   429 error    → wait 30s then 60s  (rate limit — needs longer cool-down)
- *   other error  → wait 12s then 24s  (transient — network blip, timeout, etc.)
+ * Retry schedule (maxRetries = 1 → up to 2 total attempts):
+ *   null result  → wait 15s  (soft failure — data not ready yet)
+ *   429 error    → wait 45s  (rate limit — needs longer cool-down)
+ *   other error  → wait 15s  (transient — network blip, timeout, etc.)
  *
+ * Kept at 1 retry (not 2) so rate-limited tickers fail fast (~15-45s) rather
+ * than burning 90s per ticker and causing 12-hour null loops.
  * Returns null only after all retries are exhausted.
  */
-async function _analyzeWithRetry(symbol, vixLevel, regime, maxRetries = 2) {
+async function _analyzeWithRetry(symbol, vixLevel, regime, maxRetries = 1) {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
             const result = await analyzeStockWithAI(symbol, vixLevel, null, regime);
@@ -46,7 +48,7 @@ async function _analyzeWithRetry(symbol, vixLevel, regime, maxRetries = 2) {
 
             // analyzeStockWithAI returned null — retry with a pause
             if (attempt < maxRetries) {
-                const waitMs = 12_000 * (attempt + 1);
+                const waitMs = 15_000;
                 console.warn(`[NightlyScan] null result for ${symbol} — retrying in ${waitMs / 1000}s (attempt ${attempt + 1}/${maxRetries})`);
                 await new Promise(r => setTimeout(r, waitMs));
                 continue;
@@ -60,7 +62,7 @@ async function _analyzeWithRetry(symbol, vixLevel, regime, maxRetries = 2) {
             }
 
             const is429 = /429|too many requests/i.test(err.message || '');
-            const waitMs = is429 ? 30_000 * (attempt + 1) : 12_000 * (attempt + 1);
+            const waitMs = is429 ? 45_000 : 15_000;
             const label  = is429 ? '429 rate-limit' : `error (${err.message.slice(0, 60)})`;
             console.warn(`[NightlyScan] ${label} on ${symbol} — retrying in ${waitMs / 1000}s (attempt ${attempt + 1}/${maxRetries})`);
             await new Promise(r => setTimeout(r, waitMs));
@@ -115,12 +117,20 @@ async function _upsert(symbol, date, analysis, passedPrescreen, exclusionReason)
 }
 
 /**
+ * Returns true while a scan is running — used by the scheduler to avoid double-launches.
+ */
+function isScanRunning() { return _scanRunning; }
+
+/**
  * Main entry point — call from scheduler or standalone script.
  * Safe to call concurrently: skips if a scan is already in progress.
  *
+ * @param {{ missingOnly?: boolean }} opts
+ *   missingOnly=true  → skip symbols already stored for today (resume after crash)
+ *   missingOnly=false → full scan of entire universe (default)
  * @returns {{ analyzed, passed, filtered, failed, date, elapsedMin }}
  */
-async function runNightlyUniverseScan() {
+async function runNightlyUniverseScan(opts = {}) {
     if (_scanRunning) {
         console.log('[NightlyScan] Scan already in progress — skipping duplicate trigger');
         return null;
@@ -136,7 +146,7 @@ async function runNightlyUniverseScan() {
     const startTime = Date.now();
     const today     = _todayET();
 
-    console.log(`[NightlyScan] ── Starting nightly universe scan for ${today} ──`);
+    console.log(`[NightlyScan] ── ${opts.missingOnly ? 'Resuming' : 'Starting'} nightly universe scan for ${today} ──`);
 
     let analyzed = 0, passed = 0, filtered = 0, failed = 0;
 
@@ -150,8 +160,31 @@ async function runNightlyUniverseScan() {
             getVixLevel(),
             marketRegimeService.getMarketRegime()
         ]);
+
+        let symbols = symbolList;
+
+        // missingOnly mode: skip symbols already stored for today so retries are cheap
+        if (opts.missingOnly) {
+            try {
+                const doneRes = await query(
+                    `SELECT symbol FROM daily_universe_analysis WHERE analysis_date = $1::date AND ai_score IS NOT NULL`,
+                    [today]
+                );
+                const doneSet = new Set(doneRes.rows.map(r => r.symbol));
+                const before  = symbols.length;
+                symbols = symbols.filter(s => !doneSet.has(s));
+                console.log(`[NightlyScan] Resume mode: ${doneSet.size} already done, ${symbols.length} remaining of ${before}`);
+                if (symbols.length === 0) {
+                    console.log('[NightlyScan] All symbols already analyzed — nothing to do');
+                    return { analyzed: 0, passed: 0, filtered: 0, failed: 0, date: today, elapsedMin: '0.0' };
+                }
+            } catch (e) {
+                console.warn('[NightlyScan] Could not load done-set, scanning full universe:', e.message);
+            }
+        }
+
         // Wrap as minimal objects so the rest of the loop only needs symbol strings
-        const universe = symbolList.map(sym => ({ symbol: sym }));
+        const universe = symbols.map(sym => ({ symbol: sym }));
 
         console.log(`[NightlyScan] Universe: ${universe.length} symbols | VIX: ${typeof vixLevel === 'number' ? vixLevel.toFixed(1) : 'n/a'} | Regime: ${regime?.regime || 'NEUTRAL'}`);
 
@@ -280,6 +313,69 @@ async function runNightlyUniverseScan() {
 
         console.log(`[NightlyScan] ── Complete in ${elapsedMin} min | analyzed: ${analyzed} | passed: ${passed} | filtered: ${filtered} | failed: ${failed} | new: ${newTickers.length} ──`);
 
+        // ── Score decay monitor ──────────────────────────────────────────────────
+        // For every user with open holdings, look up today's nightly score.
+        // If a position's score fell below 60, send a Telegram alert to review/exit.
+        setImmediate(async () => {
+            try {
+                const usersRes = await query(
+                    `SELECT id FROM users WHERE ai_trading_enabled = true AND telegram_chat_id IS NOT NULL`
+                );
+                for (const u of usersRes.rows) {
+                    const holdingsRes = await query(
+                        `SELECT h.symbol, h.average_price, h.gain_loss_percent
+                         FROM holdings h
+                         WHERE h.user_id = $1 AND h.quantity > 0`,
+                        [u.id]
+                    );
+                    if (holdingsRes.rows.length === 0) continue;
+
+                    const symbols = holdingsRes.rows.map(h => h.symbol);
+                    const scoresRes = await query(
+                        `SELECT symbol, ai_score, recommendation
+                         FROM daily_universe_analysis
+                         WHERE analysis_date = $1 AND symbol = ANY($2)`,
+                        [today, symbols]
+                    );
+                    const scoreMap = {};
+                    for (const r of scoresRes.rows) scoreMap[r.symbol] = r;
+
+                    const decayed = [];
+                    for (const h of holdingsRes.rows) {
+                        const scan = scoreMap[h.symbol];
+                        if (scan && scan.ai_score !== null && scan.ai_score < 60) {
+                            decayed.push({
+                                symbol: h.symbol,
+                                score: scan.ai_score,
+                                rec: scan.recommendation,
+                                glPct: parseFloat(h.gain_loss_percent || 0).toFixed(1)
+                            });
+                        }
+                    }
+
+                    if (decayed.length > 0) {
+                        const lines = decayed.map(d =>
+                            `  • ${d.symbol}: score ${d.score} (${d.rec}) | P&L ${d.glPct >= 0 ? '+' : ''}${d.glPct}%`
+                        );
+                        const msg = [
+                            '⚠️ *SCORE DECAY ALERT*',
+                            '',
+                            'The following open positions scored below 60 in tonight\'s scan.',
+                            'Review these for tightened stop or early exit:',
+                            '',
+                            ...lines,
+                            '',
+                            '_Sent by PANTHEON nightly scan_'
+                        ].join('\n');
+                        await alertService.sendMessage(u.id, msg);
+                        console.log(`[NightlyScan] Score decay alert sent for user ${u.id}: ${decayed.map(d => d.symbol).join(', ')}`);
+                    }
+                }
+            } catch (err) {
+                console.warn('[NightlyScan] Score decay monitor failed (non-fatal):', err.message);
+            }
+        });
+
         // ── Background bar backfill ───────────────────────────────────────────────
         // Store OHLCV bars for every analyzed symbol so future scans and backtests
         // are served entirely from local daily_bars (zero Yahoo calls for history).
@@ -393,4 +489,4 @@ async function rescanSymbol(symbol, reason = 'news') {
     }
 }
 
-module.exports = { runNightlyUniverseScan, rescanSymbol };
+module.exports = { runNightlyUniverseScan, rescanSymbol, isScanRunning };

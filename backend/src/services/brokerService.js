@@ -211,22 +211,19 @@ const simulatedBroker = (() => {
 
 // ─── ALPACA BROKER ────────────────────────────────────────────────────────────
 const alpacaBroker = (() => {
-    let alpaca = null;
+    const userDb = require('./userDatabaseService');
 
-    function getClient() {
-        if (alpaca) return alpaca;
-        if (!process.env.ALPACA_KEY_ID || !process.env.ALPACA_SECRET_KEY) {
-            throw new Error('Alpaca keys not set. Add ALPACA_KEY_ID and ALPACA_SECRET_KEY to .env');
+    // Per-user client factory — reads personal credentials from DB, falls back to .env.
+    // No singleton: credentials can change at runtime when a user saves new keys.
+    async function getClientForUser(userId) {
+        const creds = await userDb.getUserAlpacaCredentials(userId);
+        if (!creds.keyId || !creds.secretKey) {
+            throw new Error('Alpaca keys not configured. Add ALPACA_KEY_ID / ALPACA_SECRET_KEY to .env or save them in Profile → Broker Settings.');
         }
         const Alpaca = require('@alpacahq/alpaca-trade-api');
-        const isPaper = process.env.ALPACA_PAPER !== 'false';
-        alpaca = new Alpaca({
-            keyId:     process.env.ALPACA_KEY_ID,
-            secretKey: process.env.ALPACA_SECRET_KEY,
-            paper:     isPaper
-        });
-        logger.info('[Broker:Alpaca] Client initialised', { paper: isPaper });
-        return alpaca;
+        const client = new Alpaca({ keyId: creds.keyId, secretKey: creds.secretKey, paper: creds.isPaper });
+        logger.info('[Broker:Alpaca] Client created', { userId, paper: creds.isPaper, source: creds.source });
+        return { client, isPaper: creds.isPaper };
     }
 
     async function buyMarket(userId, symbol, quantity, meta = {}) {
@@ -235,8 +232,7 @@ const alpacaBroker = (() => {
         const quote = await dataProvider.getQuote(symbol);
         await safetyCheck(userId, symbol, quantity, quote.price || 0, meta.safetyOptions);
 
-        const client = getClient();
-        const isPaper = process.env.ALPACA_PAPER !== 'false';
+        const { client, isPaper } = await getClientForUser(userId);
 
         logger.info('[Broker:Alpaca] Submitting BUY order', {
             symbol, quantity, paper: isPaper, estimatedPrice: quote.price
@@ -305,8 +301,7 @@ const alpacaBroker = (() => {
 
         await logOrderState(idemKey, userId, symbol, 'VALIDATED', 'CREATED', { quantity, price: quote.price });
 
-        const client  = getClient();
-        const isPaper = process.env.ALPACA_PAPER !== 'false';
+        const { client, isPaper } = await getClientForUser(userId);
 
         const entryLimit  = parseFloat(((quote.price || quote.ask || 0) * 1.005).toFixed(2));
         const stopPrice   = meta.stopPrice  > 0 ? parseFloat(meta.stopPrice.toFixed(2))  : parseFloat((entryLimit * 0.93).toFixed(2));
@@ -421,12 +416,130 @@ const alpacaBroker = (() => {
         };
     }
 
+    async function buyFractional(userId, symbol, notionalAmount, meta = {}) {
+        // Notional (dollar-amount) market buy for positions where Kelly sizing rounds to 0 whole shares.
+        // After fill: places standalone stop-loss GTC + take-profit limit GTC.
+        // The trailing stop service raises the stop-loss exactly as it does for whole-share positions
+        // (standalone stop orders, not bracket legs — no extra handling needed there).
+        const idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:${userId}:frac`;
+
+        if (await isOrderAlreadySubmitted(idemKey)) {
+            logger.warn('[ARROW] Duplicate fractional submission blocked', { idemKey, symbol });
+            throw new Error(`Duplicate order blocked: ${idemKey}`);
+        }
+
+        await logOrderState(idemKey, userId, symbol, 'CREATED', null, { notionalAmount, fractional: true });
+
+        const { client, isPaper } = await getClientForUser(userId);
+        const brokerLabel = isPaper ? 'alpaca-paper' : 'alpaca-live';
+
+        const stopPrice   = meta.stopPrice   > 0 ? parseFloat(meta.stopPrice.toFixed(2))   : null;
+        const targetPrice = meta.targetPrice > 0 ? parseFloat(meta.targetPrice.toFixed(2)) : null;
+
+        logger.info('[Broker:Alpaca] Submitting FRACTIONAL notional buy', {
+            symbol, notional: notionalAmount.toFixed(2), stopPrice, targetPrice, paper: isPaper
+        });
+
+        await logOrderState(idemKey, userId, symbol, 'SUBMITTED', 'CREATED', {
+            broker: brokerLabel, notionalAmount, extra: { stopPrice, targetPrice, fractional: true }
+        });
+
+        const order = await client.createOrder({
+            symbol,
+            notional:      notionalAmount.toFixed(2),
+            side:          'buy',
+            type:          'market',
+            time_in_force: 'day'
+        });
+
+        const filled = await waitForFill(client, order.id, 15000);
+        const finalStatus = filled.status || 'submitted';
+        // parseFloat (not parseInt) — fractional qty like 0.15 would truncate to 0 with parseInt
+        const filledQty   = filled.filled_qty       ? parseFloat(filled.filled_qty)       : 0;
+        const fillPrice   = filled.filled_avg_price ? parseFloat(filled.filled_avg_price) : 0;
+
+        await logOrderState(idemKey, userId, symbol,
+            finalStatus === 'filled' ? 'FILLED' : 'PENDING_FILL', 'SUBMITTED', {
+            brokerOrderId: order.id, price: fillPrice, quantity: filledQty, broker: brokerLabel,
+            extra: { notionalAmount, fractional: true }
+        });
+
+        if (filledQty > 0) {
+            const effectiveStop   = stopPrice   || parseFloat((fillPrice * 0.96).toFixed(2));
+            const effectiveTarget = targetPrice || parseFloat((fillPrice * 1.10).toFixed(2));
+            const qtyStr = String(filledQty);
+
+            // Standalone stop-loss GTC — trailing stop service raises this as the position gains
+            try {
+                await client.createOrder({
+                    symbol, qty: qtyStr, side: 'sell', type: 'stop',
+                    time_in_force: 'gtc', stop_price: String(effectiveStop)
+                });
+                logger.info('[Broker:Alpaca] Fractional stop-loss placed', {
+                    symbol, qty: filledQty, stopPrice: effectiveStop
+                });
+            } catch (err) {
+                logger.warn('[Broker:Alpaca] Fractional stop-loss failed', { symbol, err: err.message });
+            }
+
+            // Take-profit limit GTC
+            try {
+                await client.createOrder({
+                    symbol, qty: qtyStr, side: 'sell', type: 'limit',
+                    time_in_force: 'gtc', limit_price: String(effectiveTarget)
+                });
+                logger.info('[Broker:Alpaca] Fractional take-profit placed', {
+                    symbol, qty: filledQty, targetPrice: effectiveTarget
+                });
+            } catch (err) {
+                logger.warn('[Broker:Alpaca] Fractional take-profit failed', { symbol, err: err.message });
+            }
+
+            await logOrderState(idemKey, userId, symbol, 'OPEN_WITH_STOP', 'FILLED', {
+                brokerOrderId: order.id, broker: brokerLabel,
+                extra: { stopPrice: effectiveStop, targetPrice: effectiveTarget, entryPrice: fillPrice, fractional: true }
+            });
+
+            const tradingServiceDB = require('./tradingServiceDB');
+            await tradingServiceDB.executeBuyOrder(
+                userId, symbol, filledQty,
+                `ALPACA_${isPaper ? 'PAPER' : 'LIVE'}_FRAC`,
+                meta.aiScore || null, meta.sector || null,
+                JSON.stringify({
+                    signalPrice: meta.signalPrice || fillPrice,
+                    regime:      meta.regime      || null,
+                    stopPrice:   effectiveStop,
+                    targetPrice: effectiveTarget,
+                    fractional:  true
+                }),
+                fillPrice
+            ).catch(err => {
+                logger.error('[Broker:Alpaca] buyFractional DB record failed — order filled but not in DB', {
+                    symbol, filledQty, fillPrice, orderId: order.id, err: err.message
+                });
+            });
+        }
+
+        return {
+            orderId:        order.id,
+            symbol,
+            side:           'buy',
+            notional:       notionalAmount,
+            filledQty,
+            filledAvgPrice: fillPrice,
+            status:         finalStatus,
+            stopPrice:      meta.stopPrice   || null,
+            targetPrice:    meta.targetPrice || null,
+            broker:         brokerLabel,
+            fractional:     true
+        };
+    }
+
     async function sellMarket(userId, symbol, quantity, meta = {}) {
         const idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:sell:${meta.reason?.slice(0,20) || 'exit'}`;
         await logOrderState(idemKey, userId, symbol, 'CREATED', null, { quantity });
 
-        const client  = getClient();
-        const isPaper = process.env.ALPACA_PAPER !== 'false';
+        const { client, isPaper } = await getClientForUser(userId);
 
         logger.info('[Broker:Alpaca] Submitting SELL order', { symbol, quantity, paper: isPaper });
 
@@ -519,18 +632,18 @@ const alpacaBroker = (() => {
     }
 
     async function getAccountInfo(userId) {
-        const client = getClient();
+        const { client, isPaper } = await getClientForUser(userId);
         const account = await client.getAccount();
         return {
             cashBalance:    parseFloat(account.cash),
             portfolioValue: parseFloat(account.portfolio_value),
             buyingPower:    parseFloat(account.buying_power),
-            broker:         process.env.ALPACA_PAPER !== 'false' ? 'alpaca-paper' : 'alpaca-live'
+            broker:         isPaper ? 'alpaca-paper' : 'alpaca-live'
         };
     }
 
     async function getPositions(userId) {
-        const client = getClient();
+        const { client } = await getClientForUser(userId);
         const positions = await client.getPositions();
         return positions.map(p => ({
             symbol:        p.symbol,
@@ -544,9 +657,12 @@ const alpacaBroker = (() => {
 
     async function getOpenOrders(userId, symbol) {
         try {
-            const client = getClient();
-            const orders = await client.getOrders({ status: 'open', symbols: [symbol], limit: 10 });
-            return orders || [];
+            const { client } = await getClientForUser(userId);
+            // Fetch all open orders and filter client-side — the `symbols` parameter in the
+            // Alpaca SDK is unreliable (may return all orders regardless of the filter).
+            const all = await client.getOrders({ status: 'open', limit: 200 });
+            const sym = (symbol || '').toUpperCase();
+            return (all || []).filter(o => (o.symbol || '').toUpperCase() === sym);
         } catch (err) {
             logger.warn('[Broker:Alpaca] getOpenOrders failed', { symbol, err: err.message });
             return [];
@@ -557,9 +673,10 @@ const alpacaBroker = (() => {
     // Used as the final broker-side guard before submitting a new buy order.
     async function getPosition(userId, symbol) {
         try {
-            const client = getClient();
+            const { client } = await getClientForUser(userId);
             const pos = await client.getPosition(symbol);
-            return pos && parseInt(pos.qty) > 0 ? pos : null;
+            // parseFloat handles fractional positions (e.g. 0.15 shares); parseInt would truncate to 0
+            return pos && parseFloat(pos.qty) > 0 ? pos : null;
         } catch (err) {
             // Alpaca throws a 404-style error when no position exists — that is the normal path
             if (err.response?.status === 404 || /position does not exist/i.test(err.message)) {
@@ -570,7 +687,7 @@ const alpacaBroker = (() => {
         }
     }
 
-    return { buyMarket, buyBracket, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, name: 'Alpaca Markets' };
+    return { buyMarket, buyBracket, buyFractional, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, name: 'Alpaca Markets' };
 })();
 
 // ─── ACTIVE BROKER SELECTION ─────────────────────────────────────────────────
@@ -630,7 +747,7 @@ async function executeManualBuyOrder(userId, symbol, quantity) {
         safetyOptions: {
             requireAiEnabled: false,
             requireBotEnabled: false,
-            enforceNotionalLimit: true
+            enforceNotionalLimit: false  // manual trade — user is making a deliberate decision; Alpaca rejects if insufficient funds
         }
     });
 
@@ -772,6 +889,17 @@ module.exports = {
     buyBracket:     (userId, symbol, quantity, meta) =>
                         activeBroker.buyBracket(userId, symbol, quantity, meta),
 
+    /**
+     * Fractional (notional dollar-amount) market buy for small accounts where Kelly sizing
+     * rounds to 0 whole shares. Places standalone stop + take-profit GTC orders after fill.
+     * The trailing stop service handles these exactly like whole-share standalone stops.
+     * Falls back to buyBracket(1 share) on the simulated broker.
+     */
+    buyFractional:  (userId, symbol, notional, meta) =>
+                        activeBroker.buyFractional
+                            ? activeBroker.buyFractional(userId, symbol, notional, meta)
+                            : activeBroker.buyBracket(userId, symbol, 1, meta),
+
     /** Place a limit sell order */
     sellMarket:     (userId, symbol, quantity, meta) =>
                         activeBroker.sellMarket(userId, symbol, quantity, meta),
@@ -781,6 +909,18 @@ module.exports = {
 
     /** Get open positions */
     getPositions:   (userId) => activeBroker.getPositions(userId),
+
+    /** Get a single open position for a symbol (null if not held) */
+    getPosition:    (userId, symbol) =>
+                        activeBroker.getPosition
+                            ? activeBroker.getPosition(userId, symbol)
+                            : Promise.resolve(null),
+
+    /** Get pending open orders for a symbol (empty array if none / not supported) */
+    getOpenOrders:  (userId, symbol) =>
+                        activeBroker.getOpenOrders
+                            ? activeBroker.getOpenOrders(userId, symbol)
+                            : Promise.resolve([]),
 
     brokerName:     activeBroker.name,
     brokerKey:      BROKER,

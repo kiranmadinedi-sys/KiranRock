@@ -135,6 +135,63 @@ async function toggleAITrading(userId, enabled) {
     return result.rows[0];
 }
 
+/**
+ * Get Alpaca credentials for a user.
+ * Returns their stored keys if set, otherwise falls back to process.env.
+ * Secret key is always returned so brokerService can use it — never expose in API responses.
+ */
+async function getUserAlpacaCredentials(userId) {
+    const result = await query(
+        'SELECT alpaca_key_id, alpaca_secret_key, alpaca_paper FROM users WHERE id = $1',
+        [userId]
+    );
+    const row = result.rows[0];
+    if (row?.alpaca_key_id && row?.alpaca_secret_key) {
+        return {
+            keyId:     row.alpaca_key_id,
+            secretKey: row.alpaca_secret_key,
+            isPaper:   row.alpaca_paper !== false,
+            source:    'user'
+        };
+    }
+    // Fall back to shared .env credentials (paper trading default)
+    return {
+        keyId:     process.env.ALPACA_KEY_ID || null,
+        secretKey: process.env.ALPACA_SECRET_KEY || null,
+        isPaper:   (process.env.ALPACA_PAPER || 'true') !== 'false',
+        source:    'env'
+    };
+}
+
+/**
+ * Save Alpaca credentials for a user.
+ * Pass secretKey=null to keep the existing secret unchanged.
+ */
+async function saveUserAlpacaCredentials(userId, { keyId, secretKey, isPaper }) {
+    const fields = ['alpaca_key_id = $1', 'alpaca_paper = $2', 'updated_at = NOW()'];
+    const values = [keyId, isPaper !== false];
+    if (secretKey) {
+        fields.push(`alpaca_secret_key = $${values.length + 1}`);
+        values.push(secretKey);
+    }
+    values.push(userId);
+    const result = await query(
+        `UPDATE users SET ${fields.join(', ')} WHERE id = $${values.length} RETURNING alpaca_key_id, alpaca_paper`,
+        values
+    );
+    return result.rows[0];
+}
+
+/**
+ * Clear Alpaca credentials — user reverts to shared .env keys.
+ */
+async function clearUserAlpacaCredentials(userId) {
+    await query(
+        `UPDATE users SET alpaca_key_id = NULL, alpaca_secret_key = NULL, alpaca_paper = true WHERE id = $1`,
+        [userId]
+    );
+}
+
 module.exports = {
     getUserByUsername,
     getUserById,
@@ -144,5 +201,8 @@ module.exports = {
     updateLastLogin,
     verifyPassword,
     getUsersWithAITradingEnabled,
-    toggleAITrading
+    toggleAITrading,
+    getUserAlpacaCredentials,
+    saveUserAlpacaCredentials,
+    clearUserAlpacaCredentials
 };

@@ -742,41 +742,266 @@ async function runMorningBriefing() {
 }
 
 /**
- * Nightly universe scan trigger — fires once at 16:15 ET Mon-Fri.
+ * Nightly universe scan trigger — called every 5 min by the scheduler loop.
  *
- * The scan was previously launched from runEodCleanup (3:44 PM ET), but
- * nightlyUniverseScanService refuses to run while _isMarketHours() is true
- * (market closes at 4:00 PM). This dedicated trigger fires at 4:15 PM,
- * 15 minutes after close, so the scan always runs on trading days.
+ * Completion-driven: keeps retrying (missing tickers only) until today's
+ * analysis count reaches SCAN_COMPLETE_THRESHOLD. This handles partial scans
+ * caused by backend restarts, rate-limit crashes, or any other interruption.
+ *
+ * Operating window: Mon–Fri, 16:15–23:00 ET.
+ * Stops for the day once complete so it doesn't burn API quota overnight.
  */
-let _nightlyScanTriggeredDate = null;
+const SCAN_COMPLETE_THRESHOLD = 420; // ~92% of 455-symbol universe (allows for ETF nulls)
+let _scanCompletedDate = null;       // date string when we saw >= threshold for the day
 
 async function runNightlyScanTrigger() {
-    const formatter = new Intl.DateTimeFormat('en-US', {
-        timeZone: 'America/New_York',
-        hour: 'numeric', minute: 'numeric', hour12: false,
-        year: 'numeric', month: '2-digit', day: '2-digit'
-    });
-    const parts   = formatter.formatToParts(new Date());
-    const etHour  = parseInt(parts.find(p => p.type === 'hour').value,   10);
-    const etMin   = parseInt(parts.find(p => p.type === 'minute').value, 10);
-    const etDay   = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })).getDay();
-    const etDate  = `${parts.find(p => p.type === 'year').value}-${parts.find(p => p.type === 'month').value}-${parts.find(p => p.type === 'day').value}`;
+    const et     = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const etDay  = et.getDay();   // 0=Sun, 6=Sat
+    const etHour = et.getHours();
+    const etMin  = et.getMinutes();
+    const etDate = et.toISOString().slice(0, 10);
 
-    // Mon-Fri only, fire at 16:15–16:29 ET (15 min after market close)
+    // Mon–Fri only, between 4:15 PM and 11:00 PM ET
     if (etDay < 1 || etDay > 5) return;
-    if (etHour !== 16 || etMin < 15 || etMin >= 30) return;
-    if (_nightlyScanTriggeredDate === etDate) return;
-    _nightlyScanTriggeredDate = etDate;
+    if (etHour < 16 || (etHour === 16 && etMin < 15)) return;
+    if (etHour >= 23) return;
 
-    console.log('[NightlyScanTrigger] 4:15 PM ET — launching nightly universe scan');
+    // Already confirmed complete for today
+    if (_scanCompletedDate === etDate) return;
+
+    // Check current progress in DB — use most recent scan date (not CURRENT_DATE).
+    // Nightly scan stores rows with the date it ran (e.g. 4:15 PM Jun 11 → analysis_date=Jun 11).
+    // Querying CURRENT_DATE would always find 0 on the same evening and re-launch redundantly.
+    let todayCount = 0;
+    try {
+        const { rows } = await query(
+            `SELECT COUNT(*) AS cnt
+             FROM daily_universe_analysis
+             WHERE analysis_date = (
+                 SELECT MAX(analysis_date)
+                 FROM daily_universe_analysis
+                 WHERE analysis_date >= CURRENT_DATE - INTERVAL '1 day'
+                   AND analysis_date <= CURRENT_DATE
+             )
+             AND ai_score IS NOT NULL`
+        );
+        todayCount = parseInt(rows[0]?.cnt ?? 0);
+    } catch (_) { return; }
+
+    // Scan is complete for today — stop checking
+    if (todayCount >= SCAN_COMPLETE_THRESHOLD) {
+        if (_scanCompletedDate !== etDate) {
+            console.log(`[NightlyScanTrigger] ✅ Complete for ${etDate}: ${todayCount} symbols analyzed`);
+            _scanCompletedDate = etDate;
+        }
+        return;
+    }
+
+    // A scan is already running — wait for it to finish before launching another
+    const nightlyScanSvc = require('./nightlyUniverseScanService');
+    if (nightlyScanSvc.isScanRunning()) return;
+
+    // Launch scan — resume mode if partial data exists, full scan if starting fresh
+    const isResume = todayCount > 0;
+    console.log(`[NightlyScanTrigger] ${isResume ? `Resuming (${todayCount} done, ${SCAN_COMPLETE_THRESHOLD - todayCount}+ remaining)` : 'Starting'} nightly scan for ${etDate}`);
+
+    nightlyScanSvc.runNightlyUniverseScan({ missingOnly: isResume })
+        .then(r => {
+            if (!r) return;
+            console.log(`[NightlyScanTrigger] Run finished: +${r.analyzed} analyzed, ${r.passed} passed, ${r.failed} failed in ${r.elapsedMin}min`);
+        })
+        .catch(err => console.error('[NightlyScanTrigger] Run error:', err.message));
+}
+
+/**
+ * Sunday Night Global Market Scout — fires once at 20:00–20:59 ET every Sunday.
+ *
+ * By 8 PM ET on Sunday, Asian markets are already open (Tokyo 9 AM Monday,
+ * Hong Kong 9:15 AM Monday, Sydney already trading).  European futures open
+ * around 8 PM ET as well.  This gives a ~13-hour head start on Monday's US session.
+ *
+ * What it does:
+ *   1. Pulls US futures (ES=F, NQ=F, YM=F) + Asian/European indices from Yahoo Finance
+ *   2. Determines global sentiment: BULLISH / BEARISH / MIXED / NEUTRAL
+ *   3. Runs the full nightly universe scan for Monday (same as weekday EOD scan)
+ *   4. Sends a Telegram "Monday Morning Preview" with sentiment + top setups
+ */
+let _sundayScoutRanDate = null;
+
+async function runSundayGlobalScout() {
+    const et  = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const day  = et.getDay();   // 0 = Sunday
+    const hour = et.getHours();
+    const etDate = et.toISOString().slice(0, 10);
+
+    // Sunday only, 20:00–20:59 ET window
+    if (day !== 0) return;
+    if (hour !== 20) return;
+    if (_sundayScoutRanDate === etDate) return;
+    _sundayScoutRanDate = etDate;
+
+    console.log('[SundayScout] 8 PM ET Sunday — starting global market scout for Monday preview');
+
+    // ── 1. Fetch global market data from Yahoo Finance ────────────────────────
+    const GLOBAL_MARKETS = [
+        { sym: 'ES=F',   label: 'S&P 500 Futures',    region: 'US_FUTURES'  },
+        { sym: 'NQ=F',   label: 'NASDAQ Futures',      region: 'US_FUTURES'  },
+        { sym: 'YM=F',   label: 'Dow Futures',         region: 'US_FUTURES'  },
+        { sym: '^N225',  label: 'Nikkei 225 (Japan)',  region: 'ASIA'        },
+        { sym: '^HSI',   label: 'Hang Seng (HK)',      region: 'ASIA'        },
+        { sym: '^AXJO',  label: 'ASX 200 (Australia)', region: 'ASIA'        },
+        { sym: '^FTSE',  label: 'FTSE 100 (UK)',       region: 'EUROPE'      },
+        { sym: '^GDAXI', label: 'DAX (Germany)',       region: 'EUROPE'      },
+    ];
+
+    const marketData = [];
+    try {
+        // yahoo-finance2 must be called with spacing to avoid 429 rate limiting
+        const yf = require('yahoo-finance2');
+        const quoteFn = yf.default?.quoteSummary
+            ? async (sym) => {
+                const r = await yf.default.quoteSummary(sym, { modules: ['price'] });
+                return r?.price;
+            }
+            : null;
+
+        // Fallback: direct HTTP fetch from Yahoo Finance query API
+        const https = require('https');
+        const fetchYahooQuote = (sym) => new Promise((resolve, reject) => {
+            const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=1d`;
+            const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                    try {
+                        const j = JSON.parse(data);
+                        const meta = j?.chart?.result?.[0]?.meta;
+                        resolve(meta ? {
+                            price:         meta.regularMarketPrice,
+                            prevClose:     meta.chartPreviousClose || meta.previousClose,
+                            changePct:     meta.regularMarketPrice && meta.chartPreviousClose
+                                           ? ((meta.regularMarketPrice - meta.chartPreviousClose) / meta.chartPreviousClose * 100)
+                                           : null,
+                        } : null);
+                    } catch { resolve(null); }
+                });
+            });
+            req.on('error', reject);
+            req.setTimeout(8000, () => { req.destroy(); reject(new Error('timeout')); });
+        });
+
+        for (const mkt of GLOBAL_MARKETS) {
+            try {
+                await new Promise(r => setTimeout(r, 600)); // 600ms spacing to avoid 429
+                const q = await fetchYahooQuote(mkt.sym);
+                if (q && q.changePct !== null) {
+                    marketData.push({ ...mkt, changePct: parseFloat(q.changePct.toFixed(2)), price: q.price });
+                    console.log(`[SundayScout] ${mkt.sym}: ${q.changePct >= 0 ? '+' : ''}${q.changePct?.toFixed(2)}%`);
+                }
+            } catch (e) {
+                console.warn(`[SundayScout] ${mkt.sym} fetch failed: ${e.message}`);
+            }
+        }
+    } catch (fetchErr) {
+        console.warn('[SundayScout] Global market fetch error:', fetchErr.message);
+    }
+
+    // ── 2. Determine global sentiment ─────────────────────────────────────────
+    let sentiment = 'NEUTRAL';
+    let sentimentEmoji = '⚪';
+    if (marketData.length >= 3) {
+        const avgChange = marketData.reduce((s, m) => s + m.changePct, 0) / marketData.length;
+        const usFutures = marketData.filter(m => m.region === 'US_FUTURES');
+        const usAvg     = usFutures.length ? usFutures.reduce((s, m) => s + m.changePct, 0) / usFutures.length : 0;
+        const positives = marketData.filter(m => m.changePct > 0.3).length;
+        const negatives = marketData.filter(m => m.changePct < -0.3).length;
+
+        if (usAvg > 0.5 && positives >= negatives) { sentiment = 'BULLISH';  sentimentEmoji = '🟢'; }
+        else if (usAvg < -0.5 || negatives > positives + 1) { sentiment = 'BEARISH'; sentimentEmoji = '🔴'; }
+        else if (positives > 0 && negatives > 0)  { sentiment = 'MIXED';    sentimentEmoji = '🟡'; }
+    }
+    console.log(`[SundayScout] Global sentiment: ${sentiment} (${marketData.length} markets tracked)`);
+
+    // ── 3. Trigger full nightly universe scan (Monday candidates) ─────────────
     try {
         const nightlyScanSvc = require('./nightlyUniverseScanService');
         nightlyScanSvc.runNightlyUniverseScan()
-            .then(r => r && console.log(`[NightlyScan] Done: ${r.passed} passed / ${r.analyzed} analyzed in ${r.elapsedMin}min`))
-            .catch(err => console.error('[NightlyScan] Background error:', err.message));
-    } catch (err) {
-        console.error('[NightlyScanTrigger] Failed to launch:', err.message);
+            .then(r => {
+                if (r) console.log(`[SundayScout] Monday scan done: ${r.passed} passed / ${r.analyzed} analyzed`);
+            })
+            .catch(err => console.error('[SundayScout] Scan error:', err.message));
+        console.log('[SundayScout] Monday nightly scan launched in background');
+    } catch (scanErr) {
+        console.error('[SundayScout] Failed to launch scan:', scanErr.message);
+    }
+
+    // ── 4. Send Telegram Monday Morning Preview ────────────────────────────────
+    try {
+        const activeUsers = await getActiveAIUsers();
+        if (!activeUsers.length) return;
+
+        // Build global market summary lines
+        const byRegion = { US_FUTURES: [], ASIA: [], EUROPE: [] };
+        for (const m of marketData) {
+            const sign = m.changePct >= 0 ? '+' : '';
+            byRegion[m.region]?.push(`  • ${m.label}: ${sign}${m.changePct}%`);
+        }
+
+        let globalBlock = '';
+        if (byRegion.US_FUTURES.length) globalBlock += `*🇺🇸 US Futures*\n${byRegion.US_FUTURES.join('\n')}\n\n`;
+        if (byRegion.ASIA.length)       globalBlock += `*🌏 Asian Markets*\n${byRegion.ASIA.join('\n')}\n\n`;
+        if (byRegion.EUROPE.length)     globalBlock += `*🌍 European Futures*\n${byRegion.EUROPE.join('\n')}\n\n`;
+        if (!globalBlock) globalBlock = '_Global market data unavailable — check manually_\n\n';
+
+        // Pull strong buy candidates from the most recent scan (scan just launched — use last 4 days as fallback)
+        const tickers = await query(`
+            SELECT symbol, ai_score, sector, setup_family, recommendation
+            FROM daily_universe_analysis
+            WHERE analysis_date = (
+                SELECT MAX(analysis_date) FROM daily_universe_analysis
+                WHERE analysis_date >= CURRENT_DATE - INTERVAL '4 days'
+                  AND passed_prescreen = true
+            )
+            AND ai_score >= 80
+            ORDER BY ai_score DESC
+            LIMIT 8
+        `);
+
+        let tickerBlock = '';
+        if (tickers.rows.length) {
+            tickerBlock = `*📋 Monday Watchlist* (top scored)\n` +
+                tickers.rows.map(t =>
+                    `  • *${t.symbol}* — score ${t.ai_score} | ${t.recommendation} | ${t.sector || 'N/A'}`
+                ).join('\n') + '\n\n';
+        } else {
+            tickerBlock = '_Scan still running — check Universe Scanner in ~15 min for Monday setups_\n\n';
+        }
+
+        const sentNote = sentiment === 'BULLISH'  ? '📈 Global markets are GREEN heading into Monday. Conditions favor BUY setups.'
+                       : sentiment === 'BEARISH'  ? '📉 Global markets are RED. Consider tighter stops and reduced position sizes Monday.'
+                       : sentiment === 'MIXED'    ? '⚠️ Mixed signals from global markets. Be selective — wait for clean setups after open.'
+                       :                            '➡️ Global markets are flat. Watch for momentum signals after the US open.';
+
+        const msg =
+            `${sentimentEmoji} *Monday Morning Preview*\n` +
+            `_Generated Sunday ${et.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York' })} ET_\n\n` +
+            `*Global Sentiment: ${sentiment}*\n${sentNote}\n\n` +
+            globalBlock +
+            tickerBlock +
+            `_Bot will scan for Strong Buys (≥90) at market open. Full universe results in Universe Scanner._`;
+
+        const sentChats = new Set();
+        for (const user of activeUsers) {
+            try {
+                const chatId = user.telegram_chat_id;
+                if (!chatId || sentChats.has(chatId)) continue;
+                sentChats.add(chatId);
+                await alertService.sendMessage(user.id, msg);
+            } catch (_) {}
+        }
+        console.log(`[SundayScout] Monday preview sent to ${sentChats.size} chat(s) — sentiment: ${sentiment}`);
+    } catch (msgErr) {
+        console.error('[SundayScout] Telegram send error:', msgErr.message);
     }
 }
 
@@ -811,19 +1036,21 @@ function startScheduler() {
 
     // Run immediately on start
     runScheduledTrading();
-    
+
     // Then run every 5 minutes
     schedulerInterval = setInterval(() => {
         runScheduledTrading();
         runEodCleanup();                   // cancel partial fills at 15:44 ET
         runNightlyScanTrigger();           // nightly universe scan at 16:15 ET (after close)
-        runWeeklyParameterHealthCheck();        // Friday 15:45 ET: health check + backtest summary
-        runMorningBriefing();                   // 8:00 AM ET Mon-Fri: STRONG BUY pre-market alert
-        runMorningReconciliationTick();         // 9:00 AM ET Mon-Fri: DB vs Alpaca position sync
+        runWeeklyParameterHealthCheck();   // Friday 15:45 ET: health check + backtest summary
+        runMorningBriefing();              // 8:00 AM ET Mon-Fri: STRONG BUY pre-market alert
+        runMorningReconciliationTick();    // 9:00 AM ET Mon-Fri: DB vs Alpaca position sync
+        runSundayGlobalScout();            // 8:00 PM ET Sunday: global markets + Monday preview
     }, CHECK_INTERVAL);
 
     console.log('[Enhanced AI Scheduler] ✓ Scheduler started successfully\n');
     console.log('[Enhanced AI Scheduler] Nightly scan trigger: 16:15 ET Mon-Fri\n');
+    console.log('[Enhanced AI Scheduler] Sunday global scout: 20:00 ET Sunday\n');
 }
 
 /**

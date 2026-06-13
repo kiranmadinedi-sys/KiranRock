@@ -35,6 +35,25 @@ const yahooProvider = (() => {
         return fn.call(yf, symbol);
     }
 
+    // Retry helper: re-attempts fn() up to maxAttempts times when Yahoo returns 429.
+    // Delays: 3 s then 8 s — Yahoo's crumb rate-limit window is ~10 s.
+    async function _withRetry(fn, symbol) {
+        const delays = [3000, 8000];
+        for (let i = 0; i <= delays.length; i++) {
+            try {
+                return await fn();
+            } catch (err) {
+                const is429 = String(err.message || '').includes('429') || err.status === 429 || err.statusCode === 429;
+                if (is429 && i < delays.length) {
+                    logger.debug(`[DataProvider:Yahoo] 429 on ${symbol}, retry ${i + 1} in ${delays[i] / 1000}s`);
+                    await new Promise(r => setTimeout(r, delays[i]));
+                } else {
+                    throw err;
+                }
+            }
+        }
+    }
+
     /**
      * Get OHLCV bars for a symbol
      * @param {string} symbol
@@ -46,7 +65,7 @@ const yahooProvider = (() => {
         const period1 = new Date(Date.now() - lookbackDays * 86400000)
             .toISOString().split('T')[0];
         const period2 = new Date().toISOString().split('T')[0];
-        const result = await _chart(symbol, { period1, period2, interval });
+        const result = await _withRetry(() => _chart(symbol, { period1, period2, interval }), symbol);
         return (result.quotes || [])
             .filter(q => q.close != null)
             .map(q => ({
@@ -65,7 +84,7 @@ const yahooProvider = (() => {
      * @returns {Promise<{symbol,price,change,changePercent,volume,marketCap,high52w,low52w}>}
      */
     async function getQuote(symbol) {
-        const q = await _quote(symbol);
+        const q = await _withRetry(() => _quote(symbol), symbol);
         return {
             symbol,
             price:         q.regularMarketPrice,
@@ -114,6 +133,15 @@ const yahooProvider = (() => {
     return { getBars, getQuote, searchSymbols, getOptionsChain, name: 'Yahoo Finance' };
 })();
 
+// ─── YAHOO-ONLY SYMBOLS ──────────────────────────────────────────────────────
+// ETFs/sector funds that Alpaca IEX doesn't carry — always routed to Yahoo.
+// Declared at module scope so both alpacaProvider and withYahooFallback can use it.
+const YAHOO_ONLY_SYMBOLS = new Set([
+    'DIA','IWM','MDY',
+    'XLK','XLF','XLE','XLV','XLI','XLP','XLY','XLB','XLU',
+    'GLD','SLV','USO','TLT','HYG','LQD','EEM','EFA','VXX'
+]);
+
 // ─── ALPACA PROVIDER ─────────────────────────────────────────────────────────
 const alpacaProvider = (() => {
     // Lazy-load so app doesn't crash if Alpaca SDK not installed or keys missing
@@ -151,11 +179,7 @@ const alpacaProvider = (() => {
     // ETFs not carried by Alpaca IEX free feed — skip directly to real Yahoo to avoid
     // noisy warn logs. SPY is excluded (works on IEX). QQQ is excluded (withYahooFallback
     // handles it cleanly now that yahooProvider uses the unpatched chart/quote functions).
-    const YAHOO_ONLY_SYMBOLS = new Set([
-        'DIA','IWM','MDY',
-        'XLK','XLF','XLE','XLV','XLI','XLP','XLY','XLB','XLU',
-        'GLD','SLV','USO','TLT','HYG','LQD','EEM','EFA','VXX'
-    ]);
+    // (Uses module-level YAHOO_ONLY_SYMBOLS)
 
     function isYahooOnly(symbol) {
         return isIndexSymbol(symbol) || YAHOO_ONLY_SYMBOLS.has((symbol || '').toUpperCase());
@@ -411,14 +435,45 @@ async function getIndexQuote(symbol) {
 // Wrap primary provider calls with Yahoo fallback so a transient Alpaca/Polygon
 // error never takes down the signal pipeline.
 async function withYahooFallback(method, label, ...args) {
-    // Index symbols (^VIX, ^GSPC…) are Yahoo-only and rate-limited — serve from cache
-    if (method === 'getQuote' && args[0] && (args[0].startsWith('^') || args[0].startsWith('='))) {
-        return getIndexQuote(args[0]);
+    // Index symbols (^VIX…) AND sector ETFs (IWM, XLK…) are Yahoo-only — serve
+    // all of them from the 5-min process-wide cache to prevent startup 429 bursts.
+    if (method === 'getQuote' && args[0]) {
+        const sym = (args[0] || '').toUpperCase();
+        if (args[0].startsWith('^') || args[0].startsWith('=') || YAHOO_ONLY_SYMBOLS.has(sym)) {
+            return getIndexQuote(args[0]);
+        }
     }
+
+    // Real-time quote guardrail: when DATA_PROVIDER=polygon (15-min delayed quotes),
+    // prefer Alpaca's free IEX feed for stocks it carries — gives real-time prices
+    // during market hours for intraday entry/exit decisions.
+    // Polygon (delayed) is the fallback for symbols Alpaca IEX doesn't carry.
+    if (method === 'getQuote' && activeProvider === polygonProvider && args[0]) {
+        const sym = (args[0] || '').toUpperCase();
+        if (!args[0].startsWith('^') && !args[0].startsWith('=') && !YAHOO_ONLY_SYMBOLS.has(sym)) {
+            try {
+                return await alpacaProvider.getQuote(sym);
+            } catch (_alpacaErr) {
+                // Alpaca IEX doesn't carry this symbol — fall through to Polygon
+            }
+        }
+    }
+
     try {
         return await activeProvider[method](...args);
     } catch (err) {
         if (activeProvider === yahooProvider) throw err; // already Yahoo — no fallback
+
+        // 404 = symbol not in provider's universe (OTC, delisted, pink-sheet).
+        // Skip Yahoo fallback — it burns rate limit for a symbol that has no data there either.
+        // DataPatch catches the rethrown error and returns { regularMarketPrice: 0 } gracefully.
+        const httpStatus = err.response?.status || err.status;
+        const is404 = httpStatus === 404 || /status code 404/.test(err.message || '');
+        if (is404) {
+            logger.debug(`[DataProvider] ${activeProvider.name} 404 for ${args[0]} — not in universe, skipping Yahoo fallback`);
+            throw err;
+        }
+
         logger.warn(`[DataProvider] ${activeProvider.name} ${label} failed, falling back to Yahoo`, {
             symbol: args[0], error: err.message
         });

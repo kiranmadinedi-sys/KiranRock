@@ -1,8 +1,15 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { getApiBaseUrl } from '../config';
+
+function isMarketHours(): boolean {
+  const et   = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const day  = et.getDay();
+  const mins = et.getHours() * 60 + et.getMinutes();
+  return day >= 1 && day <= 5 && mins >= 9 * 60 + 30 && mins < 16 * 60;
+}
 
 interface Recommendation {
   symbol: string;
@@ -77,12 +84,9 @@ export default function RecommendationsPage() {
   const [riskTolerance, setRiskTolerance] = useState<'conservative' | 'moderate' | 'aggressive'>('moderate');
   const [universe, setUniverse] = useState<'MEGA_CAP' | 'TOP_200' | 'ALL'>('TOP_200');
   const [activeTab, setActiveTab] = useState<'new' | 'portfolio'>('new');
+  const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  useEffect(() => {
-    fetchRecommendations();
-  }, [riskTolerance, universe]);
-
-  const fetchRecommendations = async () => {
+  const fetchRecommendations = useCallback(async () => {
     setLoading(true);
     try {
       const token = localStorage.getItem('token');
@@ -110,7 +114,20 @@ export default function RecommendationsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [riskTolerance, universe, router]);
+
+  useEffect(() => {
+    fetchRecommendations();
+  }, [fetchRecommendations]);
+
+  // Auto-refresh every 5 minutes during market hours so live PANTHEON scores surface
+  useEffect(() => {
+    if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
+    refreshTimerRef.current = setInterval(() => {
+      if (isMarketHours()) fetchRecommendations();
+    }, 5 * 60 * 1000);
+    return () => { if (refreshTimerRef.current) clearInterval(refreshTimerRef.current); };
+  }, [fetchRecommendations]);
 
   const getSignalColor = (signal: string) => {
     switch (signal) {

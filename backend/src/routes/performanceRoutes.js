@@ -260,6 +260,134 @@ router.get('/overfit', protect, async (req, res) => {
 });
 
 /**
+ * GET /api/performance/hypothesis?days=180
+ * The three core measurement hypotheses:
+ *   1. byHoldPeriod — win rate by holding duration bucket (1-3d, 4-7d, 8-14d, 15+d)
+ *   2. byExitReason — win rate by why the position was closed
+ *   3. byScoreBucket — win rate by PANTHEON score tier (validates score-weighted sizing)
+ * All sourced from trade_decision_journal (CLOSED phase).
+ */
+router.get('/hypothesis', protect, async (req, res) => {
+    try {
+        const { query } = require('../config/database');
+        const userId = req.userId;
+        const days = Math.max(7, Math.min(parseInt(req.query.days) || 180, 365));
+
+        const [holdRows, exitRows, scoreRows] = await Promise.all([
+            // 1. Holding period bucketed win rate (calendar days)
+            query(`
+                WITH closed AS (
+                    SELECT
+                        GREATEST(0, EXTRACT(DAY FROM (closed_at - opened_at))::int) AS hold_days,
+                        pnl_percent
+                    FROM trade_decision_journal
+                    WHERE user_id = $1
+                      AND decision_phase = 'CLOSED'
+                      AND pnl_percent IS NOT NULL
+                      AND opened_at IS NOT NULL
+                      AND closed_at IS NOT NULL
+                      AND closed_at >= NOW() - ($2 * INTERVAL '1 day')
+                )
+                SELECT
+                    CASE
+                        WHEN hold_days <= 3  THEN '1-3d'
+                        WHEN hold_days <= 7  THEN '4-7d'
+                        WHEN hold_days <= 14 THEN '8-14d'
+                        ELSE '15+d'
+                    END AS bucket,
+                    MIN(hold_days)  AS sort_key,
+                    COUNT(*)        AS total,
+                    COUNT(*) FILTER (WHERE pnl_percent > 0) AS wins,
+                    ROUND(AVG(pnl_percent)::numeric, 2) AS avg_return,
+                    ROUND(MIN(pnl_percent)::numeric, 2) AS min_return,
+                    ROUND(MAX(pnl_percent)::numeric, 2) AS max_return,
+                    ROUND(SUM(pnl_percent)::numeric, 2) AS total_return
+                FROM closed
+                GROUP BY bucket
+                ORDER BY sort_key
+            `, [userId, days]),
+
+            // 2. Exit reason breakdown
+            query(`
+                SELECT
+                    COALESCE(metadata->>'exitReason', 'untagged') AS reason,
+                    COUNT(*)  AS total,
+                    COUNT(*) FILTER (WHERE pnl_percent > 0) AS wins,
+                    ROUND(AVG(pnl_percent)::numeric, 2) AS avg_return,
+                    ROUND(SUM(pnl)::numeric, 2) AS total_pnl
+                FROM trade_decision_journal
+                WHERE user_id = $1
+                  AND decision_phase = 'CLOSED'
+                  AND pnl_percent IS NOT NULL
+                  AND closed_at >= NOW() - ($2 * INTERVAL '1 day')
+                GROUP BY reason
+                ORDER BY COUNT(*) DESC
+                LIMIT 12
+            `, [userId, days]),
+
+            // 3. Score bucket win rate (validates score-weighted position sizing)
+            query(`
+                SELECT
+                    CASE
+                        WHEN score >= 95 THEN '95-100'
+                        WHEN score >= 90 THEN '90-94'
+                        WHEN score >= 85 THEN '85-89'
+                        WHEN score >= 80 THEN '80-84'
+                        ELSE '< 80'
+                    END AS bucket,
+                    MIN(score)  AS sort_key,
+                    COUNT(*)    AS total,
+                    COUNT(*) FILTER (WHERE pnl_percent > 0) AS wins,
+                    ROUND(AVG(pnl_percent)::numeric, 2) AS avg_return,
+                    ROUND(SUM(pnl)::numeric, 2) AS total_pnl
+                FROM trade_decision_journal
+                WHERE user_id = $1
+                  AND decision_phase = 'CLOSED'
+                  AND score IS NOT NULL
+                  AND pnl_percent IS NOT NULL
+                  AND closed_at >= NOW() - ($2 * INTERVAL '1 day')
+                GROUP BY bucket
+                ORDER BY sort_key DESC NULLS LAST
+            `, [userId, days])
+        ]);
+
+        const toWR = (wins, total) => total > 0 ? Math.round((parseInt(wins) / parseInt(total)) * 100) : 0;
+
+        res.json({
+            days,
+            byHoldPeriod: holdRows.rows.map(r => ({
+                bucket:      r.bucket,
+                total:       parseInt(r.total),
+                wins:        parseInt(r.wins),
+                winRate:     toWR(r.wins, r.total),
+                avgReturn:   parseFloat(r.avg_return) || 0,
+                minReturn:   parseFloat(r.min_return) || 0,
+                maxReturn:   parseFloat(r.max_return) || 0,
+            })),
+            byExitReason: exitRows.rows.map(r => ({
+                reason:    r.reason,
+                total:     parseInt(r.total),
+                wins:      parseInt(r.wins),
+                winRate:   toWR(r.wins, r.total),
+                avgReturn: parseFloat(r.avg_return) || 0,
+                totalPnl:  parseFloat(r.total_pnl) || 0,
+            })),
+            byScoreBucket: scoreRows.rows.map(r => ({
+                bucket:    r.bucket,
+                total:     parseInt(r.total),
+                wins:      parseInt(r.wins),
+                winRate:   toWR(r.wins, r.total),
+                avgReturn: parseFloat(r.avg_return) || 0,
+                totalPnl:  parseFloat(r.total_pnl) || 0,
+            })),
+        });
+    } catch (err) {
+        logger.error('Hypothesis endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
  * GET /api/performance/regime?days=180
  * P&L breakdown by market regime — win rate, net P&L, avg P&L per trade.
  * Sourced from trade_decision_journal (decision_phase='CLOSED').
@@ -389,6 +517,23 @@ router.get('/attribution', protect, async (req, res) => {
         });
     } catch (err) {
         logger.error('Attribution endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/performance/calibration
+ * Returns the latest score-calibration report for the dashboard.
+ * Shows per-bucket profit factor, win rate, and the suggested minBuyScore.
+ * This is read-only — the user applies any threshold change manually in config.
+ */
+router.get('/calibration', protect, async (req, res) => {
+    try {
+        const scoreCalibratorService = require('../services/scoreCalibratorService');
+        const report = await scoreCalibratorService.buildCalibrationReport(req.userId);
+        res.json(report);
+    } catch (err) {
+        logger.error('Calibration endpoint error', { error: err.message });
         res.status(500).json({ error: err.message });
     }
 });

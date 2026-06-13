@@ -70,6 +70,11 @@ router.post('/withdraw', async (req, res) => {
  */
 router.post('/reset-balance', async (req, res) => {
     try {
+        const userDb = require('../services/userDatabaseService');
+        const creds  = await userDb.getUserAlpacaCredentials(req.userId);
+        if (creds.source === 'user' && creds.isPaper === false) {
+            return res.status(403).json({ error: 'Cash balance is controlled by your live Alpaca account and cannot be overridden here.' });
+        }
         const { amount } = req.body;
         if (typeof amount !== 'number' || amount < 0) {
             return res.status(400).json({ error: 'Invalid reset amount' });
@@ -87,16 +92,14 @@ router.post('/reset-balance', async (req, res) => {
  */
 router.post('/clear-all', async (req, res) => {
     try {
-        // Clear trading account (cash balance)
+        const userDb = require('../services/userDatabaseService');
+        const creds  = await userDb.getUserAlpacaCredentials(req.userId);
+        if (creds.source === 'user' && creds.isPaper === false) {
+            return res.status(403).json({ error: 'Cannot clear a live Alpaca account. Close positions directly on Alpaca, then reconciliation will sync the DB automatically.' });
+        }
         await tradingAccountService.clearAllPortfolio(req.userId);
-        
-        // Clear holdings and trade history
         await tradingService.clearAllHoldings(req.userId);
-        
-        res.json({ 
-            success: true, 
-            message: 'Portfolio cleared successfully. All balances and holdings reset to zero.' 
-        });
+        res.json({ success: true, message: 'Portfolio cleared successfully. All balances and holdings reset to zero.' });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -181,7 +184,25 @@ router.get('/holdings', async (req, res) => {
  */
 router.get('/portfolio', async (req, res) => {
     try {
-        const portfolio = await portfolioTrackingService.getPortfolioSummary(req.userId);
+        const userDb             = require('../services/userDatabaseService');
+        const trailingStopSvc    = require('../services/trailingStopService');
+        const [portfolio, creds] = await Promise.all([
+            portfolioTrackingService.getPortfolioSummary(req.userId),
+            userDb.getUserAlpacaCredentials(req.userId)
+        ]);
+        portfolio.isLiveAccount = creds.source === 'user' && creds.isPaper === false;
+
+        // Merge Alpaca stop/target prices into each holding (non-blocking — fails gracefully)
+        if (process.env.BROKER === 'alpaca' && (portfolio.holdings || []).length > 0) {
+            try {
+                const stopMap = await trailingStopSvc.getStopOrders(req.userId);
+                portfolio.holdings = portfolio.holdings.map(h => {
+                    const info = stopMap[(h.symbol || '').toUpperCase()];
+                    return info ? { ...h, stopPrice: info.stopPrice, targetPrice: info.targetPrice, stopLocked: info.stopLocked } : h;
+                });
+            } catch { /* stop data is optional — never break the portfolio response */ }
+        }
+
         res.json(portfolio);
     } catch (error) {
         res.status(500).json({ error: error.message });

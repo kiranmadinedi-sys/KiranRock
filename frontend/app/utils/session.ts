@@ -3,7 +3,7 @@
  * Handles authentication session with 30-minute timeout
  */
 
-const SESSION_TIMEOUT = 30 * 60 * 1000; // 30 minutes in milliseconds
+const SESSION_TIMEOUT = 8 * 60 * 60 * 1000; // 8 hours in milliseconds
 const LAST_ACTIVITY_KEY = 'lastActivity';
 
 /**

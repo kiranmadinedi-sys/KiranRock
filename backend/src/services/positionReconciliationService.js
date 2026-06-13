@@ -22,14 +22,18 @@ const { query }  = require('../config/database');
 
 // ─── Alpaca positions fetch ───────────────────────────────────────────────────
 
-async function _fetchAlpacaPositions() {
+async function _fetchAlpacaPositions(userId) {
     const axios   = require('axios');
-    const isPaper = (process.env.ALPACA_PAPER || 'true').toLowerCase() !== 'false';
+    // Use per-user credentials so each user's live/paper account is checked correctly.
+    // Falls back to .env if the user has no personal keys stored.
+    const userDb  = require('./userDatabaseService');
+    const creds   = userId ? await userDb.getUserAlpacaCredentials(userId) : null;
+    const isPaper = creds ? creds.isPaper : (process.env.ALPACA_PAPER || 'true').toLowerCase() !== 'false';
+    const keyId     = (creds && creds.keyId)     || process.env.ALPACA_KEY_ID     || '';
+    const secretKey = (creds && creds.secretKey) || process.env.ALPACA_SECRET_KEY || '';
     const base    = isPaper
         ? 'https://paper-api.alpaca.markets/v2'
         : 'https://api.alpaca.markets/v2';
-    const keyId     = process.env.ALPACA_KEY_ID     || '';
-    const secretKey = process.env.ALPACA_SECRET_KEY || '';
     if (!keyId || !secretKey) throw new Error('ALPACA_KEY_ID / ALPACA_SECRET_KEY not set');
     const resp = await axios.get(`${base}/positions`, {
         headers: {
@@ -108,7 +112,7 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
     // ── Step 2: load Alpaca positions ────────────────────────────────────────
     let alpacaPositions;
     try {
-        alpacaPositions = await _fetchAlpacaPositions();
+        alpacaPositions = await _fetchAlpacaPositions(userId);
     } catch (err) {
         logger.error('[Reconcile] Failed to fetch Alpaca positions', { userId, err: err.message });
         result.ok = false;

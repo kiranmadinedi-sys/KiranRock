@@ -194,6 +194,28 @@ interface AttributionData {
     heatmap: HeatmapCell[];
 }
 
+interface HoldPeriodRow  { bucket: string; total: number; wins: number; winRate: number; avgReturn: number; minReturn: number; maxReturn: number; }
+interface ExitReasonRow  { reason: string; total: number; wins: number; winRate: number; avgReturn: number; totalPnl: number; }
+interface ScoreBucketRow { bucket: string; total: number; wins: number; winRate: number; avgReturn: number; totalPnl: number; }
+interface HypothesisData { days: number; byHoldPeriod: HoldPeriodRow[]; byExitReason: ExitReasonRow[]; byScoreBucket: ScoreBucketRow[]; }
+
+interface CalibrationBucket {
+    bucket: string; floor: number; total: number; wins: number; losses: number;
+    profitFactor: number; expectancy: number; avgReturn: number; winRate: number;
+    maxDrawdown: number; valid: boolean; profitable: boolean; confidence: string;
+}
+interface CalibrationExitRow {
+    exitType: string; total: number; profitFactor: number; expectancy: number;
+    avgReturn: number; winRate: number; maxDrawdown: number; avgHoldDays: number | null; valid: boolean;
+}
+interface CalibrationReport {
+    generatedAt: string; lookbackDays: number; totalTrades: number;
+    hasEnoughData: boolean; suggestedFloor: number | null; reason: string; confidence: string;
+    buckets: CalibrationBucket[];
+    exitAttribution: CalibrationExitRow[] | null;
+    scoreRatioCross: Array<{ scoreBucket: string; ratioBucket: string; total: number; profitFactor: number; avgReturn: number; winRate: number; valid: boolean; }> | null;
+}
+
 function fmt(n: number | null | undefined, dec = 2) {
     if (n == null || isNaN(Number(n))) return '—';
     const v = Number(n);
@@ -353,6 +375,14 @@ export default function PerformancePage() {
     const [drilldownLoading, setDrilldownLoading] = useState(false);
     const [drilldownError, setDrilldownError] = useState('');
     const [attribution, setAttribution] = useState<AttributionData | null>(null);
+    const [hypothesis, setHypothesis] = useState<HypothesisData | null>(null);
+    const [showCalibrationModal, setShowCalibrationModal] = useState(false);
+    const [calibrationData, setCalibrationData] = useState<CalibrationReport | null>(null);
+    const [calibrationLoading, setCalibrationLoading] = useState(false);
+    const [calibrationApplying, setCalibrationApplying] = useState(false);
+    const [calibrationApplied, setCalibrationApplied] = useState(false);
+    const [calibrationError, setCalibrationError] = useState<string | null>(null);
+    const [currentMinBuyScore, setCurrentMinBuyScore] = useState<number | null>(null);
 
     const token = typeof window !== 'undefined' ? getAuthToken() : null;
 
@@ -367,17 +397,19 @@ export default function PerformancePage() {
             });
             if (intelligenceBotType !== 'all') intelligenceParams.set('botType', intelligenceBotType);
             if (intelligenceRegime !== 'all') intelligenceParams.set('regime', intelligenceRegime);
-            const [sRes, hRes, iRes, aRes] = await Promise.all([
+            const [sRes, hRes, iRes, aRes, hyRes] = await Promise.all([
                 fetch(`${base}/api/performance/scorecard`, { headers: hdrs }),
                 fetch(`${base}/api/performance/history?days=${days}`, { headers: hdrs }),
                 fetch(`${base}/api/performance/intelligence?${intelligenceParams.toString()}`, { headers: hdrs }),
-                fetch(`${base}/api/performance/attribution?days=${intelligenceDays}`, { headers: hdrs })
+                fetch(`${base}/api/performance/attribution?days=${intelligenceDays}`, { headers: hdrs }),
+                fetch(`${base}/api/performance/hypothesis?days=${intelligenceDays}`, { headers: hdrs })
             ]);
-            if (sRes.status === 401 || hRes.status === 401 || iRes.status === 401 || aRes.status === 401) { handleAuthError(401); return; }
+            if ([sRes, hRes, iRes, aRes, hyRes].some(r => r.status === 401)) { handleAuthError(401); return; }
             if (sRes.ok) setScorecard(await sRes.json());
             if (hRes.ok) setHistory(await hRes.json());
             if (iRes.ok) setIntelligence(await iRes.json());
             if (aRes.ok) setAttribution(await aRes.json());
+            if (hyRes.ok) setHypothesis(await hyRes.json());
         } catch (e) {
             console.error('Performance load error', e);
         } finally {
@@ -386,6 +418,58 @@ export default function PerformancePage() {
     }, [token, days, intelligenceDays, intelligenceBotType, intelligenceRegime, router]);
 
     useEffect(() => { load(); }, [load]);
+
+    const openCalibrationModal = useCallback(async () => {
+        setShowCalibrationModal(true);
+        setCalibrationApplied(false);
+        setCalibrationError(null);
+        if (calibrationData) return; // already loaded
+        setCalibrationLoading(true);
+        try {
+            const base = getApiBaseUrl();
+            const hdrs = { Authorization: `Bearer ${token}` };
+            const [calRes, cfgRes] = await Promise.all([
+                fetch(`${base}/api/performance/calibration`, { headers: hdrs }),
+                fetch(`${base}/api/enhanced-ai-trading/status`, { headers: hdrs }),
+            ]);
+            if (calRes.ok) setCalibrationData(await calRes.json());
+            if (cfgRes.ok) {
+                const d = await cfgRes.json();
+                setCurrentMinBuyScore(d?.riskConfig?.minBuyScore ?? null);
+            }
+        } catch {
+            setCalibrationError('Failed to load calibration data. Is the backend running?');
+        } finally {
+            setCalibrationLoading(false);
+        }
+    }, [token, calibrationData]);
+
+    const applyCalibration = useCallback(async () => {
+        if (!token || !calibrationData?.suggestedFloor) return;
+        setCalibrationApplying(true);
+        setCalibrationError(null);
+        try {
+            const base = getApiBaseUrl();
+            const res = await fetch(`${base}/api/enhanced-ai-trading/config`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ minBuyScore: calibrationData.suggestedFloor }),
+            });
+            if (res.ok) {
+                setCurrentMinBuyScore(calibrationData.suggestedFloor);
+                setCalibrationApplied(true);
+                // Refresh calibration data so the action section updates
+                setCalibrationData(null);
+                setTimeout(() => setShowCalibrationModal(false), 2200);
+            } else {
+                setCalibrationError('Server rejected the change — check bot config endpoint.');
+            }
+        } catch {
+            setCalibrationError('Network error applying change.');
+        } finally {
+            setCalibrationApplying(false);
+        }
+    }, [token, calibrationData]);
 
     const syncBalance = async () => {
         if (!token) return;
@@ -561,6 +645,13 @@ export default function PerformancePage() {
                             <option value={60}>60 days</option>
                             <option value={90}>90 days</option>
                         </select>
+                        <button
+                            onClick={openCalibrationModal}
+                            className="text-sm px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors flex items-center gap-1.5"
+                            title="Score Calibration — view performance by score bucket and apply threshold suggestions"
+                        >
+                            🎯 Calibrate
+                        </button>
                         <button
                             onClick={load}
                             className="text-sm px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
@@ -1236,6 +1327,135 @@ export default function PerformancePage() {
                         </div>
                     </>
                 )}
+
+                {/* ── Hypothesis Lab ── */}
+                {hypothesis && (
+                    <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+                        <div className="px-5 py-4 border-b border-gray-200 dark:border-gray-700">
+                            <h2 className="text-base font-semibold text-gray-800 dark:text-white">Hypothesis Lab</h2>
+                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                                Validate assumptions with data — hold time, exit patterns, and score quality.
+                            </p>
+                        </div>
+                        <div className="divide-y divide-gray-100 dark:divide-gray-800">
+
+                            {/* 1. Hold period */}
+                            <div className="px-5 py-4">
+                                <div className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">
+                                    Hold Period Win Rate
+                                    <span className="ml-2 text-xs font-normal text-gray-400">— how long should you hold?</span>
+                                </div>
+                                {hypothesis.byHoldPeriod.length === 0 ? (
+                                    <p className="text-xs text-gray-400">Need more closed trades.</p>
+                                ) : (
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-sm">
+                                            <thead><tr className="text-xs text-gray-500 uppercase">
+                                                <th className="text-left py-1 pr-6">Period</th>
+                                                <th className="text-right py-1 pr-6">Trades</th>
+                                                <th className="text-right py-1 pr-6">Win %</th>
+                                                <th className="text-right py-1 pr-6">Avg Return</th>
+                                                <th className="text-right py-1 pr-4">Best</th>
+                                                <th className="text-right py-1">Worst</th>
+                                            </tr></thead>
+                                            <tbody>
+                                                {hypothesis.byHoldPeriod.map(r => (
+                                                    <tr key={r.bucket} className="border-t border-gray-50 dark:border-gray-800/60">
+                                                        <td className="py-2 pr-6 font-semibold text-gray-800 dark:text-gray-200">{r.bucket}</td>
+                                                        <td className="py-2 pr-6 text-right text-gray-500">{r.total}</td>
+                                                        <td className={`py-2 pr-6 text-right font-semibold ${r.winRate >= 60 ? 'text-emerald-600' : r.winRate >= 45 ? 'text-yellow-600' : 'text-red-500'}`}>{r.winRate}%</td>
+                                                        <td className={`py-2 pr-6 text-right font-semibold ${r.avgReturn >= 0 ? 'text-green-600' : 'text-red-500'}`}>{r.avgReturn >= 0 ? '+' : ''}{r.avgReturn.toFixed(2)}%</td>
+                                                        <td className="py-2 pr-4 text-right text-green-600">+{r.maxReturn.toFixed(1)}%</td>
+                                                        <td className={`py-2 text-right ${r.minReturn < 0 ? 'text-red-500' : 'text-gray-500'}`}>{r.minReturn.toFixed(1)}%</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* 2. Exit reason */}
+                            <div className="px-5 py-4">
+                                <div className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">
+                                    Exit Reason Breakdown
+                                    <span className="ml-2 text-xs font-normal text-gray-400">— which exits make money?</span>
+                                </div>
+                                {hypothesis.byExitReason.length === 0 ? (
+                                    <p className="text-xs text-gray-400">Need more closed trades.</p>
+                                ) : (
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-sm">
+                                            <thead><tr className="text-xs text-gray-500 uppercase">
+                                                <th className="text-left py-1 pr-6">Exit Type</th>
+                                                <th className="text-right py-1 pr-6">Trades</th>
+                                                <th className="text-right py-1 pr-6">Win %</th>
+                                                <th className="text-right py-1 pr-6">Avg Return</th>
+                                                <th className="text-right py-1">Total P&L</th>
+                                            </tr></thead>
+                                            <tbody>
+                                                {hypothesis.byExitReason.map(r => {
+                                                    const label: Record<string, string> = {
+                                                        take_profit: 'Take Profit', partial_take_profit: 'Partial Take Profit',
+                                                        trailing_stop: 'Trailing Stop', stop_loss: 'Stop Loss',
+                                                        break_even: 'Break-Even Guard', pre_earnings_exit: 'Pre-Earnings Exit',
+                                                        max_hold_time: 'Max Hold Time', slow_mover: 'Slow Mover',
+                                                        untagged: 'Untagged / Manual',
+                                                    };
+                                                    return (
+                                                        <tr key={r.reason} className="border-t border-gray-50 dark:border-gray-800/60">
+                                                            <td className="py-2 pr-6 font-semibold text-gray-800 dark:text-gray-200">{label[r.reason] ?? r.reason}</td>
+                                                            <td className="py-2 pr-6 text-right text-gray-500">{r.total}</td>
+                                                            <td className={`py-2 pr-6 text-right font-semibold ${r.winRate >= 60 ? 'text-emerald-600' : r.winRate >= 45 ? 'text-yellow-600' : 'text-red-500'}`}>{r.winRate}%</td>
+                                                            <td className={`py-2 pr-6 text-right font-semibold ${r.avgReturn >= 0 ? 'text-green-600' : 'text-red-500'}`}>{r.avgReturn >= 0 ? '+' : ''}{r.avgReturn.toFixed(2)}%</td>
+                                                            <td className={`py-2 text-right font-semibold ${r.totalPnl >= 0 ? 'text-green-600' : 'text-red-500'}`}>{r.totalPnl >= 0 ? '+$' : '-$'}{Math.abs(r.totalPnl).toFixed(0)}</td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* 3. Score bucket */}
+                            <div className="px-5 py-4">
+                                <div className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">
+                                    Score Bucket Win Rate
+                                    <span className="ml-2 text-xs font-normal text-gray-400">— does 95+ actually beat 85-89?</span>
+                                </div>
+                                {hypothesis.byScoreBucket.length === 0 ? (
+                                    <p className="text-xs text-gray-400">Need more closed trades with scores.</p>
+                                ) : (
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-sm">
+                                            <thead><tr className="text-xs text-gray-500 uppercase">
+                                                <th className="text-left py-1 pr-6">Score Tier</th>
+                                                <th className="text-right py-1 pr-6">Trades</th>
+                                                <th className="text-right py-1 pr-6">Win %</th>
+                                                <th className="text-right py-1 pr-6">Avg Return</th>
+                                                <th className="text-right py-1">Total P&L</th>
+                                            </tr></thead>
+                                            <tbody>
+                                                {hypothesis.byScoreBucket.map(r => (
+                                                    <tr key={r.bucket} className="border-t border-gray-50 dark:border-gray-800/60">
+                                                        <td className="py-2 pr-6 font-mono font-semibold text-gray-800 dark:text-gray-200">{r.bucket}</td>
+                                                        <td className="py-2 pr-6 text-right text-gray-500">{r.total}</td>
+                                                        <td className={`py-2 pr-6 text-right font-semibold ${r.winRate >= 60 ? 'text-emerald-600' : r.winRate >= 45 ? 'text-yellow-600' : 'text-red-500'}`}>{r.winRate}%</td>
+                                                        <td className={`py-2 pr-6 text-right font-semibold ${r.avgReturn >= 0 ? 'text-green-600' : 'text-red-500'}`}>{r.avgReturn >= 0 ? '+' : ''}{r.avgReturn.toFixed(2)}%</td>
+                                                        <td className={`py-2 text-right font-semibold ${r.totalPnl >= 0 ? 'text-green-600' : 'text-red-500'}`}>{r.totalPnl >= 0 ? '+$' : '-$'}{Math.abs(r.totalPnl).toFixed(0)}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                )}
+                            </div>
+
+                        </div>
+                    </div>
+                )}
+
             </main>
 
             {activeDrilldown && (
@@ -1385,6 +1605,214 @@ export default function PerformancePage() {
                                 </>
                             ) : (
                                 <div className="text-sm text-gray-400">No drill-down data loaded.</div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* ── Score Calibration Modal ── */}
+            {showCalibrationModal && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+                    <div className="bg-[var(--color-card)] border border-[var(--color-border)] rounded-2xl w-full max-w-2xl shadow-2xl flex flex-col max-h-[90vh]">
+
+                        {/* Header */}
+                        <div className="flex items-center justify-between px-6 pt-6 pb-4 border-b border-[var(--color-border)]">
+                            <div>
+                                <h3 className="text-xl font-bold text-[var(--color-text-primary)]">🎯 Score Calibration</h3>
+                                <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
+                                    Performance by score bucket — last 90 days
+                                    {currentMinBuyScore !== null && (
+                                        <span className="ml-2 px-2 py-0.5 rounded-full bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 font-semibold">
+                                            Current minBuyScore: {currentMinBuyScore}
+                                        </span>
+                                    )}
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => setShowCalibrationModal(false)}
+                                className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] text-2xl leading-none"
+                            >×</button>
+                        </div>
+
+                        {/* Body */}
+                        <div className="overflow-y-auto px-6 py-4 space-y-5 flex-1">
+                            {calibrationLoading && (
+                                <div className="flex items-center justify-center h-40">
+                                    <div className="animate-spin w-8 h-8 border-4 border-purple-600 border-t-transparent rounded-full" />
+                                </div>
+                            )}
+
+                            {calibrationError && (
+                                <div className="text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 rounded-lg p-3">
+                                    {calibrationError}
+                                </div>
+                            )}
+
+                            {calibrationApplied && (
+                                <div className="text-sm text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-900/20 rounded-lg p-3 font-semibold text-center">
+                                    ✅ minBuyScore updated to {calibrationData?.suggestedFloor} — closing…
+                                </div>
+                            )}
+
+                            {calibrationData && !calibrationLoading && (
+                                <>
+                                    {/* Score Bucket Table */}
+                                    <div>
+                                        <p className="text-xs font-bold uppercase tracking-wider text-[var(--color-text-secondary)] mb-2">
+                                            Score Bucket Performance
+                                            <span className="ml-1 font-normal normal-case">(PF → Expectancy → Avg Return → WR → MaxDD)</span>
+                                        </p>
+                                        <div className="overflow-x-auto rounded-xl border border-[var(--color-border)]">
+                                            <table className="w-full text-sm">
+                                                <thead>
+                                                    <tr className="bg-gray-50 dark:bg-gray-800/60 text-xs text-[var(--color-text-secondary)] uppercase tracking-wide">
+                                                        <th className="px-3 py-2 text-left">Bucket</th>
+                                                        <th className="px-3 py-2 text-right">n</th>
+                                                        <th className="px-3 py-2 text-right">PF</th>
+                                                        <th className="px-3 py-2 text-right">E%</th>
+                                                        <th className="px-3 py-2 text-right">Avg Ret</th>
+                                                        <th className="px-3 py-2 text-right">WR%</th>
+                                                        <th className="px-3 py-2 text-right">MaxDD</th>
+                                                        <th className="px-3 py-2 text-right">Conf</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {calibrationData.buckets.map(b => {
+                                                        const isCurrent = currentMinBuyScore !== null && b.floor === currentMinBuyScore;
+                                                        const isSuggested = calibrationData.suggestedFloor !== null && b.floor === calibrationData.suggestedFloor;
+                                                        return (
+                                                            <tr key={b.bucket}
+                                                                className={`border-t border-[var(--color-border)] ${isCurrent ? 'bg-purple-50 dark:bg-purple-900/20' : isSuggested ? 'bg-green-50 dark:bg-green-900/20' : ''}`}>
+                                                                <td className="px-3 py-2 font-medium text-[var(--color-text-primary)]">
+                                                                    {!b.valid ? '⚪' : b.profitable ? '✅' : '❌'} {b.bucket}
+                                                                    {isCurrent && <span className="ml-1 text-xs text-purple-600 dark:text-purple-400">← current</span>}
+                                                                    {isSuggested && !isCurrent && <span className="ml-1 text-xs text-green-600 dark:text-green-400">← suggested</span>}
+                                                                </td>
+                                                                <td className="px-3 py-2 text-right text-[var(--color-text-secondary)]">{b.total}</td>
+                                                                <td className={`px-3 py-2 text-right font-semibold ${b.profitFactor >= 1.1 ? 'text-green-600' : 'text-red-500'}`}>
+                                                                    {b.total > 0 ? b.profitFactor.toFixed(2) : '—'}
+                                                                </td>
+                                                                <td className={`px-3 py-2 text-right ${b.expectancy >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                                                                    {b.total > 0 ? `${b.expectancy >= 0 ? '+' : ''}${b.expectancy.toFixed(1)}%` : '—'}
+                                                                </td>
+                                                                <td className={`px-3 py-2 text-right ${b.avgReturn >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                                                                    {b.total > 0 ? `${b.avgReturn >= 0 ? '+' : ''}${b.avgReturn.toFixed(1)}%` : '—'}
+                                                                </td>
+                                                                <td className="px-3 py-2 text-right text-[var(--color-text-secondary)]">
+                                                                    {b.total > 0 ? `${b.winRate.toFixed(0)}%` : '—'}
+                                                                </td>
+                                                                <td className="px-3 py-2 text-right text-red-500">
+                                                                    {b.maxDrawdown < 0 ? `${b.maxDrawdown.toFixed(1)}%` : '—'}
+                                                                </td>
+                                                                <td className="px-3 py-2 text-right text-xs text-[var(--color-text-secondary)]">{b.confidence}</td>
+                                                            </tr>
+                                                        );
+                                                    })}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+
+                                    {/* Exit Attribution */}
+                                    {calibrationData.exitAttribution && calibrationData.exitAttribution.filter(e => e.valid).length > 0 && (
+                                        <div>
+                                            <p className="text-xs font-bold uppercase tracking-wider text-[var(--color-text-secondary)] mb-2">Exit Type Attribution</p>
+                                            <div className="overflow-x-auto rounded-xl border border-[var(--color-border)]">
+                                                <table className="w-full text-sm">
+                                                    <thead>
+                                                        <tr className="bg-gray-50 dark:bg-gray-800/60 text-xs text-[var(--color-text-secondary)] uppercase tracking-wide">
+                                                            <th className="px-3 py-2 text-left">Exit Type</th>
+                                                            <th className="px-3 py-2 text-right">n</th>
+                                                            <th className="px-3 py-2 text-right">PF</th>
+                                                            <th className="px-3 py-2 text-right">E%</th>
+                                                            <th className="px-3 py-2 text-right">WR%</th>
+                                                            <th className="px-3 py-2 text-right">Avg Hold</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {calibrationData.exitAttribution.filter(e => e.valid).map(e => (
+                                                            <tr key={e.exitType} className="border-t border-[var(--color-border)]">
+                                                                <td className="px-3 py-2 font-medium text-[var(--color-text-primary)] capitalize">{e.exitType.replace(/_/g, ' ')}</td>
+                                                                <td className="px-3 py-2 text-right text-[var(--color-text-secondary)]">{e.total}</td>
+                                                                <td className={`px-3 py-2 text-right font-semibold ${e.profitFactor >= 1.1 ? 'text-green-600' : 'text-red-500'}`}>{e.profitFactor.toFixed(2)}</td>
+                                                                <td className={`px-3 py-2 text-right ${e.expectancy >= 0 ? 'text-green-600' : 'text-red-500'}`}>{e.expectancy >= 0 ? '+' : ''}{e.expectancy.toFixed(1)}%</td>
+                                                                <td className="px-3 py-2 text-right text-[var(--color-text-secondary)]">{e.winRate.toFixed(0)}%</td>
+                                                                <td className="px-3 py-2 text-right text-[var(--color-text-secondary)]">{e.avgHoldDays !== null ? `${e.avgHoldDays}d` : '—'}</td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Action section */}
+                                    <div className={`rounded-xl p-4 border ${
+                                        !calibrationData.hasEnoughData
+                                            ? 'bg-gray-50 dark:bg-gray-800/40 border-gray-200 dark:border-gray-700'
+                                            : calibrationData.suggestedFloor === currentMinBuyScore
+                                                ? 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800'
+                                                : calibrationData.suggestedFloor !== null
+                                                    ? 'bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800'
+                                                    : 'bg-gray-50 dark:bg-gray-800/40 border-gray-200 dark:border-gray-700'
+                                    }`}>
+                                        {!calibrationData.hasEnoughData ? (
+                                            <>
+                                                <p className="font-bold text-[var(--color-text-primary)]">⏳ Collecting Data</p>
+                                                <p className="text-sm text-[var(--color-text-secondary)] mt-1">
+                                                    Need ≥25 trades per bucket for a reliable recommendation.
+                                                    Current total: <strong>{calibrationData.totalTrades}</strong> closed trades.
+                                                </p>
+                                            </>
+                                        ) : calibrationData.suggestedFloor === currentMinBuyScore ? (
+                                            <>
+                                                <p className="font-bold text-green-700 dark:text-green-400">✅ No Action Required</p>
+                                                <p className="text-sm text-[var(--color-text-secondary)] mt-1">
+                                                    Current minBuyScore ({currentMinBuyScore}) is validated by performance data.
+                                                </p>
+                                            </>
+                                        ) : calibrationData.suggestedFloor !== null ? (
+                                            <>
+                                                <p className="font-bold text-amber-700 dark:text-amber-400">
+                                                    {(calibrationData.suggestedFloor ?? 0) > (currentMinBuyScore ?? 0) ? '⚡ Action Recommended' : '📉 Optional Adjustment'}
+                                                </p>
+                                                <p className="text-sm text-[var(--color-text-secondary)] mt-1">{calibrationData.reason}</p>
+                                                <p className="text-xs text-[var(--color-text-secondary)] mt-1">
+                                                    Confidence: <strong>{calibrationData.confidence}</strong> ({calibrationData.totalTrades} trades)
+                                                </p>
+                                            </>
+                                        ) : null}
+                                    </div>
+                                </>
+                            )}
+                        </div>
+
+                        {/* Footer */}
+                        <div className="px-6 py-4 border-t border-[var(--color-border)] flex items-center justify-between gap-3">
+                            <button
+                                onClick={() => setShowCalibrationModal(false)}
+                                className="px-4 py-2 rounded-xl border border-[var(--color-border)] text-[var(--color-text-primary)] font-semibold hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors text-sm"
+                            >
+                                Close
+                            </button>
+
+                            {calibrationData && !calibrationLoading && calibrationData.hasEnoughData &&
+                             calibrationData.suggestedFloor !== null &&
+                             calibrationData.suggestedFloor !== currentMinBuyScore && (
+                                <button
+                                    onClick={applyCalibration}
+                                    disabled={calibrationApplying || calibrationApplied}
+                                    className="px-5 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold transition-colors text-sm flex items-center gap-2"
+                                >
+                                    {calibrationApplying ? (
+                                        <><span className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full inline-block" /> Applying…</>
+                                    ) : calibrationApplied ? (
+                                        '✅ Applied'
+                                    ) : (
+                                        `Apply: Set minBuyScore → ${calibrationData.suggestedFloor}`
+                                    )}
+                                </button>
                             )}
                         </div>
                     </div>

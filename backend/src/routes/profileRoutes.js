@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { protect } = require('../middleware/authMiddleware');
 const userProfileService = require('../services/userProfileService');
+const userDb = require('../services/userDatabaseService');
 
 // All routes require authentication
 router.use(protect);
@@ -101,6 +102,81 @@ router.get('/ai-trading/decisions', async (req, res) => {
         res.json({ decisions });
     } catch (error) {
         res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * GET /api/profile/broker
+ * Returns the user's Alpaca credential status (never returns the secret key).
+ */
+router.get('/broker', async (req, res) => {
+    try {
+        const creds = await userDb.getUserAlpacaCredentials(req.userId);
+        res.json({
+            configured:  creds.source === 'user',
+            source:      creds.source,
+            keyId:       creds.keyId ? creds.keyId.slice(0, 4) + '****' + creds.keyId.slice(-4) : null,
+            isPaper:     creds.isPaper,
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * PUT /api/profile/broker
+ * Save per-user Alpaca credentials.
+ * Send secretKey only when changing it; omit to keep existing.
+ */
+router.put('/broker', async (req, res) => {
+    try {
+        const { keyId, secretKey, isPaper } = req.body;
+        if (!keyId) {
+            return res.status(400).json({ error: 'alpaca_key_id is required' });
+        }
+
+        // Basic key format sanity check (Alpaca keys start with PK or AK)
+        if (!/^[A-Z0-9]{20,}$/i.test(keyId)) {
+            return res.status(400).json({ error: 'Key ID looks invalid — check you copied it correctly' });
+        }
+
+        await userDb.saveUserAlpacaCredentials(req.userId, { keyId, secretKey, isPaper });
+
+        // Quick connection test using the provided credentials
+        let testResult = { ok: false, message: 'Credentials saved (connection test skipped)' };
+        if (secretKey) {
+            try {
+                const Alpaca = require('@alpacahq/alpaca-trade-api');
+                const baseUrl = isPaper === false
+                    ? 'https://api.alpaca.markets'
+                    : 'https://paper-api.alpaca.markets';
+                const client = new Alpaca({ keyId, secretKey, baseUrl, usePolygon: false });
+                const acct = await client.getAccount();
+                testResult = {
+                    ok: true,
+                    message: `Connected — Account ${acct.account_number}, buying power $${parseFloat(acct.buying_power || 0).toFixed(2)}`
+                };
+            } catch (testErr) {
+                testResult = { ok: false, message: `Saved, but connection failed: ${testErr.message}` };
+            }
+        }
+
+        res.json({ saved: true, ...testResult });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * DELETE /api/profile/broker
+ * Remove per-user credentials — reverts to shared .env keys.
+ */
+router.delete('/broker', async (req, res) => {
+    try {
+        await userDb.clearUserAlpacaCredentials(req.userId);
+        res.json({ cleared: true, message: 'Reverted to shared account credentials' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
 

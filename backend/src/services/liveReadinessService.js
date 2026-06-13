@@ -55,24 +55,30 @@ async function checkLiveReadiness(userId = null, {
 
         const [dupes, storms, stopFail, reconErr, pendingOld, partials, reconFixes] =
             await Promise.all([
-                // BLOCKER: duplicate submissions (same idem-key submitted > once)
+                // BLOCKER: duplicate submissions (same idem-key submitted > once, not acknowledged)
                 query(`
                     SELECT COUNT(*) AS cnt FROM (
                         SELECT idempotency_key FROM order_audit_log
                         WHERE state = 'SUBMITTED'
                           AND ($1::text IS NULL OR user_id = $1)
                           AND created_at >= ${bInterval}
+                          AND idempotency_key NOT IN (
+                              SELECT idempotency_key FROM sentinel_order_acknowledgements
+                          )
                         GROUP BY idempotency_key HAVING COUNT(*) > 1
                     ) t
                 `, [userId]),
 
-                // BLOCKER: order storms (>5 SUBMITTED for same symbol on same day)
+                // BLOCKER: order storms (>5 SUBMITTED for same symbol on same day, not all acknowledged)
                 query(`
                     SELECT COUNT(*) AS cnt FROM (
                         SELECT symbol, created_at::date AS day FROM order_audit_log
                         WHERE state = 'SUBMITTED'
                           AND ($1::text IS NULL OR user_id = $1)
                           AND created_at >= ${bInterval}
+                          AND idempotency_key NOT IN (
+                              SELECT idempotency_key FROM sentinel_order_acknowledgements
+                          )
                         GROUP BY symbol, day HAVING COUNT(*) > 5
                     ) t
                 `, [userId]),
@@ -85,6 +91,9 @@ async function checkLiveReadiness(userId = null, {
                           AND ($1::text IS NULL OR o.user_id = $1)
                           AND o.created_at >= ${bInterval}
                           AND o.created_at < NOW() - INTERVAL '1 day'
+                          AND o.idempotency_key NOT IN (
+                              SELECT idempotency_key FROM sentinel_order_acknowledgements
+                          )
                           AND NOT EXISTS (
                               SELECT 1 FROM order_audit_log t
                               WHERE t.idempotency_key = o.idempotency_key
@@ -93,12 +102,13 @@ async function checkLiveReadiness(userId = null, {
                     ) t
                 `, [userId]),
 
-                // BLOCKER: reconciliation errors (auto-fix failed)
+                // BLOCKER: reconciliation errors (auto-fix failed, not acknowledged)
                 query(`
                     SELECT COUNT(*) AS cnt FROM position_reconciliation_log
                     WHERE ($1::text IS NULL OR user_id = $1)
                       AND reconciled_at >= ${bInterval}
                       AND action = 'ERROR'
+                      AND acknowledged IS NOT TRUE
                 `, [userId]),
 
                 // BLOCKER: orders still open after 24h (should never happen with day orders)
@@ -108,6 +118,9 @@ async function checkLiveReadiness(userId = null, {
                         WHERE state IN ('SUBMITTED','PENDING_FILL','PARTIALLY_FILLED')
                           AND ($1::text IS NULL OR user_id = $1)
                           AND created_at < NOW() - INTERVAL '24 hours'
+                          AND idempotency_key NOT IN (
+                              SELECT idempotency_key FROM sentinel_order_acknowledgements
+                          )
                           AND NOT EXISTS (
                               SELECT 1 FROM order_audit_log t2
                               WHERE t2.idempotency_key = order_audit_log.idempotency_key
@@ -167,4 +180,99 @@ async function checkLiveReadiness(userId = null, {
     }
 }
 
-module.exports = { checkLiveReadiness };
+/**
+ * Acknowledge all current SENTINEL blockers for a user.
+ * Marks position_reconciliation_log ERROR entries as acknowledged and inserts
+ * sentinel_order_acknowledgements rows for duplicate/storm order keys.
+ * This is the operational procedure after confirming incidents were caused by
+ * a known bug that is now fixed — it does not delete any audit records.
+ *
+ * @param {string} userId
+ * @param {string} reason   — human-readable reason (e.g. "brokerService crash fixed 2026-06-04")
+ */
+async function acknowledgeBlockers(userId, reason = 'Acknowledged by operator') {
+    const nowTs = 'NOW()';
+
+    // 1. Acknowledge all recon ERROR entries for this user
+    const reconResult = await query(`
+        UPDATE position_reconciliation_log
+        SET acknowledged        = TRUE,
+            acknowledged_at     = NOW(),
+            acknowledged_reason = $2
+        WHERE user_id = $1
+          AND action  = 'ERROR'
+          AND acknowledged IS NOT TRUE
+    `, [userId, reason]);
+
+    // 2. Gather all duplicate idempotency keys (submitted > once, globally — matches SENTINEL scope)
+    const dupeKeys = await query(`
+        SELECT DISTINCT idempotency_key FROM order_audit_log
+        WHERE state = 'SUBMITTED'
+          AND idempotency_key NOT IN (
+              SELECT idempotency_key FROM sentinel_order_acknowledgements
+          )
+        GROUP BY idempotency_key HAVING COUNT(*) > 1
+    `);
+
+    // 3. Gather all storm keys (> 5 submitted on same symbol/day, globally)
+    const stormKeys = await query(`
+        SELECT DISTINCT idempotency_key FROM order_audit_log
+        WHERE state = 'SUBMITTED'
+          AND idempotency_key NOT IN (
+              SELECT idempotency_key FROM sentinel_order_acknowledgements
+          )
+          AND (symbol, created_at::date) IN (
+              SELECT symbol, created_at::date FROM order_audit_log
+              WHERE state = 'SUBMITTED'
+              GROUP BY symbol, created_at::date HAVING COUNT(*) > 5
+          )
+    `);
+
+    // 4. Gather stuck-open orders > 24h (globally)
+    const stuckKeys = await query(`
+        SELECT DISTINCT idempotency_key FROM order_audit_log
+        WHERE state IN ('SUBMITTED','PENDING_FILL','PARTIALLY_FILLED')
+          AND created_at  < NOW() - INTERVAL '24 hours'
+          AND idempotency_key NOT IN (
+              SELECT idempotency_key FROM sentinel_order_acknowledgements
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM order_audit_log t2
+              WHERE t2.idempotency_key = order_audit_log.idempotency_key
+                AND t2.state IN ('FILLED','CANCELED','REJECTED','STOPPED','CLOSED')
+          )
+    `);
+
+    const allOrderKeys = [
+        ...dupeKeys.rows.map(r => r.idempotency_key),
+        ...stormKeys.rows.map(r => r.idempotency_key),
+        ...stuckKeys.rows.map(r => r.idempotency_key),
+    ];
+    const uniqueKeys = [...new Set(allOrderKeys)];
+
+    let orderAcknowledged = 0;
+    for (const key of uniqueKeys) {
+        try {
+            await query(`
+                INSERT INTO sentinel_order_acknowledgements
+                    (idempotency_key, acknowledged_at, acknowledged_by, reason)
+                VALUES ($1, NOW(), $2, $3)
+                ON CONFLICT (idempotency_key) DO NOTHING
+            `, [key, userId, reason]);
+            orderAcknowledged++;
+        } catch (_) {}
+    }
+
+    logger.info('[SENTINEL] Blockers acknowledged', {
+        userId, reason,
+        reconErrorsAcknowledged: reconResult.rowCount,
+        orderKeysAcknowledged:   orderAcknowledged,
+    });
+
+    return {
+        reconErrorsAcknowledged: reconResult.rowCount,
+        orderKeysAcknowledged:   orderAcknowledged,
+    };
+}
+
+module.exports = { checkLiveReadiness, acknowledgeBlockers };

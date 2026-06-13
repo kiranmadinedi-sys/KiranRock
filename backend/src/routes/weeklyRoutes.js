@@ -12,12 +12,13 @@ const {
     buildReportPredictionOptions
 } = require('../sendWeeklyReportToTelegram');
 const { protect } = require('../middleware/authMiddleware');
-const { 
-    saveWeeklyPredictions, 
-    getPerformanceStats, 
+const {
+    saveWeeklyPredictions,
+    getPerformanceStats,
     getRecentOutcomes,
-    updateActualResults 
+    updateActualResults
 } = require('../services/weeklyPerformanceTracker');
+const { enrichWithMarketHours, getETContext } = require('../services/marketHoursEnrichmentService');
 
 function parseWeeklyPredictionOptions(query, defaults = {}) {
     const {
@@ -68,23 +69,29 @@ router.get('/predictions', protect, async (req, res) => {
         });
         
         const predictions = await getWeeklyPredictions(options);
-        
+
         // Save predictions for performance tracking
         if (predictions.topPicks && predictions.topPicks.length > 0) {
-            saveWeeklyPredictions(predictions.topPicks).catch(err => 
+            saveWeeklyPredictions(predictions.topPicks).catch(err =>
                 console.error('Error saving predictions:', err)
             );
         }
-        
+
+        // Enrich top picks with live prices + entry assessment during market hours
+        const { isOpen } = getETContext();
+        if (isOpen && predictions.topPicks?.length) {
+            await enrichWithMarketHours(predictions.topPicks);
+        }
+
         // Get performance stats
         const performanceStats = await getPerformanceStats(4).catch(() => null);
-        
-        // Add performance data to response
+
         const response = {
             ...predictions,
-            performance: performanceStats
+            performance: performanceStats,
+            marketHoursEnriched: isOpen
         };
-        
+
         res.json(response);
     } catch (error) {
         console.error('Error in weekly predictions route:', error);
@@ -108,9 +115,16 @@ router.get('/ranked', protect, async (req, res) => {
         const performanceStats = await getPerformanceStats(4).catch(() => null);
         const ranked = predictions.allAnalyzed || predictions.topPicks || [];
 
+        // Enrich only the top-20 picks during market hours (ranked list can be very large)
+        const { isOpen } = getETContext();
+        const topPicks = predictions.topPicks || [];
+        if (isOpen && topPicks.length) {
+            await enrichWithMarketHours(topPicks.slice(0, 20));
+        }
+
         res.json({
             ranked,
-            topPicks: predictions.topPicks || [],
+            topPicks,
             marketContext: predictions.marketContext || null,
             performance: performanceStats,
             analysisDate: predictions.analysisDate,
@@ -118,7 +132,8 @@ router.get('/ranked', protect, async (req, res) => {
             universeSize: predictions.universeSize || ranked.length,
             universeType: predictions.universeType || options.universe,
             filters: predictions.filters || options,
-            fromCache: Boolean(predictions.fromCache)
+            fromCache: Boolean(predictions.fromCache),
+            marketHoursEnriched: isOpen
         });
     } catch (error) {
         console.error('Error in ranked weekly predictions route:', error);

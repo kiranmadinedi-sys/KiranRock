@@ -13,6 +13,31 @@ interface Ticker {
     setupFamily: string;
     passedPrescreen: boolean;
     scanDate: string;
+    scoringLog: string[];
+    entry: number | null;
+    stop: number | null;
+    target: number | null;
+    riskReward: string | null;
+    oracleVerdict: string | null;
+    smartMoneyScore: number | null;
+}
+
+interface CalibrationBucket {
+    bucket: string;
+    total: number;
+    wins: number;
+    winRate: number;
+    avgReturn: number;
+    totalPnl: number;
+}
+
+interface SetupWinrateRow {
+    setupFamily: string;
+    total: number;
+    wins: number;
+    winRate: number;
+    avgReturn: number;
+    totalPnl: number;
 }
 
 interface RescanAlert {
@@ -231,6 +256,151 @@ function GlobalMarketPanel({ gm }: { gm: GlobalMarketData }) {
     );
 }
 
+function CalibrationPanel({ base, hdrs }: { base: string; hdrs: Record<string, string> }) {
+    const [rows, setRows] = useState<CalibrationBucket[]>([]);
+    const [open, setOpen] = useState(false);
+    const [loaded, setLoaded] = useState(false);
+
+    const load = async () => {
+        if (loaded) return;
+        try {
+            const r = await fetch(`${base}/api/daily-signals/calibration`, { headers: hdrs });
+            if (r.ok) { setRows(await r.json()); setLoaded(true); }
+        } catch { /* no-op */ }
+    };
+
+    const toggle = () => { if (!open) load(); setOpen(o => !o); };
+
+    return (
+        <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+            <button
+                onClick={toggle}
+                className="w-full px-5 py-3 flex items-center justify-between text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+            >
+                <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-gray-700 dark:text-gray-300">Score Bucket Calibration</span>
+                    <span className="text-xs text-gray-400">— does 95-100 outperform 85-89?</span>
+                </div>
+                <span className="text-gray-400 text-xs">{open ? '▲ hide' : '▼ show'}</span>
+            </button>
+            {open && (
+                <div className="px-5 pb-4 overflow-x-auto">
+                    {rows.length === 0 ? (
+                        <p className="text-sm text-gray-400 py-2">No closed trades with scores yet.</p>
+                    ) : (
+                        <table className="w-full text-sm">
+                            <thead>
+                                <tr className="text-xs text-gray-500 uppercase border-b border-gray-200 dark:border-gray-700">
+                                    <th className="text-left pb-2 pr-4">Bucket</th>
+                                    <th className="text-right pb-2 pr-4">Trades</th>
+                                    <th className="text-right pb-2 pr-4">Win Rate</th>
+                                    <th className="text-right pb-2 pr-4">Avg Return</th>
+                                    <th className="text-right pb-2">Total P&L</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {rows.map(r => (
+                                    <tr key={r.bucket} className="border-b border-gray-100 dark:border-gray-800 last:border-0">
+                                        <td className="py-2 pr-4 font-mono font-semibold text-gray-800 dark:text-gray-200">{r.bucket}</td>
+                                        <td className="py-2 pr-4 text-right text-gray-600 dark:text-gray-400">{r.total}</td>
+                                        <td className={`py-2 pr-4 text-right font-semibold ${r.winRate >= 60 ? 'text-emerald-600 dark:text-emerald-400' : r.winRate >= 45 ? 'text-yellow-600 dark:text-yellow-400' : 'text-red-500'}`}>
+                                            {r.winRate}%
+                                        </td>
+                                        <td className={`py-2 pr-4 text-right font-semibold ${r.avgReturn >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
+                                            {r.avgReturn >= 0 ? '+' : ''}{r.avgReturn.toFixed(2)}%
+                                        </td>
+                                        <td className={`py-2 text-right font-semibold ${r.totalPnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
+                                            {r.totalPnl >= 0 ? '+' : ''}${r.totalPnl.toFixed(0)}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
+function SetupWinratePanel({ base, hdrs }: { base: string; hdrs: Record<string, string> }) {
+    const [rows, setRows] = useState<SetupWinrateRow[]>([]);
+    const [open, setOpen] = useState(false);
+    const [loaded, setLoaded] = useState(false);
+
+    const load = async () => {
+        if (loaded) return;
+        try {
+            const r = await fetch(`${base}/api/daily-signals/setup-winrate`, { headers: hdrs });
+            if (r.ok) { setRows(await r.json()); setLoaded(true); }
+        } catch { /* no-op */ }
+    };
+
+    const toggle = () => { if (!open) load(); setOpen(o => !o); };
+
+    const FAMILY_LABEL: Record<string, string> = {
+        breakout_leader: 'Breakout Leader',
+        momentum_surge:  'Momentum Surge',
+        value_recovery:  'Value Recovery',
+        trend_rider:     'Trend Rider',
+        reversal_play:   'Reversal Play',
+        unknown:         'Unknown',
+    };
+
+    return (
+        <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+            <button
+                onClick={toggle}
+                className="w-full px-5 py-3 flex items-center justify-between text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+            >
+                <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-gray-700 dark:text-gray-300">Setup Family Win Rate</span>
+                    <span className="text-xs text-gray-400">— which patterns win most?</span>
+                </div>
+                <span className="text-gray-400 text-xs">{open ? '▲ hide' : '▼ show'}</span>
+            </button>
+            {open && (
+                <div className="px-5 pb-4 overflow-x-auto">
+                    {rows.length === 0 ? (
+                        <p className="text-sm text-gray-400 py-2">No closed trades with setup data yet.</p>
+                    ) : (
+                        <table className="w-full text-sm">
+                            <thead>
+                                <tr className="text-xs text-gray-500 uppercase border-b border-gray-200 dark:border-gray-700">
+                                    <th className="text-left pb-2 pr-4">Setup Family</th>
+                                    <th className="text-right pb-2 pr-4">Trades</th>
+                                    <th className="text-right pb-2 pr-4">Win Rate</th>
+                                    <th className="text-right pb-2 pr-4">Avg Return</th>
+                                    <th className="text-right pb-2">Total P&L</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {rows.map(r => (
+                                    <tr key={r.setupFamily} className="border-b border-gray-100 dark:border-gray-800 last:border-0">
+                                        <td className="py-2 pr-4 font-semibold text-gray-800 dark:text-gray-200">
+                                            {FAMILY_LABEL[r.setupFamily] ?? r.setupFamily}
+                                        </td>
+                                        <td className="py-2 pr-4 text-right text-gray-600 dark:text-gray-400">{r.total}</td>
+                                        <td className={`py-2 pr-4 text-right font-semibold ${r.winRate >= 60 ? 'text-emerald-600 dark:text-emerald-400' : r.winRate >= 45 ? 'text-yellow-600 dark:text-yellow-400' : 'text-red-500'}`}>
+                                            {r.winRate}%
+                                        </td>
+                                        <td className={`py-2 pr-4 text-right font-semibold ${r.avgReturn >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
+                                            {r.avgReturn >= 0 ? '+' : ''}{r.avgReturn.toFixed(2)}%
+                                        </td>
+                                        <td className={`py-2 text-right font-semibold ${r.totalPnl >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-500'}`}>
+                                            {r.totalPnl >= 0 ? '+' : ''}${r.totalPnl.toFixed(0)}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
 function formatDate(dateStr: string | null) {
     if (!dateStr) return '—';
     return new Date(dateStr).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -265,6 +435,7 @@ export default function SignalsPage() {
     const [filter, setFilter]           = useState<'ALL' | 'STRONG BUY' | 'BUY'>('ALL');
     const [loading, setLoading]         = useState(true);
     const [copied, setCopied]           = useState(false);
+    const [expandedSymbol, setExpandedSymbol] = useState<string | null>(null);
     const refreshTimerRef               = useRef<ReturnType<typeof setInterval> | null>(null);
 
     const token = typeof window !== 'undefined' ? getAuthToken() : null;
@@ -343,6 +514,15 @@ export default function SignalsPage() {
     const rescanMap = new Map<string, RescanAlert>(
         (data?.rescanAlerts ?? []).map(a => [a.symbol, a])
     );
+
+    // Sector concentration: count each sector across visible tickers
+    const sectorCounts = visibleTickers.reduce<Record<string, number>>((acc, t) => {
+        const s = t.sector || 'Unknown';
+        acc[s] = (acc[s] || 0) + 1;
+        return acc;
+    }, {});
+    const topSector = Object.entries(sectorCounts).sort((a, b) => b[1] - a[1])[0];
+    const topSectorPct = visibleTickers.length > 0 && topSector ? Math.round((topSector[1] / visibleTickers.length) * 100) : 0;
 
     return (
         <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
@@ -489,6 +669,24 @@ export default function SignalsPage() {
                             <span className="ml-auto text-xs text-gray-400">{visibleTickers.length} showing</span>
                         </div>
 
+                        {/* Sector concentration warning */}
+                        {topSectorPct >= 50 && topSector && (
+                            <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-xl px-5 py-3 flex items-center gap-3">
+                                <span className="text-base">⚠️</span>
+                                <div className="flex-1">
+                                    <span className="text-sm font-semibold text-amber-800 dark:text-amber-300">
+                                        Sector concentration: {topSector[0]} ({topSectorPct}% of list)
+                                    </span>
+                                    <span className="text-xs text-amber-600 dark:text-amber-400 ml-2">
+                                        — consider reducing correlated exposure
+                                    </span>
+                                    <div className="mt-1.5 w-full h-1.5 bg-amber-200 dark:bg-amber-800 rounded-full overflow-hidden">
+                                        <div className="h-full bg-amber-500 rounded-full" style={{ width: `${topSectorPct}%` }} />
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
                         {/* Grouped ticker cards */}
                         {grouped(visibleTickers).map(([setupKey, tickers]) => {
                             const setup = SETUP_LABELS[setupKey] || { label: setupKey.replace(/_/g, ' '), emoji: '📌', order: 99 };
@@ -502,40 +700,79 @@ export default function SignalsPage() {
                                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
                                         {tickers.map(t => {
                                             const rescan = rescanMap.get(t.symbol);
+                                            const isExpanded = expandedSymbol === t.symbol;
+                                            const hasLog = t.scoringLog && t.scoringLog.length > 0;
                                             return (
                                                 <div
                                                     key={t.symbol}
-                                                    className={`rounded-xl border p-4 flex flex-col gap-1 cursor-default relative ${scoreBg(t.aiScore)} ${rescan ? 'ring-2 ring-amber-400 dark:ring-amber-500' : ''}`}
-                                                    title={rescan ? `News rescan: ${rescan.rescanReason}` : undefined}
+                                                    className={`rounded-xl border flex flex-col relative ${scoreBg(t.aiScore)} ${rescan ? 'ring-2 ring-amber-400 dark:ring-amber-500' : ''}`}
                                                 >
-                                                    {/* News rescan badge */}
-                                                    {rescan && (
-                                                        <div className="absolute top-2 right-2 bg-amber-400 dark:bg-amber-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded leading-none">
-                                                            📡 LIVE
-                                                        </div>
-                                                    )}
+                                                    {/* Main card body */}
+                                                    <div className="p-4 flex flex-col gap-1">
+                                                        {/* News rescan badge */}
+                                                        {rescan && (
+                                                            <div className="absolute top-2 right-2 bg-amber-400 dark:bg-amber-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded leading-none">
+                                                                📡 LIVE
+                                                            </div>
+                                                        )}
 
-                                                    {/* Symbol + rec badge */}
-                                                    <div className="flex items-start justify-between gap-1">
-                                                        <span className="text-lg font-bold text-gray-900 dark:text-white tracking-wide">
-                                                            {t.symbol}
-                                                        </span>
-                                                        {t.recommendation === 'STRONG BUY' && !rescan && (
-                                                            <span className="text-[10px] font-bold bg-emerald-500 text-white rounded px-1.5 py-0.5 shrink-0">SB</span>
+                                                        {/* Symbol + rec badge */}
+                                                        <div className="flex items-start justify-between gap-1">
+                                                            <span className="text-lg font-bold text-gray-900 dark:text-white tracking-wide">
+                                                                {t.symbol}
+                                                            </span>
+                                                            {t.recommendation === 'STRONG BUY' && !rescan && (
+                                                                <span className="text-[10px] font-bold bg-emerald-500 text-white rounded px-1.5 py-0.5 shrink-0">SB</span>
+                                                            )}
+                                                        </div>
+                                                        {/* Score */}
+                                                        <div className={`text-2xl font-bold ${scoreColor(t.aiScore)}`}>
+                                                            {t.aiScore.toFixed(0)}
+                                                        </div>
+                                                        {/* Sector */}
+                                                        <div className="text-[11px] text-gray-500 dark:text-gray-400 leading-tight truncate" title={t.sector}>
+                                                            {t.sector}
+                                                        </div>
+                                                        {/* Rescan reason snippet */}
+                                                        {rescan && (
+                                                            <div className="text-[10px] text-amber-600 dark:text-amber-400 leading-tight mt-0.5 line-clamp-2">
+                                                                {rescan.rescanReason}
+                                                            </div>
+                                                        )}
+                                                        {/* Why button */}
+                                                        {hasLog && (
+                                                            <button
+                                                                onClick={() => setExpandedSymbol(isExpanded ? null : t.symbol)}
+                                                                className="mt-2 text-[10px] font-semibold text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 dark:hover:text-indigo-200 text-left"
+                                                            >
+                                                                {isExpanded ? '▲ hide' : '? why'}
+                                                            </button>
                                                         )}
                                                     </div>
-                                                    {/* Score */}
-                                                    <div className={`text-2xl font-bold ${scoreColor(t.aiScore)}`}>
-                                                        {t.aiScore.toFixed(0)}
-                                                    </div>
-                                                    {/* Sector */}
-                                                    <div className="text-[11px] text-gray-500 dark:text-gray-400 leading-tight truncate" title={t.sector}>
-                                                        {t.sector}
-                                                    </div>
-                                                    {/* Rescan reason snippet */}
-                                                    {rescan && (
-                                                        <div className="text-[10px] text-amber-600 dark:text-amber-400 leading-tight mt-0.5 line-clamp-2">
-                                                            {rescan.rescanReason}
+
+                                                    {/* Scoring log drawer */}
+                                                    {isExpanded && hasLog && (
+                                                        <div className="border-t border-gray-200 dark:border-gray-700 px-3 py-2 bg-white/60 dark:bg-gray-900/60 rounded-b-xl">
+                                                            {t.entry != null && (
+                                                                <div className="flex gap-3 text-[10px] text-gray-500 mb-1.5 flex-wrap">
+                                                                    <span>Entry <span className="font-semibold text-gray-700 dark:text-gray-300">${t.entry.toFixed(2)}</span></span>
+                                                                    {t.stop != null && <span>Stop <span className="font-semibold text-red-500">${t.stop.toFixed(2)}</span></span>}
+                                                                    {t.target != null && <span>Tgt <span className="font-semibold text-green-600">${t.target.toFixed(2)}</span></span>}
+                                                                    {t.riskReward && <span>R/R <span className="font-semibold text-indigo-600 dark:text-indigo-400">{t.riskReward}</span></span>}
+                                                                </div>
+                                                            )}
+                                                            <ul className="space-y-0.5">
+                                                                {t.scoringLog.map((line, i) => (
+                                                                    <li key={i} className="text-[10px] text-gray-600 dark:text-gray-400 leading-snug">
+                                                                        {line}
+                                                                    </li>
+                                                                ))}
+                                                            </ul>
+                                                            {t.oracleVerdict && (
+                                                                <div className="mt-1.5 text-[10px] font-semibold text-indigo-700 dark:text-indigo-300 italic">
+                                                                    {t.oracleVerdict}
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     )}
                                                 </div>
@@ -549,6 +786,12 @@ export default function SignalsPage() {
                         {visibleTickers.length === 0 && (
                             <div className="text-center py-12 text-gray-400">No tickers match this filter.</div>
                         )}
+
+                        {/* Score bucket calibration */}
+                        <CalibrationPanel base={base} hdrs={hdrs} />
+
+                        {/* Setup family win rate */}
+                        <SetupWinratePanel base={base} hdrs={hdrs} />
 
                         {/* Share text */}
                         <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-700 p-4">

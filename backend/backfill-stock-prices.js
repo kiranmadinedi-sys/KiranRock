@@ -23,7 +23,7 @@ async function upsertPrice(symbol, candle) {
     candle.high,
     candle.low,
     candle.close,
-    candle.volume
+    Math.round(candle.volume) // bigint column — Polygon may return fractional volumes
   ];
   await query(sql, params);
 }

@@ -23,8 +23,13 @@ const { removeStockSymbol } = require('../controllers/stockController');
 router.delete('/symbols/:symbol', removeStockSymbol);
 
 // Real-time quote endpoint — routes through active dataProvider (Alpaca/Yahoo)
-// Index symbols (^GSPC etc.) always fall back to Yahoo with 5-min in-memory cache
-const _indexCache = new Map();
+// Index symbols (^GSPC etc.) use ETF proxies with 15-min cache + stale-while-revalidate
+const _indexCache      = new Map();
+const ETF_MAP          = { '^GSPC': 'SPY', '^IXIC': 'QQQ', '^DJI': 'DIA' };
+const INDEX_MULTIPLIER = { '^GSPC': 10,   '^IXIC': 40,    '^DJI': 76   }; // DIA ≈ DJIA/76
+const INDEX_CACHE_MS   = 15 * 60 * 1000; // 15-min TTL — index values don't need real-time freshness
+const INDEX_FAIL_MS    =  2 * 60 * 1000; // on fetch failure, retry after 2 min to prevent hammering
+
 router.get('/quote/:symbol', noCache, async (req, res) => {
     try {
         const dataProvider = require('../services/dataProvider');
@@ -34,38 +39,46 @@ router.get('/quote/:symbol', noCache, async (req, res) => {
 
         let quote;
         if (isIndex) {
-            // Use cached result for indices (5-min TTL) to avoid Yahoo 429s
             const cached = _indexCache.get(symbol);
-            if (cached && Date.now() - cached.ts < 5 * 60 * 1000) {
+            const cacheTTL = cached?.isFail ? INDEX_FAIL_MS : INDEX_CACHE_MS;
+            if (cached && (Date.now() - cached.ts) < cacheTTL) {
                 return res.json(cached.data);
             }
 
-            // Map index symbols to Alpaca-tradeable ETF proxies for price data
-            // ^GSPC → SPY, ^IXIC → QQQ, ^DJI → DIA
-            const ETF_MAP = { '^GSPC': 'SPY', '^IXIC': 'QQQ', '^DJI': 'DIA' };
             const etfSymbol = ETF_MAP[symbol];
-
             let data;
+            let fetchFailed = false;
+
             if (etfSymbol) {
-                // Fetch ETF price from Alpaca (real-time) and scale to index level
-                const INDEX_MULTIPLIER = { '^GSPC': 10, '^IXIC': 40, '^DJI': 76 }; // DIA ≈ DJIA/76
-                const mult = INDEX_MULTIPLIER[symbol] || 1;
-                const q = await dataProvider.getQuote(etfSymbol);
-                data = {
-                    symbol,
-                    regularMarketPrice:         q.price           * mult,
-                    regularMarketChange:        q.change          * mult,
-                    regularMarketChangePercent: q.changePercent,
-                    regularMarketVolume:        q.volume,
-                    marketCap:                  0,
-                    provider:                   `alpaca-via-${etfSymbol}`
-                };
+                // Fetch ETF proxy with a hard 5-second timeout.
+                // Without this, a failing Polygon/Yahoo call hangs for 11+ seconds (3-retry backoff).
+                try {
+                    const mult = INDEX_MULTIPLIER[symbol] || 1;
+                    const q = await Promise.race([
+                        dataProvider.getQuote(etfSymbol),
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('index-timeout')), 5000))
+                    ]);
+                    data = {
+                        symbol,
+                        regularMarketPrice:         q.price           * mult,
+                        regularMarketChange:        q.change          * mult,
+                        regularMarketChangePercent: q.changePercent,
+                        regularMarketVolume:        q.volume,
+                        marketCap:                  0,
+                        provider:                   `etf-proxy-${etfSymbol}`
+                    };
+                } catch {
+                    fetchFailed = true;
+                    // Serve stale cache on failure rather than a blank 500
+                    if (cached) return res.json(cached.data);
+                    data = { symbol, regularMarketPrice: 0, regularMarketChange: 0, regularMarketChangePercent: 0, provider: 'unavailable' };
+                }
             } else {
-                // Unknown index — try Yahoo with timeout
+                // Unknown index — try Yahoo with a 3-second timeout (single attempt, no retry cascade)
                 try {
                     const yq = await Promise.race([
                         yfClient._raw.quote(symbol),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
+                        new Promise((_, reject) => setTimeout(() => reject(new Error('index-timeout')), 3000))
                     ]);
                     data = {
                         symbol,
@@ -77,10 +90,13 @@ router.get('/quote/:symbol', noCache, async (req, res) => {
                         provider:                   'yahoo'
                     };
                 } catch {
+                    fetchFailed = true;
+                    if (cached) return res.json(cached.data);
                     data = { symbol, regularMarketPrice: 0, regularMarketChange: 0, regularMarketChangePercent: 0, provider: 'unavailable' };
                 }
             }
-            _indexCache.set(symbol, { data, ts: Date.now() });
+            // isFail=true uses INDEX_FAIL_MS TTL (2 min) to retry sooner; success uses INDEX_CACHE_MS (15 min)
+            _indexCache.set(symbol, { data, ts: Date.now(), isFail: fetchFailed });
             return res.json(data);
         }
 

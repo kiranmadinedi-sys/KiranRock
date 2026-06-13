@@ -1,12 +1,13 @@
 /**
  * Asset Universe Scheduler
  * =========================
- * Four-layer refresh schedule (all times ET):
+ * Five-layer refresh schedule (all times ET):
  *
  *   ① 5:30 PM  Mon–Fri  (After-close) — incremental OHLCV refresh for all 244 static symbols → feeds Ollama DB-enriched verdicts
  *   ② 8:00 PM  Mon–Fri  (Evening)     — full Alpaca refresh + rebuild daily universe
- *   ③ 7:30 AM  Mon–Fri  (Pre-market)  — add premarket movers to daily universe
- *   ④ Every 5 min during market hours — intraday dynamic symbol additions
+ *   ③ 8:00 AM  Mon–Fri  (Morning)     — catch-up AI scan using prior-day close data (fills gaps if nightly scan was partial)
+ *   ④ 7:30 AM  Mon–Fri  (Pre-market)  — add premarket movers to daily universe
+ *   ⑤ Every 5 min during market hours — intraday dynamic symbol additions
  *
  * Purely additive — safe to start/stop at any time without affecting
  * the existing trading bot, signal scheduler, or news monitor.
@@ -23,6 +24,7 @@ const dynamicUniverseService = require('./dynamicUniverseService');
 let schedulerActive         = false;
 let afterCloseJob           = null;
 let eveningJob              = null;
+let morningCatchupJob       = null;
 let premarketJob            = null;
 let dynamicUniverseJob      = null;
 let intradayJob             = null;
@@ -31,6 +33,7 @@ let intradayMoverJob        = null;
 // ── Cron schedules (all ET via CRON_TZ) ──────────────────────────────────────
 const AFTERCLOSE_CRON        = '30 17 * * 1-5'; // 5:30 PM — after NYSE close + 30 min data settle
 const EVENING_CRON           = '0 20 * * 1-5';
+const MORNING_CATCHUP_CRON   = '0 8 * * 1-5';  // 8:00 AM — catch-up if prior-night scan was incomplete
 const PREMARKET_CRON         = '30 7 * * 1-5';
 const DYNAMIC_UNIVERSE_CRON  = '45 8 * * 1-5'; // 8:45 AM — build scan universe before 9:30 open
 const INTRADAY_CRON          = '*/5 9-16 * * 1-5'; // every 5 min, 9 AM–4 PM
@@ -171,6 +174,52 @@ async function runIntradayMoversRefresh() {
     }
 }
 
+// ── Morning catch-up scan (8:00 AM ET Mon–Fri) ───────────────────────────────
+// If last night's AI scan was incomplete (partial crash / server restart),
+// this fills the gap using prior-day close data so the bot has a full
+// scored universe before the 9:30 AM market open.
+const CATCHUP_THRESHOLD = 420; // same as enhancedAIScheduler — ~92% of 455
+
+async function runMorningCatchupScan() {
+    const { query } = require('../config/database');
+    try {
+        // Use the most recent scan date within 4 days — NOT CURRENT_DATE.
+        // The nightly scan stores rows with the date it ran (e.g. Jun 11 evening → analysis_date=Jun 11).
+        // On Jun 12 morning, CURRENT_DATE=Jun 12 would always find 0 rows and re-run needlessly.
+        const { rows } = await query(
+            `SELECT COUNT(*) AS cnt
+             FROM daily_universe_analysis
+             WHERE analysis_date = (
+                 SELECT MAX(analysis_date)
+                 FROM daily_universe_analysis
+                 WHERE analysis_date >= CURRENT_DATE - INTERVAL '4 days'
+                   AND analysis_date <= CURRENT_DATE
+             )
+             AND ai_score IS NOT NULL`
+        );
+        const todayCount = parseInt(rows[0]?.cnt ?? 0);
+        if (todayCount >= CATCHUP_THRESHOLD) {
+            logger.info('[AssetUniverseScheduler] Morning catch-up: scan already complete', { count: todayCount });
+            return;
+        }
+        logger.info('[AssetUniverseScheduler] Morning catch-up: nightly scan incomplete, resuming', {
+            done: todayCount, remaining: CATCHUP_THRESHOLD - todayCount
+        });
+        const nightlyScanSvc = require('./nightlyUniverseScanService');
+        if (nightlyScanSvc.isScanRunning()) {
+            logger.info('[AssetUniverseScheduler] Morning catch-up: scan already running, skipping');
+            return;
+        }
+        nightlyScanSvc.runNightlyUniverseScan({ missingOnly: todayCount > 0 })
+            .then(r => r && logger.info('[AssetUniverseScheduler] Morning catch-up done', {
+                analyzed: r.analyzed, passed: r.passed, failed: r.failed, elapsedMin: r.elapsedMin
+            }))
+            .catch(err => logger.error('[AssetUniverseScheduler] Morning catch-up error', { error: err.message }));
+    } catch (err) {
+        logger.error('[AssetUniverseScheduler] Morning catch-up check failed', { error: err.message });
+    }
+}
+
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 function startAssetUniverseScheduler() {
@@ -182,6 +231,7 @@ function startAssetUniverseScheduler() {
 
     afterCloseJob      = cron.schedule(AFTERCLOSE_CRON,        runAfterCloseOhlcvRefresh,  CRON_TZ);
     eveningJob         = cron.schedule(EVENING_CRON,           runEveningRefresh,          CRON_TZ);
+    morningCatchupJob  = cron.schedule(MORNING_CATCHUP_CRON,   runMorningCatchupScan,      CRON_TZ);
     premarketJob       = cron.schedule(PREMARKET_CRON,         runPremarketRefresh,        CRON_TZ);
     dynamicUniverseJob = cron.schedule(DYNAMIC_UNIVERSE_CRON,  runDynamicUniverseBuild,    CRON_TZ);
     intradayJob        = cron.schedule(INTRADAY_CRON,          runIntradayDiscovery,       CRON_TZ);
@@ -190,6 +240,7 @@ function startAssetUniverseScheduler() {
     logger.info('[AssetUniverseScheduler] Started', {
         afterClose:       AFTERCLOSE_CRON,
         evening:          EVENING_CRON,
+        morningCatchup:   MORNING_CATCHUP_CRON,
         premarket:        PREMARKET_CRON,
         dynamicUniverse:  DYNAMIC_UNIVERSE_CRON,
         intraday:         INTRADAY_CRON,
@@ -216,9 +267,9 @@ function startAssetUniverseScheduler() {
 
 function stopAssetUniverseScheduler() {
     schedulerActive = false;
-    [afterCloseJob, eveningJob, premarketJob, dynamicUniverseJob, intradayJob, intradayMoverJob]
+    [afterCloseJob, eveningJob, morningCatchupJob, premarketJob, dynamicUniverseJob, intradayJob, intradayMoverJob]
         .forEach(j => j?.stop());
-    afterCloseJob = eveningJob = premarketJob = intradayJob = intradayMoverJob = null;
+    afterCloseJob = eveningJob = morningCatchupJob = premarketJob = intradayJob = intradayMoverJob = null;
     logger.info('[AssetUniverseScheduler] Stopped');
 }
 

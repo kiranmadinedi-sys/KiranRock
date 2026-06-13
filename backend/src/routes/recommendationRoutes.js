@@ -4,6 +4,7 @@ const { protect } = require('../middleware/authMiddleware');
 const { generatePersonalizedRecommendations } = require('../services/recommendationService');
 const { getWeeklyPredictions } = require('../services/weeklyPredictionService');
 const { query } = require('../config/database');
+const { enrichWithMarketHours, getETContext } = require('../services/marketHoursEnrichmentService');
 
 /**
  * Load predictions from the nightly PANTHEON scan (daily_universe_analysis).
@@ -23,12 +24,20 @@ async function loadPredictionsFromNightlyScan(limit = 500) {
         )`;
 
         const res = await query(
-            `SELECT symbol, ai_score, recommendation, sector, setup_family,
-                    market_cap, metadata, analysis_date
-             FROM daily_universe_analysis
-             WHERE analysis_date = ${LATEST_DATE}
-               AND ai_score IS NOT NULL
-             ORDER BY ai_score DESC
+            `SELECT
+                d.symbol,
+                COALESCE(l.ai_score,       d.ai_score)       AS ai_score,
+                COALESCE(l.recommendation, d.recommendation)  AS recommendation,
+                d.sector, d.setup_family, d.market_cap, d.metadata, d.analysis_date,
+                l.live_scored_at
+             FROM daily_universe_analysis d
+             LEFT JOIN live_score_cache l
+               ON l.symbol    = d.symbol
+              AND l.scan_date  = d.analysis_date
+              AND l.live_scored_at > NOW() - INTERVAL '10 minutes'
+             WHERE d.analysis_date = ${LATEST_DATE}
+               AND d.ai_score IS NOT NULL
+             ORDER BY COALESCE(l.ai_score, d.ai_score) DESC
              LIMIT $1`,
             [limit]
         );
@@ -99,17 +108,18 @@ async function loadPredictionsFromNightlyScan(limit = 500) {
             const currentPrice = parseFloat(meta.price) || 0;
 
             return {
-                symbol:     row.symbol,
-                totalScore: Math.round(score),
+                symbol:        row.symbol,
+                totalScore:    Math.round(score),
                 adjustedScore,
                 rewardRiskRatio: Math.round(rewardRiskRatio * 10) / 10,
-                tier:       score >= 90 ? 'S' : score >= 80 ? 'A' : score >= 70 ? 'B' : 'C',
+                tier:          score >= 90 ? 'S' : score >= 80 ? 'A' : score >= 70 ? 'B' : 'C',
                 sector,
-                marketCap:  parseFloat(row.market_cap) || meta.marketCap || null,
-                currentPrice: currentPrice ? currentPrice.toFixed(2) : null,
+                marketCap:     parseFloat(row.market_cap) || meta.marketCap || null,
+                currentPrice:  currentPrice ? currentPrice.toFixed(2) : null,
                 priceChange1w: null,
-                scanDate:   row.analysis_date,
-                _source:    'nightly_scan',
+                scanDate:      row.analysis_date,
+                liveScoredAt:  row.live_scored_at || null,
+                _source:       'nightly_scan',
 
                 componentScores: {
                     ai:          Math.round(score),
@@ -212,7 +222,13 @@ router.get('/', protect, async (req, res) => {
             }
         );
 
-        res.json({ ...recommendations, dataSource });
+        // Enrich top recommendations with live prices + entry assessment during market hours
+        const { isOpen } = getETContext();
+        if (isOpen && recommendations.recommendations?.length) {
+            await enrichWithMarketHours(recommendations.recommendations);
+        }
+
+        res.json({ ...recommendations, dataSource, marketHoursEnriched: isOpen });
 
     } catch (error) {
         console.error('[Recommendations] Error:', error);
@@ -247,10 +263,19 @@ router.get('/quick', protect, async (req, res) => {
             { maxRecommendations: 5, riskTolerance: riskTolerance.toLowerCase() }
         );
 
+        const top5 = recommendations.recommendations.slice(0, 5);
+
+        // Enrich with live data during market hours
+        const { isOpen } = getETContext();
+        if (isOpen && top5.length) {
+            await enrichWithMarketHours(top5);
+        }
+
         res.json({
-            recommendations: recommendations.recommendations.slice(0, 5),
+            recommendations: top5,
             summary: recommendations.summary,
-            riskProfile: recommendations.riskProfile
+            riskProfile: recommendations.riskProfile,
+            marketHoursEnriched: isOpen
         });
 
     } catch (error) {

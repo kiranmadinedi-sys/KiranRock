@@ -3,7 +3,7 @@ const router  = express.Router();
 const { triggerDataIngestion, triggerMonthlyReport } = require('../controllers/systemController');
 const { protect } = require('../middleware/authMiddleware');
 const { query }   = require('../config/database');
-const { checkLiveReadiness } = require('../services/liveReadinessService');
+const { checkLiveReadiness, acknowledgeBlockers } = require('../services/liveReadinessService');
 
 router.post('/ingest-history',      protect, triggerDataIngestion);
 router.post('/send-monthly-report', protect, triggerMonthlyReport);
@@ -180,6 +180,34 @@ router.get('/live-readiness', protect, async (req, res) => {
             advisory:       result.advisory,
             liveReady:      result.ready,
             reason:         result.reason
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * POST /api/system/sentinel/acknowledge-blockers
+ *
+ * Operational procedure: after a known bug is fixed, call this endpoint to
+ * acknowledge all current SENTINEL blockers so the bot can resume trading.
+ * Does NOT delete audit records — just marks them acknowledged.
+ *
+ * Body (optional): { "reason": "brokerService crash fixed 2026-06-04" }
+ */
+router.post('/sentinel/acknowledge-blockers', protect, async (req, res) => {
+    try {
+        const userId = String(req.user?.id);
+        const reason = req.body?.reason || 'Acknowledged by operator via API';
+        const result = await acknowledgeBlockers(userId, reason);
+
+        // Verify SENTINEL now passes
+        const readiness = await checkLiveReadiness(userId);
+        res.json({
+            acknowledged:            result,
+            sentinelReady:           readiness.ready,
+            remainingBlockers:       readiness.blockers,
+            reason:                  readiness.reason,
         });
     } catch (err) {
         res.status(500).json({ error: err.message });

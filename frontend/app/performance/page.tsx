@@ -199,6 +199,97 @@ interface ExitReasonRow  { reason: string; total: number; wins: number; winRate:
 interface ScoreBucketRow { bucket: string; total: number; wins: number; winRate: number; avgReturn: number; totalPnl: number; }
 interface HypothesisData { days: number; byHoldPeriod: HoldPeriodRow[]; byExitReason: ExitReasonRow[]; byScoreBucket: ScoreBucketRow[]; }
 
+interface WeeklyReportPosition {
+    symbol: string; sector: string; qty: number; entryPrice: number; currentPrice: number;
+    gainLoss: number; gainLossPct: number; stockReturn: number | null; alpha: number | null; since: string;
+}
+interface WeeklyReportTrade {
+    symbol: string; price: number; quantity: number; pnl: number; pnlPct: number;
+    aiScore: number | null; sector: string; date: string; executor?: string;
+}
+interface WeeklyReportData {
+    weekDates: string; weekStart: string; weekEnd: string; generatedAt?: string;
+    summary: {
+        totalBuys: number; totalSells: number; totalTrades: number;
+        realizedPnl: number; unrealizedPnl: number; cashBalance: number;
+        openPositions: number; winRate: number; wins: number; losses: number;
+        avgWin: number; avgLoss: number; profitFactor: number | null;
+        bestTrade: { symbol: string; pnl: number; pct: number } | null;
+        worstTrade: { symbol: string; pnl: number; pct: number } | null;
+    };
+    marketContext: { spy: number | null; qqq: number | null; iwm: number | null };
+    alphaCapture: { avgAlpha: number | null; beatingSpyCount: number; totalPositions: number; spyWeeklyReturn: number | null };
+    closedTrades: WeeklyReportTrade[];
+    newBuys: WeeklyReportTrade[];
+    openPositions: WeeklyReportPosition[];
+    scoreBuckets: ScoreBucketRow[];
+    insights: string[];
+}
+interface WeeklyReportHistoryEntry {
+    id: number; weekStart: string; weekEnd: string; generatedAt: string;
+    summary: WeeklyReportData['summary'];
+}
+
+// ── Trade Attribution ────────────────────────────────────────────────────────
+interface TradeAttributionTrade {
+    id: number;
+    symbol: string;
+    score: number | null;
+    confidence: number | null;
+    regime: string | null;
+    setupFamily: string | null;
+    strategyFamily: string | null;
+    outcome: string | null;
+    entryPrice: number | null;
+    exitPrice: number | null;
+    pnl: number | null;
+    pnlPct: number | null;
+    openedAt: string | null;
+    closedAt: string | null;
+    holdDays: number | null;
+    sector: string | null;
+    exitReason: string | null;
+    winLossReason: string | null;
+    atrPct: number | null;
+    dteAtEntry: number | null;
+    dteAtExit: number | null;
+    bullBearRatio: number | null;
+    autoTags: string[];
+    postExitDrift5d: number | null;
+    postExitDrift10d: number | null;
+}
+interface TradeAttributionAgg {
+    bucket: string;
+    total: number;
+    wins: number;
+    winRate: number;
+    avgReturn: number;
+    totalPnl: number;
+    avgWin: number;
+    avgLoss: number;
+    avgWinPct: number;
+    avgLossPct: number;
+    expectancyPct: number;
+    // only present on byExit rows (Exit Quality Dashboard)
+    avgDrift5d?: number | null;
+    avgDrift10d?: number | null;
+    driftSampleCount?: number;
+}
+interface TradeAttributionData {
+    days: number;
+    filters: { symbol: string | null; sector: string | null; outcome: string | null };
+    totalClosed: number;
+    postExitSummary: { avgDrift5d: number | null; avgDrift10d: number | null; tradesWithDriftData: number };
+    trades: TradeAttributionTrade[];
+    byScore: TradeAttributionAgg[];
+    byConfidence: TradeAttributionAgg[];
+    bySector: TradeAttributionAgg[];
+    byRegime: TradeAttributionAgg[];
+    byExit: TradeAttributionAgg[];
+    byHold: TradeAttributionAgg[];
+    byOutcome: TradeAttributionAgg[];
+}
+
 interface CalibrationBucket {
     bucket: string; floor: number; total: number; wins: number; losses: number;
     profitFactor: number; expectancy: number; avgReturn: number; winRate: number;
@@ -208,11 +299,20 @@ interface CalibrationExitRow {
     exitType: string; total: number; profitFactor: number; expectancy: number;
     avgReturn: number; winRate: number; maxDrawdown: number; avgHoldDays: number | null; valid: boolean;
 }
+interface CalibrationConfidenceBucket {
+    bucket: string; total: number; wins: number; losses: number;
+    winRate: number; avgReturn: number; profitFactor: number; expectancy: number; valid: boolean;
+}
+interface CalibrationSectorInsight {
+    sector: string; total: number; winRate: number; profitFactor: number; suggestedFloor: number | null;
+}
 interface CalibrationReport {
     generatedAt: string; lookbackDays: number; totalTrades: number;
     hasEnoughData: boolean; suggestedFloor: number | null; reason: string; confidence: string;
     buckets: CalibrationBucket[];
     exitAttribution: CalibrationExitRow[] | null;
+    confidenceBuckets: CalibrationConfidenceBucket[] | null;
+    sectorInsights: CalibrationSectorInsight[];
     scoreRatioCross: Array<{ scoreBucket: string; ratioBucket: string; total: number; profitFactor: number; avgReturn: number; winRate: number; valid: boolean; }> | null;
 }
 
@@ -383,6 +483,16 @@ export default function PerformancePage() {
     const [calibrationApplied, setCalibrationApplied] = useState(false);
     const [calibrationError, setCalibrationError] = useState<string | null>(null);
     const [currentMinBuyScore, setCurrentMinBuyScore] = useState<number | null>(null);
+    const [weeklyReport, setWeeklyReport] = useState<WeeklyReportData | null>(null);
+    const [weeklyReportHistory, setWeeklyReportHistory] = useState<WeeklyReportHistoryEntry[]>([]);
+    const [weeklyReportLoading, setWeeklyReportLoading] = useState(false);
+    const [weeklyReportGenerating, setWeeklyReportGenerating] = useState(false);
+    const [selectedReportId, setSelectedReportId] = useState<number | null>(null);
+    const [tradeAttribution, setTradeAttribution] = useState<TradeAttributionData | null>(null);
+    const [tradeAttributionLoading, setTradeAttributionLoading] = useState(false);
+    const [tradeAttributionDays, setTradeAttributionDays] = useState(180);
+    const [tradeAttributionOutcome, setTradeAttributionOutcome] = useState('');
+    const [tradeAttributionTab, setTradeAttributionTab] = useState<'trades' | 'byScore' | 'byConfidence' | 'bySector' | 'byRegime' | 'byExit' | 'byHold'>('byScore');
 
     const token = typeof window !== 'undefined' ? getAuthToken() : null;
 
@@ -397,12 +507,14 @@ export default function PerformancePage() {
             });
             if (intelligenceBotType !== 'all') intelligenceParams.set('botType', intelligenceBotType);
             if (intelligenceRegime !== 'all') intelligenceParams.set('regime', intelligenceRegime);
-            const [sRes, hRes, iRes, aRes, hyRes] = await Promise.all([
+            const [sRes, hRes, iRes, aRes, hyRes, wrRes, wrhRes] = await Promise.all([
                 fetch(`${base}/api/performance/scorecard`, { headers: hdrs }),
                 fetch(`${base}/api/performance/history?days=${days}`, { headers: hdrs }),
                 fetch(`${base}/api/performance/intelligence?${intelligenceParams.toString()}`, { headers: hdrs }),
                 fetch(`${base}/api/performance/attribution?days=${intelligenceDays}`, { headers: hdrs }),
-                fetch(`${base}/api/performance/hypothesis?days=${intelligenceDays}`, { headers: hdrs })
+                fetch(`${base}/api/performance/hypothesis?days=${intelligenceDays}`, { headers: hdrs }),
+                fetch(`${base}/api/performance/trading-report`, { headers: hdrs }),
+                fetch(`${base}/api/performance/trading-report/history?limit=12`, { headers: hdrs }),
             ]);
             if ([sRes, hRes, iRes, aRes, hyRes].some(r => r.status === 401)) { handleAuthError(401); return; }
             if (sRes.ok) setScorecard(await sRes.json());
@@ -410,6 +522,15 @@ export default function PerformancePage() {
             if (iRes.ok) setIntelligence(await iRes.json());
             if (aRes.ok) setAttribution(await aRes.json());
             if (hyRes.ok) setHypothesis(await hyRes.json());
+            if (wrRes.ok) setWeeklyReport(await wrRes.json());
+            if (wrhRes.ok) setWeeklyReportHistory(await wrhRes.json());
+            // Trade attribution — fire separately so it doesn't block the main load
+            setTradeAttributionLoading(true);
+            fetch(`${base}/api/performance/trade-attribution?days=365`, { headers: hdrs })
+                .then(r => r.ok ? r.json() : null)
+                .then(d => { if (d) setTradeAttribution(d); })
+                .catch(() => {})
+                .finally(() => setTradeAttributionLoading(false));
         } catch (e) {
             console.error('Performance load error', e);
         } finally {
@@ -418,6 +539,21 @@ export default function PerformancePage() {
     }, [token, days, intelligenceDays, intelligenceBotType, intelligenceRegime, router]);
 
     useEffect(() => { load(); }, [load]);
+
+    const loadTradeAttribution = useCallback(async (days: number, outcome: string) => {
+        if (!token) return;
+        setTradeAttributionLoading(true);
+        try {
+            const base = getApiBaseUrl();
+            const params = new URLSearchParams({ days: String(days) });
+            if (outcome) params.set('outcome', outcome);
+            const r = await fetch(`${base}/api/performance/trade-attribution?${params.toString()}`, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            if (r.ok) setTradeAttribution(await r.json());
+        } catch (_) {}
+        finally { setTradeAttributionLoading(false); }
+    }, [token]);
 
     const openCalibrationModal = useCallback(async () => {
         setShowCalibrationModal(true);
@@ -731,6 +867,485 @@ export default function PerformancePage() {
                                     <span>52% go-live threshold</span>
                                 </div>
                             </div>
+                        </div>
+
+                        {/* ── Weekly Trading Report ── */}
+                        <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+                            <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                                <div>
+                                    <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Weekly Trading Report</h3>
+                                    {weeklyReport && (
+                                        <p className="text-xs text-gray-400 mt-0.5">
+                                            {weeklyReport.weekDates}
+                                            {weeklyReport.generatedAt && ` · Generated ${new Date(weeklyReport.generatedAt).toLocaleDateString()}`}
+                                        </p>
+                                    )}
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    {weeklyReportHistory.length > 1 && (
+                                        <select
+                                            value={selectedReportId ?? ''}
+                                            onChange={async (e) => {
+                                                const id = Number(e.target.value);
+                                                if (!id) { setSelectedReportId(null); return; }
+                                                setSelectedReportId(id);
+                                                setWeeklyReportLoading(true);
+                                                try {
+                                                    const base = getApiBaseUrl();
+                                                    const r = await fetch(`${base}/api/performance/trading-report/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+                                                    if (r.ok) setWeeklyReport(await r.json());
+                                                } finally { setWeeklyReportLoading(false); }
+                                            }}
+                                            className="text-xs border border-gray-300 rounded-lg px-2 py-1 bg-white dark:bg-gray-800 dark:border-gray-600 dark:text-white"
+                                        >
+                                            <option value="">Latest</option>
+                                            {weeklyReportHistory.map(h => (
+                                                <option key={h.id} value={h.id}>{h.weekStart} — {h.weekEnd}</option>
+                                            ))}
+                                        </select>
+                                    )}
+                                    <button
+                                        onClick={async () => {
+                                            setWeeklyReportGenerating(true);
+                                            try {
+                                                const base = getApiBaseUrl();
+                                                const r = await fetch(`${base}/api/performance/trading-report/generate`, {
+                                                    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+                                                });
+                                                if (r.ok) { const d = await r.json(); if (d.report) setWeeklyReport(d.report); }
+                                            } finally { setWeeklyReportGenerating(false); }
+                                        }}
+                                        disabled={weeklyReportGenerating}
+                                        className="text-xs px-3 py-1 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg transition-colors"
+                                    >
+                                        {weeklyReportGenerating ? 'Generating…' : 'Regenerate'}
+                                    </button>
+                                </div>
+                            </div>
+
+                            {weeklyReportLoading ? (
+                                <div className="p-8 text-center"><div className="animate-spin w-6 h-6 border-4 border-indigo-600 border-t-transparent rounded-full mx-auto" /></div>
+                            ) : !weeklyReport ? (
+                                <div className="p-8 text-center text-gray-400 text-sm">No weekly report yet. Reports are auto-generated every Friday at 3:45 PM ET.</div>
+                            ) : (
+                                <div className="p-4 space-y-4">
+                                    {/* Summary row */}
+                                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                        {[
+                                            { label: 'Realized P&L', value: fmtUsd(weeklyReport.summary.realizedPnl), color: pnlColor(weeklyReport.summary.realizedPnl) },
+                                            { label: 'Win Rate', value: `${weeklyReport.summary.winRate}%`, color: weeklyReport.summary.winRate >= 50 ? 'text-green-600' : 'text-red-600' },
+                                            { label: 'Profit Factor', value: weeklyReport.summary.profitFactor != null ? weeklyReport.summary.profitFactor.toFixed(2) + 'x' : '—', color: (weeklyReport.summary.profitFactor ?? 0) >= 1 ? 'text-green-600' : 'text-red-600' },
+                                            { label: 'Open Positions', value: String(weeklyReport.summary.openPositions), color: 'text-gray-900 dark:text-white' },
+                                        ].map(k => (
+                                            <div key={k.label} className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3">
+                                                <div className="text-xs text-gray-500 uppercase font-semibold tracking-wide mb-1">{k.label}</div>
+                                                <div className={`text-lg font-bold ${k.color}`}>{k.value}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+
+                                    {/* Market context + Alpha */}
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                        <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3">
+                                            <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Market Context (Week)</div>
+                                            <div className="flex gap-4 text-sm">
+                                                {(['spy', 'qqq', 'iwm'] as const).map(sym => (
+                                                    <div key={sym}>
+                                                        <span className="text-gray-500 uppercase text-xs">{sym} </span>
+                                                        <span className={`font-bold ${pnlColor(weeklyReport.marketContext[sym])}`}>
+                                                            {weeklyReport.marketContext[sym] != null ? `${weeklyReport.marketContext[sym]! >= 0 ? '+' : ''}${weeklyReport.marketContext[sym]!.toFixed(2)}%` : '—'}
+                                                        </span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                        <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3">
+                                            <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Alpha vs SPY</div>
+                                            <div className="text-sm space-y-1">
+                                                <div>
+                                                    <span className="text-gray-500">Avg alpha: </span>
+                                                    <span className={`font-bold ${pnlColor(weeklyReport.alphaCapture.avgAlpha)}`}>
+                                                        {weeklyReport.alphaCapture.avgAlpha != null ? `${weeklyReport.alphaCapture.avgAlpha >= 0 ? '+' : ''}${weeklyReport.alphaCapture.avgAlpha.toFixed(2)}%` : '—'}
+                                                    </span>
+                                                </div>
+                                                <div className="text-gray-500">
+                                                    {weeklyReport.alphaCapture.beatingSpyCount} of {weeklyReport.alphaCapture.totalPositions} positions beating SPY
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Insights */}
+                                    {weeklyReport.insights.length > 0 && (
+                                        <div className="bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-700 rounded-lg p-3">
+                                            <div className="text-xs font-semibold text-indigo-700 dark:text-indigo-300 uppercase tracking-wide mb-2">Key Insights</div>
+                                            <ul className="space-y-1">
+                                                {weeklyReport.insights.map((ins, i) => (
+                                                    <li key={i} className="text-sm text-indigo-800 dark:text-indigo-200 flex gap-2">
+                                                        <span className="shrink-0 text-indigo-400">•</span>{ins}
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        </div>
+                                    )}
+
+                                    {/* Closed trades + Score buckets in 2 cols */}
+                                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                        {/* Closed trades */}
+                                        {weeklyReport.closedTrades.length > 0 && (
+                                            <div>
+                                                <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Closed Trades ({weeklyReport.closedTrades.length})</div>
+                                                <div className="overflow-x-auto">
+                                                    <table className="w-full text-xs">
+                                                        <thead>
+                                                            <tr className="text-gray-400 border-b border-gray-100 dark:border-gray-700">
+                                                                <th className="text-left py-1 pr-2">Symbol</th>
+                                                                <th className="text-left py-1 pr-2">Sector</th>
+                                                                <th className="text-right py-1 pr-2">Price</th>
+                                                                <th className="text-right py-1 pr-2">P&L</th>
+                                                                <th className="text-right py-1 pr-2">Score</th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            {weeklyReport.closedTrades.map((t, i) => (
+                                                                <tr key={i} className="border-b border-gray-50 dark:border-gray-800">
+                                                                    <td className="py-1 pr-2 font-semibold text-gray-900 dark:text-white">{t.symbol}</td>
+                                                                    <td className="py-1 pr-2 text-gray-500">{t.sector}</td>
+                                                                    <td className="py-1 pr-2 text-right text-gray-600">${t.price.toFixed(2)}</td>
+                                                                    <td className={`py-1 pr-2 text-right font-semibold ${pnlColor(t.pnl)}`}>{fmtUsd(t.pnl)} ({t.pnlPct >= 0 ? '+' : ''}{t.pnlPct.toFixed(1)}%)</td>
+                                                                    <td className="py-1 pr-2 text-right text-gray-500">{t.aiScore ?? '—'}</td>
+                                                                </tr>
+                                                            ))}
+                                                        </tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Score buckets */}
+                                        {weeklyReport.scoreBuckets.length > 0 && (
+                                            <div>
+                                                <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Score Bucket Performance (All-Time)</div>
+                                                <div className="space-y-2">
+                                                    {weeklyReport.scoreBuckets.map(b => (
+                                                        <div key={b.bucket} className="flex items-center gap-2">
+                                                            <span className="text-xs font-mono text-gray-600 dark:text-gray-400 w-16 shrink-0">{b.bucket}</span>
+                                                            <div className="flex-1 bg-gray-100 dark:bg-gray-700 rounded-full h-2 overflow-hidden">
+                                                                <div className="h-2 rounded-full bg-indigo-500" style={{ width: `${b.winRate}%` }} />
+                                                            </div>
+                                                            <span className={`text-xs font-bold w-10 text-right ${b.winRate >= 50 ? 'text-green-600' : 'text-red-600'}`}>{b.winRate}%</span>
+                                                            <span className="text-xs text-gray-400">n={b.total}</span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    {/* Open positions with alpha */}
+                                    {weeklyReport.openPositions.length > 0 && (
+                                        <div>
+                                            <div className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Open Positions — Alpha vs SPY</div>
+                                            <div className="overflow-x-auto">
+                                                <table className="w-full text-xs">
+                                                    <thead>
+                                                        <tr className="text-gray-400 border-b border-gray-100 dark:border-gray-700">
+                                                            <th className="text-left py-1 pr-2">Symbol</th>
+                                                            <th className="text-left py-1 pr-2">Sector</th>
+                                                            <th className="text-right py-1 pr-2">Entry</th>
+                                                            <th className="text-right py-1 pr-2">Current</th>
+                                                            <th className="text-right py-1 pr-2">Return</th>
+                                                            <th className="text-right py-1 pr-2">Alpha vs SPY</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {weeklyReport.openPositions.map((p, i) => (
+                                                            <tr key={i} className="border-b border-gray-50 dark:border-gray-800">
+                                                                <td className="py-1 pr-2 font-semibold text-gray-900 dark:text-white">{p.symbol}</td>
+                                                                <td className="py-1 pr-2 text-gray-500">{p.sector}</td>
+                                                                <td className="py-1 pr-2 text-right text-gray-600">${p.entryPrice.toFixed(2)}</td>
+                                                                <td className="py-1 pr-2 text-right text-gray-600">${p.currentPrice.toFixed(2)}</td>
+                                                                <td className={`py-1 pr-2 text-right font-semibold ${pnlColor(p.gainLossPct)}`}>
+                                                                    {p.gainLossPct >= 0 ? '+' : ''}{p.gainLossPct.toFixed(1)}%
+                                                                </td>
+                                                                <td className={`py-1 pr-2 text-right font-bold ${p.alpha == null ? 'text-gray-400' : pnlColor(p.alpha)}`}>
+                                                                    {p.alpha != null ? `${p.alpha >= 0 ? '+' : ''}${p.alpha.toFixed(2)}%` : '—'}
+                                                                </td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* ── Trade Attribution ─────────────────────────────────────────────── */}
+                        <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+                            <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                                <div>
+                                    <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300">Trade Attribution</h3>
+                                    <p className="text-xs text-gray-400 mt-0.5">Why trades won or lost — by score, sector, regime, hold period, exit reason</p>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <select
+                                        value={tradeAttributionOutcome}
+                                        onChange={e => {
+                                            setTradeAttributionOutcome(e.target.value);
+                                            loadTradeAttribution(tradeAttributionDays, e.target.value);
+                                        }}
+                                        className="text-xs border border-gray-300 rounded-lg px-2 py-1 bg-white dark:bg-gray-800 dark:border-gray-600 dark:text-white"
+                                    >
+                                        <option value="">All outcomes</option>
+                                        <option value="win">Wins only</option>
+                                        <option value="loss">Losses only</option>
+                                        <option value="breakeven">Breakeven</option>
+                                    </select>
+                                    <select
+                                        value={tradeAttributionDays}
+                                        onChange={e => {
+                                            const d = Number(e.target.value);
+                                            setTradeAttributionDays(d);
+                                            loadTradeAttribution(d, tradeAttributionOutcome);
+                                        }}
+                                        className="text-xs border border-gray-300 rounded-lg px-2 py-1 bg-white dark:bg-gray-800 dark:border-gray-600 dark:text-white"
+                                    >
+                                        <option value={30}>30 days</option>
+                                        <option value={90}>90 days</option>
+                                        <option value={180}>180 days</option>
+                                        <option value={365}>1 year</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            {tradeAttributionLoading ? (
+                                <div className="p-8 text-center"><div className="animate-spin w-6 h-6 border-4 border-indigo-600 border-t-transparent rounded-full mx-auto" /></div>
+                            ) : !tradeAttribution || tradeAttribution.totalClosed === 0 ? (
+                                <div className="p-8 text-center text-gray-400 text-sm">No closed trades with attribution data yet. Data populates as the bot exits positions.</div>
+                            ) : (
+                                <div className="p-4 space-y-4">
+                                    {/* Post-exit drift summary banner */}
+                                    {tradeAttribution.postExitSummary.tradesWithDriftData > 0 && (
+                                        <div className="flex flex-wrap gap-4 bg-gray-50 dark:bg-gray-800/50 rounded-lg px-4 py-3 text-xs">
+                                            <div>
+                                                <span className="text-gray-500">Avg price drift 5d after exit: </span>
+                                                <span className={`font-bold ${pnlColor(tradeAttribution.postExitSummary.avgDrift5d)}`}>
+                                                    {tradeAttribution.postExitSummary.avgDrift5d != null
+                                                        ? `${tradeAttribution.postExitSummary.avgDrift5d >= 0 ? '+' : ''}${tradeAttribution.postExitSummary.avgDrift5d.toFixed(2)}%`
+                                                        : '—'}
+                                                </span>
+                                            </div>
+                                            <div>
+                                                <span className="text-gray-500">10d after exit: </span>
+                                                <span className={`font-bold ${pnlColor(tradeAttribution.postExitSummary.avgDrift10d)}`}>
+                                                    {tradeAttribution.postExitSummary.avgDrift10d != null
+                                                        ? `${tradeAttribution.postExitSummary.avgDrift10d >= 0 ? '+' : ''}${tradeAttribution.postExitSummary.avgDrift10d.toFixed(2)}%`
+                                                        : '—'}
+                                                </span>
+                                            </div>
+                                            <div className="text-gray-400">
+                                                {tradeAttribution.postExitSummary.avgDrift5d != null && tradeAttribution.postExitSummary.avgDrift5d > 1
+                                                    ? 'Exits may be slightly early — stocks continued higher after close'
+                                                    : tradeAttribution.postExitSummary.avgDrift5d != null && tradeAttribution.postExitSummary.avgDrift5d < -1
+                                                    ? 'Exit timing looks good — stocks declined after close'
+                                                    : 'Exit timing looks neutral'}
+                                                {' '}({tradeAttribution.postExitSummary.tradesWithDriftData} trades with data)
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Tab row */}
+                                    <div className="flex gap-1 flex-wrap">
+                                        {(['byScore', 'byConfidence', 'bySector', 'byRegime', 'byExit', 'byHold', 'trades'] as const).map(tab => (
+                                            <button
+                                                key={tab}
+                                                onClick={() => setTradeAttributionTab(tab)}
+                                                className={`text-xs px-3 py-1 rounded-full border transition-colors ${tradeAttributionTab === tab
+                                                    ? 'bg-indigo-600 text-white border-indigo-600'
+                                                    : 'border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:border-indigo-400'}`}
+                                            >
+                                                {tab === 'byScore' ? 'Score Bucket'
+                                                    : tab === 'byConfidence' ? 'Confidence'
+                                                    : tab === 'bySector' ? 'Sector'
+                                                    : tab === 'byRegime' ? 'Regime'
+                                                    : tab === 'byExit' ? 'Exit Reason'
+                                                    : tab === 'byHold' ? 'Hold Period'
+                                                    : 'Trade List'}
+                                            </button>
+                                        ))}
+                                        <span className="ml-auto text-xs text-gray-400 self-center">{tradeAttribution.totalClosed} closed trades</span>
+                                    </div>
+
+                                    {/* Aggregation table — Exit Reason tab shows Exit Quality Dashboard */}
+                                    {tradeAttributionTab !== 'trades' && (() => {
+                                        const rows: TradeAttributionAgg[] = tradeAttribution[tradeAttributionTab] || [];
+                                        const isExitTab = tradeAttributionTab === 'byExit';
+                                        if (!rows.length) return <div className="text-xs text-gray-400 text-center py-4">No data</div>;
+
+                                        // Exit Quality interpretation banner
+                                        const exitBanner = isExitTab ? (() => {
+                                            const stopRow = rows.find(r =>
+                                                r.bucket === 'stopped_out' || r.bucket === 'stop' || r.bucket.toLowerCase().includes('stop')
+                                            );
+                                            const targetRow = rows.find(r =>
+                                                r.bucket === 'target_hit' || r.bucket === 'profit_target' || r.bucket.toLowerCase().includes('target')
+                                            );
+                                            const hasDrift = rows.some(r => r.driftSampleCount && r.driftSampleCount > 0);
+                                            if (!hasDrift) return null;
+
+                                            const messages: string[] = [];
+                                            if (stopRow?.avgDrift10d != null) {
+                                                if (stopRow.avgDrift10d > 2) {
+                                                    messages.push(`Stopped-out positions gained +${stopRow.avgDrift10d.toFixed(1)}% on average within 10 days. Trailing stops may be too tight.`);
+                                                } else if (stopRow.avgDrift10d < -2) {
+                                                    messages.push(`Stopped-out positions fell ${stopRow.avgDrift10d.toFixed(1)}% further within 10 days. Stop timing looks effective.`);
+                                                } else {
+                                                    messages.push(`Stopped-out positions were flat post-exit (${stopRow.avgDrift10d.toFixed(1)}% drift). Stop timing is neutral.`);
+                                                }
+                                            }
+                                            if (targetRow?.avgDrift10d != null) {
+                                                if (targetRow.avgDrift10d < -1) {
+                                                    messages.push(`Target exits: stocks fell ${targetRow.avgDrift10d.toFixed(1)}% after exit — targets are capturing near-peak prices.`);
+                                                } else if (targetRow.avgDrift10d > 2) {
+                                                    messages.push(`Target exits: stocks continued +${targetRow.avgDrift10d.toFixed(1)}% after exit — targets may be set too conservatively.`);
+                                                }
+                                            }
+                                            if (!messages.length) return null;
+                                            return (
+                                                <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-lg p-3 mb-3">
+                                                    <div className="text-xs font-semibold text-amber-700 dark:text-amber-300 uppercase tracking-wide mb-1">Exit Quality Verdict</div>
+                                                    {messages.map((m, i) => (
+                                                        <div key={i} className="text-xs text-amber-800 dark:text-amber-200 flex gap-2 mt-1">
+                                                            <span className="shrink-0 text-amber-500">→</span>{m}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            );
+                                        })() : null;
+
+                                        return (
+                                            <div>
+                                                {exitBanner}
+                                                <div className="overflow-x-auto">
+                                                    <table className="w-full text-xs">
+                                                        <thead>
+                                                            <tr className="text-left text-gray-400 border-b border-gray-100 dark:border-gray-800">
+                                                                <th className="pb-2 pr-3">Bucket</th>
+                                                                <th className="pb-2 pr-3 text-right">Trades</th>
+                                                                <th className="pb-2 pr-3 text-right">Win%</th>
+                                                                <th className="pb-2 pr-3 text-right">Avg Ret</th>
+                                                                <th className="pb-2 pr-3 text-right">Expectancy</th>
+                                                                <th className="pb-2 pr-3 text-right">Total P&L</th>
+                                                                <th className="pb-2 pr-3 text-right">Avg Win%</th>
+                                                                <th className="pb-2 pr-3 text-right">Avg Loss%</th>
+                                                                {isExitTab && <th className="pb-2 pr-3 text-right">+5d Drift</th>}
+                                                                {isExitTab && <th className="pb-2 text-right">+10d Drift</th>}
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody>
+                                                            {rows.map(r => {
+                                                                const barW = Math.round(Math.min(100, r.winRate));
+                                                                return (
+                                                                    <tr key={r.bucket} className="border-b border-gray-50 dark:border-gray-800">
+                                                                        <td className="py-2 pr-3">
+                                                                            <div className="font-medium text-gray-800 dark:text-gray-200">{titleize(r.bucket)}</div>
+                                                                            <div className="mt-0.5 h-1.5 bg-gray-100 dark:bg-gray-700 rounded-full w-24 overflow-hidden">
+                                                                                <div className={`h-full rounded-full ${r.winRate >= 60 ? 'bg-green-500' : r.winRate >= 40 ? 'bg-yellow-500' : 'bg-red-500'}`} style={{ width: `${barW}%` }} />
+                                                                            </div>
+                                                                        </td>
+                                                                        <td className="py-2 pr-3 text-right text-gray-600 dark:text-gray-400">{r.total}</td>
+                                                                        <td className={`py-2 pr-3 text-right font-semibold ${r.winRate >= 50 ? 'text-green-600' : 'text-red-600'}`}>{r.winRate.toFixed(0)}%</td>
+                                                                        <td className={`py-2 pr-3 text-right ${pnlColor(r.avgReturn)}`}>{fmt(r.avgReturn)}%</td>
+                                                                        <td className={`py-2 pr-3 text-right font-bold ${pnlColor(r.expectancyPct)}`} title="(WinRate × AvgWin%) − (LossRate × |AvgLoss%|)">
+                                                                            {fmt(r.expectancyPct)}%
+                                                                        </td>
+                                                                        <td className={`py-2 pr-3 text-right font-semibold ${pnlColor(r.totalPnl)}`}>{fmtUsd(r.totalPnl)}</td>
+                                                                        <td className="py-2 pr-3 text-right text-green-600">{r.avgWinPct !== 0 ? `+${r.avgWinPct.toFixed(1)}%` : '—'}</td>
+                                                                        <td className={`py-2 ${isExitTab ? 'pr-3' : ''} text-right text-red-600`}>{r.avgLossPct !== 0 ? `${r.avgLossPct.toFixed(1)}%` : '—'}</td>
+                                                                        {isExitTab && (
+                                                                            <td className={`py-2 pr-3 text-right font-semibold ${r.avgDrift5d == null ? 'text-gray-300' : pnlColor(r.avgDrift5d != null ? -r.avgDrift5d : null)}`}
+                                                                                title="Avg price move 5 days after this exit type — negative = stocks fell (good exit)">
+                                                                                {r.avgDrift5d != null ? `${r.avgDrift5d >= 0 ? '+' : ''}${r.avgDrift5d.toFixed(1)}%` : '—'}
+                                                                            </td>
+                                                                        )}
+                                                                        {isExitTab && (
+                                                                            <td className={`py-2 text-right font-semibold ${r.avgDrift10d == null ? 'text-gray-300' : pnlColor(r.avgDrift10d != null ? -r.avgDrift10d : null)}`}
+                                                                                title="Avg price move 10 days after this exit type">
+                                                                                {r.avgDrift10d != null
+                                                                                    ? `${r.avgDrift10d >= 0 ? '+' : ''}${r.avgDrift10d.toFixed(1)}%`
+                                                                                    : r.driftSampleCount === 0 ? 'no data' : '—'}
+                                                                            </td>
+                                                                        )}
+                                                                    </tr>
+                                                                );
+                                                            })}
+                                                        </tbody>
+                                                    </table>
+                                                    <div className="text-xs text-gray-400 mt-2 px-1">
+                                                        Expectancy = (Win% × Avg Win%) − (Loss% × |Avg Loss%|). Positive = edge in this bucket.
+                                                        {isExitTab && ' Drift columns: green = stock fell after exit (good). Red = stock rose further (exited too early).'}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
+
+                                    {/* Per-trade list with post-exit drift columns */}
+                                    {tradeAttributionTab === 'trades' && (
+                                        <div className="overflow-x-auto">
+                                            <table className="w-full text-xs">
+                                                <thead>
+                                                    <tr className="text-left text-gray-400 border-b border-gray-100 dark:border-gray-800">
+                                                        <th className="pb-2 pr-2">Symbol</th>
+                                                        <th className="pb-2 pr-2 text-right">Score</th>
+                                                        <th className="pb-2 pr-2">Outcome</th>
+                                                        <th className="pb-2 pr-2 text-right">P&L</th>
+                                                        <th className="pb-2 pr-2 text-right">Ret%</th>
+                                                        <th className="pb-2 pr-2">Exit Reason</th>
+                                                        <th className="pb-2 pr-2">Sector</th>
+                                                        <th className="pb-2 pr-2 text-right">Hold</th>
+                                                        <th className="pb-2 pr-2 text-right">+5d</th>
+                                                        <th className="pb-2 pr-2 text-right">+10d</th>
+                                                        <th className="pb-2 text-right">ATR%</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {tradeAttribution.trades.map(t => (
+                                                        <tr key={t.id} className="border-b border-gray-50 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-800/50">
+                                                            <td className="py-1.5 pr-2 font-semibold text-gray-900 dark:text-white">{t.symbol}</td>
+                                                            <td className={`py-1.5 pr-2 text-right font-mono ${(t.score ?? 0) >= 90 ? 'text-green-600' : (t.score ?? 0) >= 80 ? 'text-yellow-600' : 'text-gray-500'}`}>
+                                                                {t.score != null ? t.score.toFixed(0) : '—'}
+                                                            </td>
+                                                            <td className="py-1.5 pr-2">
+                                                                <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${t.outcome === 'win' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : t.outcome === 'loss' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400' : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'}`}>
+                                                                    {t.outcome ?? '—'}
+                                                                </span>
+                                                            </td>
+                                                            <td className={`py-1.5 pr-2 text-right font-semibold ${pnlColor(t.pnl)}`}>{t.pnl != null ? fmtUsd(t.pnl) : '—'}</td>
+                                                            <td className={`py-1.5 pr-2 text-right ${pnlColor(t.pnlPct)}`}>{t.pnlPct != null ? `${t.pnlPct >= 0 ? '+' : ''}${t.pnlPct.toFixed(1)}%` : '—'}</td>
+                                                            <td className="py-1.5 pr-2 text-gray-600 dark:text-gray-400">{t.winLossReason ? titleize(t.winLossReason) : (t.exitReason ? titleize(t.exitReason) : '—')}</td>
+                                                            <td className="py-1.5 pr-2 text-gray-500">{t.sector ?? '—'}</td>
+                                                            <td className="py-1.5 pr-2 text-right text-gray-500">{t.holdDays != null ? `${t.holdDays}d` : '—'}</td>
+                                                            <td className={`py-1.5 pr-2 text-right ${t.postExitDrift5d == null ? 'text-gray-300' : pnlColor(-(t.postExitDrift5d))}`}
+                                                                title="Price change 5 days after exit — negative means we exited well">
+                                                                {t.postExitDrift5d != null ? `${t.postExitDrift5d >= 0 ? '+' : ''}${t.postExitDrift5d.toFixed(1)}%` : '—'}
+                                                            </td>
+                                                            <td className={`py-1.5 pr-2 text-right ${t.postExitDrift10d == null ? 'text-gray-300' : pnlColor(-(t.postExitDrift10d))}`}
+                                                                title="Price change 10 days after exit">
+                                                                {t.postExitDrift10d != null ? `${t.postExitDrift10d >= 0 ? '+' : ''}${t.postExitDrift10d.toFixed(1)}%` : '—'}
+                                                            </td>
+                                                            <td className="py-1.5 text-right text-gray-500">{t.atrPct != null ? `${t.atrPct.toFixed(1)}%` : '—'}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                            <div className="text-xs text-gray-400 mt-2 px-1">+5d / +10d = price drift after your exit. Green = price fell (good exit). Red = price rose further (left money on table).</div>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
 
                         {/* Daily History Table */}
@@ -1739,6 +2354,98 @@ export default function PerformancePage() {
                                                                 <td className={`px-3 py-2 text-right ${e.expectancy >= 0 ? 'text-green-600' : 'text-red-500'}`}>{e.expectancy >= 0 ? '+' : ''}{e.expectancy.toFixed(1)}%</td>
                                                                 <td className="px-3 py-2 text-right text-[var(--color-text-secondary)]">{e.winRate.toFixed(0)}%</td>
                                                                 <td className="px-3 py-2 text-right text-[var(--color-text-secondary)]">{e.avgHoldDays !== null ? `${e.avgHoldDays}d` : '—'}</td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Confidence Bucket Calibration */}
+                                    {calibrationData.confidenceBuckets && calibrationData.confidenceBuckets.length > 0 && (
+                                        <div>
+                                            <p className="text-xs font-bold uppercase tracking-wider text-[var(--color-text-secondary)] mb-2">
+                                                Confidence Calibration
+                                                <span className="ml-1 font-normal normal-case">— does higher predicted confidence → better results?</span>
+                                            </p>
+                                            <div className="overflow-x-auto rounded-xl border border-[var(--color-border)]">
+                                                <table className="w-full text-sm">
+                                                    <thead>
+                                                        <tr className="bg-gray-50 dark:bg-gray-800/60 text-xs text-[var(--color-text-secondary)] uppercase tracking-wide">
+                                                            <th className="px-3 py-2 text-left">Confidence</th>
+                                                            <th className="px-3 py-2 text-right">n</th>
+                                                            <th className="px-3 py-2 text-right">PF</th>
+                                                            <th className="px-3 py-2 text-right">E%</th>
+                                                            <th className="px-3 py-2 text-right">Avg Ret</th>
+                                                            <th className="px-3 py-2 text-right">WR%</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {calibrationData.confidenceBuckets.map(b => (
+                                                            <tr key={b.bucket} className="border-t border-[var(--color-border)]">
+                                                                <td className="px-3 py-2 font-medium text-[var(--color-text-primary)]">
+                                                                    {!b.valid ? '⚪' : b.profitFactor >= 1.1 ? '✅' : '❌'} {b.bucket}
+                                                                </td>
+                                                                <td className="px-3 py-2 text-right text-[var(--color-text-secondary)]">{b.total}</td>
+                                                                <td className={`px-3 py-2 text-right font-semibold ${b.profitFactor >= 1.1 ? 'text-green-600' : 'text-red-500'}`}>
+                                                                    {b.profitFactor.toFixed(2)}
+                                                                </td>
+                                                                <td className={`px-3 py-2 text-right ${b.expectancy >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                                                                    {b.expectancy >= 0 ? '+' : ''}{b.expectancy.toFixed(1)}%
+                                                                </td>
+                                                                <td className={`px-3 py-2 text-right ${b.avgReturn >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                                                                    {b.avgReturn >= 0 ? '+' : ''}{b.avgReturn.toFixed(1)}%
+                                                                </td>
+                                                                <td className="px-3 py-2 text-right text-[var(--color-text-secondary)]">{b.winRate.toFixed(0)}%</td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Sector Insights */}
+                                    {calibrationData.sectorInsights && calibrationData.sectorInsights.length > 0 && (
+                                        <div>
+                                            <p className="text-xs font-bold uppercase tracking-wider text-[var(--color-text-secondary)] mb-2">
+                                                Sector Insights
+                                                <span className="ml-1 font-normal normal-case">— suggested floor by sector (≥15 trades)</span>
+                                            </p>
+                                            <div className="overflow-x-auto rounded-xl border border-[var(--color-border)]">
+                                                <table className="w-full text-sm">
+                                                    <thead>
+                                                        <tr className="bg-gray-50 dark:bg-gray-800/60 text-xs text-[var(--color-text-secondary)] uppercase tracking-wide">
+                                                            <th className="px-3 py-2 text-left">Sector</th>
+                                                            <th className="px-3 py-2 text-right">n</th>
+                                                            <th className="px-3 py-2 text-right">PF</th>
+                                                            <th className="px-3 py-2 text-right">WR%</th>
+                                                            <th className="px-3 py-2 text-right">Suggested Floor</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {calibrationData.sectorInsights.map(s => (
+                                                            <tr key={s.sector} className="border-t border-[var(--color-border)]">
+                                                                <td className="px-3 py-2 font-medium text-[var(--color-text-primary)]">{s.sector}</td>
+                                                                <td className="px-3 py-2 text-right text-[var(--color-text-secondary)]">{s.total}</td>
+                                                                <td className={`px-3 py-2 text-right font-semibold ${s.profitFactor >= 1.1 ? 'text-green-600' : 'text-red-500'}`}>
+                                                                    {s.profitFactor.toFixed(2)}
+                                                                </td>
+                                                                <td className="px-3 py-2 text-right text-[var(--color-text-secondary)]">{s.winRate.toFixed(0)}%</td>
+                                                                <td className="px-3 py-2 text-right">
+                                                                    {s.suggestedFloor !== null ? (
+                                                                        <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${
+                                                                            s.suggestedFloor > (currentMinBuyScore ?? 85)
+                                                                                ? 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300'
+                                                                                : s.suggestedFloor < (currentMinBuyScore ?? 85)
+                                                                                    ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300'
+                                                                                    : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400'
+                                                                        }`}>
+                                                                            {s.suggestedFloor}
+                                                                        </span>
+                                                                    ) : '—'}
+                                                                </td>
                                                             </tr>
                                                         ))}
                                                     </tbody>

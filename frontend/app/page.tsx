@@ -6,7 +6,7 @@ export default function HomePage() {
     const cookieStore = cookies();
     const token = cookieStore.get('token');
     if (token && token.value) {
-        redirect('/dashboard');
+        redirect('/portfolio');
     } else {
         redirect('/login');
     }

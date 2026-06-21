@@ -20,7 +20,7 @@ const TIER1_ETFS = [
 ];
 const TIER5_SPECULATIVE = [
     'CRSP','BEAM','EDIT','NTLA','RXRX','RKLB','ACHR','ASTS',
-    'JOBY','ARM','ALAB','SMCI','COIN','APP','TTD'
+    'JOBY','ARM','ALAB','SMCI','COIN','APP','TTD','SPCX'
 ];
 
 // Cache for screened stocks (refresh daily)
@@ -481,23 +481,54 @@ function refreshCache() {
 }
 
 /**
+ * Returns stocks that appeared in the Alpaca asset universe within the last 90 days.
+ * The asset_universe table is refreshed nightly from Alpaca — any new IPO that
+ * Alpaca makes tradable will have first_added_at set to the night it was discovered.
+ * Returns [] silently if the column doesn't exist yet (pre-migration fallback).
+ */
+async function getRecentIPOSymbols() {
+    try {
+        const { query } = require('../config/database');
+        const result = await query(`
+            SELECT symbol FROM asset_universe
+            WHERE tradable = true
+              AND status = 'active'
+              AND exchange IN ('NYSE', 'NASDAQ', 'ARCA', 'BATS', 'AMEX')
+              AND first_added_at > NOW() - INTERVAL '90 days'
+              AND symbol ~ '^[A-Z]{1,5}$'
+            ORDER BY first_added_at DESC
+            LIMIT 100
+        `);
+        const symbols = result.rows.map(r => r.symbol);
+        if (symbols.length > 0) {
+            console.log(`[HERMES:IPO] New listings last 90d (Alpaca): ${symbols.length} — ${symbols.slice(0, 8).join(', ')}${symbols.length > 8 ? '…' : ''}`);
+        }
+        return symbols;
+    } catch {
+        return []; // column not yet added — graceful no-op
+    }
+}
+
+/**
  * Returns the full curated symbol list (ETFs + S&P500 + NASDAQ + midcap + speculative)
  * with NO Yahoo Finance calls — safe to use during off-hours batch jobs.
  * The nightly universe scan uses this instead of getStockUniverse() to avoid
  * hammering Yahoo before the AI analysis phase.
  */
 async function getStaticSymbolList() {
-    const [sp500, nasdaq, midcap] = await Promise.all([
+    const [sp500, nasdaq, midcap, recentIPOs] = await Promise.all([
         getSP500Symbols(),
         getTopNasdaqSymbols(),
-        Promise.resolve(getMidCapSymbols())
+        Promise.resolve(getMidCapSymbols()),
+        getRecentIPOSymbols(),
     ]);
     const all = [
         ...TIER1_ETFS,
         ...sp500,
         ...nasdaq,
         ...midcap,
-        ...TIER5_SPECULATIVE
+        ...TIER5_SPECULATIVE,
+        ...recentIPOs,
     ];
     return [...new Set(all)];
 }

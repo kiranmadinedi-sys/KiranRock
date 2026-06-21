@@ -1,8 +1,18 @@
-# ================================================================
+﻿# ================================================================
 #  KiranRock Trading Platform - Startup Script
 #  Starts: Backend API (port 3001) + Worker + Frontend (port 3000)
 #  Also runs one startup stock-signal Telegram delivery pass
-#  Schedulers and Telegram reports run in the dedicated worker process
+#
+#  Worker process owns ALL schedulers (all auto-start, no manual steps):
+#    - Enhanced AI trading bot (IST pre-market pipeline)
+#    - Options scanner + autonomous options bot
+#    - Asset universe refresh (nightly Alpaca sync)
+#    - EOD bar ingestion (6:30 PM ET daily — Polygon grouped bars)
+#    - News monitoring, trailing stops, market monitor
+#    - System health monitor (every 5 min during market hours — Telegram alerts)
+#    - Telegram reports (daily predictions + weekly recap)
+#    - Stock signal snapshots + Telegram delivery
+#    - ATLAS global sentiment (persisted to DB, survives restarts)
 # ================================================================
 
 [CmdletBinding()]
@@ -439,6 +449,72 @@ Write-Host "   Alpaca Paper Trading | PostgreSQL" -ForegroundColor Cyan
 Write-Host "===============================================" -ForegroundColor Cyan
 Write-Host ""
 
+# ── Kill previous PM2 logs terminal window if PID file exists ───────────────
+$backendLogsPidFile = Join-Path $env:TEMP 'kiranrock_backend_logs.pid'
+if (Test-Path $backendLogsPidFile) {
+    $oldLogsPid = Get-Content $backendLogsPidFile -ErrorAction SilentlyContinue
+    if ($oldLogsPid -match '^\d+$') {
+        Stop-Process -Id ([int]$oldLogsPid) -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item $backendLogsPidFile -Force -ErrorAction SilentlyContinue
+}
+
+# ── PM2: stop managed apps BEFORE the general kill loop ─────────────────────
+# If PM2 is running kiranrock-backend, killing its node process directly causes
+# PM2 to immediately restart it, making the 3-pass kill loop fight PM2 forever.
+# Stopping via pm2 first prevents that race.
+$pm2CmdEarly = Get-Command pm2 -ErrorAction SilentlyContinue
+if ($pm2CmdEarly) {
+    $pm2Apps = (& pm2 list 2>$null) -join "`n"
+    if ($pm2Apps -match 'kiranrock-backend') {
+        Write-Host "Stopping PM2 app kiranrock-backend before shutdown scan..." -ForegroundColor DarkGray
+        & pm2 stop kiranrock-backend 2>$null | Out-Null
+        Start-Sleep -Seconds 1
+    }
+}
+
+# ── Kill whatever is holding port 3001 right now ────────────────────────────
+$early3001Procs = Get-NetTCPConnection -LocalPort 3001 -State Listen -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty OwningProcess -Unique
+foreach ($earlyPid in $early3001Procs) {
+    if ($earlyPid -gt 0) {
+        $earlyProc = Get-Process -Id $earlyPid -ErrorAction SilentlyContinue
+        Write-Host "Killing process on port 3001 (PID $earlyPid, $($earlyProc.Name))..." -ForegroundColor DarkGray
+        Stop-Process -Id $earlyPid -Force -ErrorAction SilentlyContinue
+    }
+}
+if ($early3001Procs.Count -gt 0) { Start-Sleep -Seconds 1 }
+
+# ── Kill previous backend terminal if PID file exists ───────────────────────
+$backendPidFile = Join-Path $env:TEMP 'kiranrock_backend.pid'
+if (Test-Path $backendPidFile) {
+    $oldBackendPid = Get-Content $backendPidFile -ErrorAction SilentlyContinue
+    if ($oldBackendPid -match '^\d+$') {
+        Stop-Process -Id ([int]$oldBackendPid) -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item $backendPidFile -Force -ErrorAction SilentlyContinue
+}
+
+# ── Kill previous backfill process if PID file exists ───────────────────────
+$backfillPidFile = Join-Path $env:TEMP 'kiranrock_backfill.pid'
+if (Test-Path $backfillPidFile) {
+    $oldBackfillPid = Get-Content $backfillPidFile -ErrorAction SilentlyContinue
+    if ($oldBackfillPid -match '^\d+$') {
+        Stop-Process -Id ([int]$oldBackfillPid) -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item $backfillPidFile -Force -ErrorAction SilentlyContinue
+}
+
+# ── Kill previous frontend terminal if PID file exists ──────────────────────
+$frontendPidFile = Join-Path $env:TEMP 'kiranrock_frontend.pid'
+if (Test-Path $frontendPidFile) {
+    $oldFrontendPid = Get-Content $frontendPidFile -ErrorAction SilentlyContinue
+    if ($oldFrontendPid -match '^\d+$') {
+        Stop-Process -Id ([int]$oldFrontendPid) -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item $frontendPidFile -Force -ErrorAction SilentlyContinue
+}
+
 # Stop only KiranRock processes from previous runs
 $remainingProjectProcesses = @()
 $projectProcessesStopped = $false
@@ -549,6 +625,7 @@ $backfillScript = Join-Path $backendPath "backfill-stock-prices-controlled.js"
 if (Test-Path $backfillScript) {
     Write-Host "      Executing: node backfill-stock-prices-controlled.js" -ForegroundColor Gray
     $backfillProcess = Start-Process node -ArgumentList $backfillScript -WorkingDirectory $backendPath -PassThru
+    $backfillProcess.Id | Out-File -FilePath $backfillPidFile -Encoding ascii -Force
     Write-Host "      Backfill process running (PID: $($backfillProcess.Id))." -ForegroundColor Green
 } else {
     Write-Host "      Backfill script not found: $backfillScript" -ForegroundColor Red
@@ -576,24 +653,63 @@ if (Test-Path $initDbScript) {
 Write-Host ""
 
 # ----------------------------------------------------------------
-#  Start Backend
+#  Start Backend (via PM2 — auto-restarts on crash + survives reboots)
 # ----------------------------------------------------------------
-Write-Host "[1/4] Starting Backend API on port 3001..." -ForegroundColor Cyan
-Write-Host "      API only | schedulers moved to worker process" -ForegroundColor Gray
+Write-Host "[1/4] Starting Backend API on port 3001 (PM2)..." -ForegroundColor Cyan
+Write-Host "      PM2 manages auto-restart on crash and boot persistence" -ForegroundColor Gray
 
-$backendCommand = "Set-Location -Path $backendPathLiteral; " +
-    "`$env:TELEGRAM_BOT_TOKEN = $telegramBotTokenLiteral; " +
-    "`$env:TELEGRAM_CHAT_ID   = $telegramChatIdLiteral; " +
-    "`$env:EMAIL_USER         = $emailUserLiteral; " +
-    "`$env:EMAIL_PASSWORD     = $emailPasswordLiteral; " +
-    "`$env:NODE_ENV           = 'development'; " +
-    "Write-Host ''; " +
-    "Write-Host '=== BACKEND API (port 3001) ===' -ForegroundColor Cyan; " +
-    "Write-Host ''; " +
-    "npm start"
+# Kill any stale backend node process (command line contains app.js) not caught by port kill
+$staleBackends = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match 'src[\\/]app\.js' }
+foreach ($proc in $staleBackends) {
+    Write-Host "      Killing stale backend Node process (PID $($proc.ProcessId))..." -ForegroundColor DarkGray
+    Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+}
+if ($staleBackends.Count -gt 0) { Start-Sleep -Seconds 1 }
 
-$backendProcess = Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCommand -PassThru
-Write-Host "      Backend terminal PID: $($backendProcess.Id)" -ForegroundColor DarkGray
+$pm2Cmd = Get-Command pm2 -ErrorAction SilentlyContinue
+if ($null -eq $pm2Cmd) {
+    Write-Host "      PM2 not found — falling back to raw npm start" -ForegroundColor Yellow
+    $backendCommand  = "Set-Location -Path $backendPathLiteral; "
+    $backendCommand += "`$env:TELEGRAM_BOT_TOKEN = $telegramBotTokenLiteral; "
+    $backendCommand += "`$env:TELEGRAM_CHAT_ID   = $telegramChatIdLiteral; "
+    $backendCommand += "`$env:EMAIL_USER         = $emailUserLiteral; "
+    $backendCommand += "`$env:EMAIL_PASSWORD     = $emailPasswordLiteral; "
+    $backendCommand += "`$env:NODE_ENV           = 'development'; "
+    $backendCommand += "Write-Host ''; "
+    $backendCommand += "Write-Host '=== BACKEND API (port 3001) ===' -ForegroundColor Cyan; "
+    $backendCommand += "Write-Host ''; "
+    $backendCommand += "npm start"
+    $backendProcess = Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCommand -PassThru
+    $backendProcess.Id | Out-File -FilePath $backendPidFile -Encoding ascii -Force
+    Write-Host "      Backend terminal PID: $($backendProcess.Id)" -ForegroundColor DarkGray
+} else {
+    # If PM2 has a saved kiranrock-backend entry, restart it; otherwise start fresh
+    $pm2ListText = (& pm2 list 2>$null) -join "`n"
+    $existingApp = $pm2ListText -match 'kiranrock-backend'
+    if ($existingApp) {
+        & pm2 restart kiranrock-backend --update-env | Out-Null
+        Write-Host "      PM2 restarted kiranrock-backend (PID managed by PM2)" -ForegroundColor Green
+    } else {
+        Push-Location $backendPath
+        & pm2 start src/app.js --name kiranrock-backend --node-args="--max-old-space-size=512" --cwd $backendPath | Out-Null
+        & pm2 save | Out-Null
+        Pop-Location
+        Write-Host "      PM2 started kiranrock-backend fresh (PID managed by PM2)" -ForegroundColor Green
+    }
+    $pm2PidText = (& pm2 pid kiranrock-backend 2>$null) -join ''
+    $backendPidValue = if ($pm2PidText -match '^\d+$') { [int]$pm2PidText } else { 0 }
+    $backendProcess = [pscustomobject]@{ Id = $backendPidValue }
+    # Kill any stale pm2-logs windows from a previous start.ps1 run so we don't accumulate duplicates
+    Get-Process -Name powershell -ErrorAction SilentlyContinue | Where-Object {
+        try { $_.MainWindowTitle -match 'kiranrock-backend' } catch { $false }
+    } | Stop-Process -Force -ErrorAction SilentlyContinue
+    # Open a visible terminal streaming PM2 backend logs
+    $pm2LogsCmd = "Write-Host '=== BACKEND LOGS (PM2: kiranrock-backend) ===' -ForegroundColor Cyan; Write-Host ''; pm2 logs kiranrock-backend --lines 50"
+    $pm2LogsProcess = Start-Process powershell -ArgumentList "-NoExit", "-Command", $pm2LogsCmd -PassThru
+    $pm2LogsProcess.Id | Out-File -FilePath $backendLogsPidFile -Encoding ascii -Force
+    Write-Host "      Backend logs window opened (streaming via PM2, PID: $($pm2LogsProcess.Id))" -ForegroundColor DarkGray
+}
 
 Write-Host "      Waiting 10s for backend to initialize..." -ForegroundColor Gray
 Start-Sleep -Seconds 10
@@ -607,24 +723,45 @@ try {
 Write-Host ""
 
 # ----------------------------------------------------------------
-#  Start Worker
+#  Worker — schedulers, leader election, Telegram reports (own terminal)
 # ----------------------------------------------------------------
-Write-Host "[2/4] Starting Worker services..." -ForegroundColor Cyan
-Write-Host "      Enhanced AI | Options | Telegram Reports | News Monitoring" -ForegroundColor Gray
+Write-Host "[2/4] Starting Worker process (schedulers + reports)..." -ForegroundColor Cyan
+Write-Host "      Enhanced AI | Options | EOD Bar Ingestion (6:30 PM ET) | Asset Universe" -ForegroundColor Gray
+Write-Host "      Telegram Reports | News Monitoring | Trailing Stops | Market Monitor" -ForegroundColor Gray
+Write-Host "      System Health Monitor (5-min checks + Telegram alerts)" -ForegroundColor Gray
 
-$workerCommand = "Set-Location -Path $backendPathLiteral; " +
-    "`$env:TELEGRAM_BOT_TOKEN = $telegramBotTokenLiteral; " +
-    "`$env:TELEGRAM_CHAT_ID   = $telegramChatIdLiteral; " +
-    "`$env:EMAIL_USER         = $emailUserLiteral; " +
-    "`$env:EMAIL_PASSWORD     = $emailPasswordLiteral; " +
-    "`$env:NODE_ENV           = 'development'; " +
-    "Write-Host ''; " +
-    "Write-Host '=== WORKER ===' -ForegroundColor Yellow; " +
-    "Write-Host ''; " +
-    "npm run start:worker"
+# Kill any previous worker Node.js process (command line contains worker.js)
+$staleWorkers = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match 'worker\.js' }
+foreach ($proc in $staleWorkers) {
+    Write-Host "      Killing stale worker Node process (PID $($proc.ProcessId))..." -ForegroundColor DarkGray
+    Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+}
 
+# Also close the old worker PowerShell terminal window if we saved its PID last run
+$workerPidFile = Join-Path $env:TEMP 'kiranrock_worker.pid'
+if (Test-Path $workerPidFile) {
+    $oldWorkerPid = Get-Content $workerPidFile -ErrorAction SilentlyContinue
+    if ($oldWorkerPid -match '^\d+$') {
+        Stop-Process -Id ([int]$oldWorkerPid) -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item $workerPidFile -Force -ErrorAction SilentlyContinue
+}
+
+$workerCommand  = "Set-Location -Path $backendPathLiteral; "
+$workerCommand += "`$env:TELEGRAM_BOT_TOKEN = $telegramBotTokenLiteral; "
+$workerCommand += "`$env:TELEGRAM_CHAT_ID   = $telegramChatIdLiteral; "
+$workerCommand += "`$env:EMAIL_USER         = $emailUserLiteral; "
+$workerCommand += "`$env:EMAIL_PASSWORD     = $emailPasswordLiteral; "
+$workerCommand += "`$env:NODE_ENV           = 'development'; "
+$workerCommand += "Write-Host ''; "
+$workerCommand += "Write-Host '=== WORKER (schedulers + reports) ===' -ForegroundColor Yellow; "
+$workerCommand += "Write-Host ''; "
+$workerCommand += "npm run start:worker"
 $workerProcess = Start-Process powershell -ArgumentList "-NoExit", "-Command", $workerCommand -PassThru
-Write-Host "      Worker terminal PID:  $($workerProcess.Id)" -ForegroundColor DarkGray
+# Save PID so next run can close this window cleanly
+$workerProcess.Id | Out-File -FilePath $workerPidFile -Encoding ascii -Force
+Write-Host "      Worker terminal PID: $($workerProcess.Id)" -ForegroundColor DarkGray
 Write-Host ""
 
 # ----------------------------------------------------------------
@@ -632,6 +769,16 @@ Write-Host ""
 # ----------------------------------------------------------------
 Write-Host "[3/4] Running startup stock-signal delivery..." -ForegroundColor Cyan
 Write-Host "      One-time real Telegram delivery via npm run run:stock-signals" -ForegroundColor Gray
+
+# Close any stale signal delivery window from a previous run
+$signalPidFile = Join-Path $env:TEMP 'kiranrock_signals.pid'
+if (Test-Path $signalPidFile) {
+    $oldSignalPid = Get-Content $signalPidFile -ErrorAction SilentlyContinue
+    if ($oldSignalPid -match '^\d+$') {
+        Stop-Process -Id ([int]$oldSignalPid) -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item $signalPidFile -Force -ErrorAction SilentlyContinue
+}
 
 $signalDeliveryCommand = "Set-Location -Path $backendPathLiteral; " +
     "`$env:TELEGRAM_BOT_TOKEN = $telegramBotTokenLiteral; " +
@@ -645,6 +792,7 @@ $signalDeliveryCommand = "Set-Location -Path $backendPathLiteral; " +
     "npm run run:stock-signals"
 
 $signalDeliveryProcess = Start-Process powershell -ArgumentList "-NoExit", "-Command", $signalDeliveryCommand -PassThru
+$signalDeliveryProcess.Id | Out-File -FilePath $signalPidFile -Encoding ascii -Force
 Write-Host "      Delivery terminal PID: $($signalDeliveryProcess.Id)" -ForegroundColor DarkGray
 Write-Host ""
 
@@ -679,6 +827,7 @@ $frontendCommand = "Set-Location -Path $frontendPathLiteral; " +
     "npm run start"
 
 $frontendProcess = Start-Process powershell -ArgumentList "-NoExit", "-Command", $frontendCommand -PassThru
+$frontendProcess.Id | Out-File -FilePath $frontendPidFile -Encoding ascii -Force
 Write-Host "      Frontend terminal PID: $($frontendProcess.Id)" -ForegroundColor DarkGray
 
 $frontendReady = $false
@@ -753,11 +902,12 @@ Write-Host "   Local:    http://localhost:3000" -ForegroundColor White
 Write-Host "   Network:  http://99.47.183.33:3000" -ForegroundColor White
 Write-Host "   Domain:   https://getmytbot.com" -ForegroundColor Green
 Write-Host "   Backend:  http://localhost:3001" -ForegroundColor White
-Write-Host "   Worker:   background schedulers running in separate terminal" -ForegroundColor White
+Write-Host "   Worker:   own terminal (all schedulers — see header for full list)" -ForegroundColor White
+Write-Host "   EOD:      bars ingested nightly at 6:30 PM ET (worker cron, no manual step)" -ForegroundColor White
 Write-Host "   Signals:  one startup real-delivery pass in separate terminal" -ForegroundColor White
 Write-Host "   Health:   http://localhost:3001/health" -ForegroundColor White
 $cfPid = (Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue | Select-Object -First 1).Id
-Write-Host "   PIDs:     backend=$($backendProcess.Id) | worker=$($workerProcess.Id) | delivery=$($signalDeliveryProcess.Id) | frontend=$($frontendProcess.Id) | tunnel=$cfPid" -ForegroundColor White
+Write-Host "   PIDs:     backend=$($backendProcess.Id) (PM2) | worker=$($workerProcess.Id) | delivery=$($signalDeliveryProcess.Id) | frontend=$($frontendProcess.Id) | tunnel=$cfPid" -ForegroundColor White
 Write-Host "-----------------------------------------------" -ForegroundColor Green
 Write-Host "   Telegram: @KiranTradePro_bot" -ForegroundColor White
 Write-Host "   Reports:  Mon-Fri 7:00 AM (predictions) + 4:15 PM (AI bot summary) | Sun 8 AM (weekly buy list) + 9 AM (weekly recap)" -ForegroundColor White

@@ -134,12 +134,14 @@ const yahooProvider = (() => {
 })();
 
 // ─── YAHOO-ONLY SYMBOLS ──────────────────────────────────────────────────────
-// ETFs/sector funds that Alpaca IEX doesn't carry — always routed to Yahoo.
-// Declared at module scope so both alpacaProvider and withYahooFallback can use it.
+// Symbols that must bypass Alpaca IEX (IEX only carries individual stocks, not all ETFs).
+// These route to Polygon directly (which covers all US-listed ETFs on Starter plan).
+// Sector ETFs were previously Yahoo-only but Polygon/Alpaca cover them — removing Yahoo
+// dependency eliminates the 429 bursts during market-open/nightly scan startup.
+// Only truly un-fetchable symbols stay here (none currently).
 const YAHOO_ONLY_SYMBOLS = new Set([
-    'DIA','IWM','MDY',
-    'XLK','XLF','XLE','XLV','XLI','XLP','XLY','XLB','XLU',
-    'GLD','SLV','USO','TLT','HYG','LQD','EEM','EFA','VXX'
+    // Intentionally empty — all ETFs now served by Polygon/Alpaca IEX.
+    // International ETFs (EEM, EFA) fall back from Alpaca → Polygon automatically.
 ]);
 
 // ─── ALPACA PROVIDER ─────────────────────────────────────────────────────────
@@ -407,16 +409,90 @@ if (!PROVIDERS[PROVIDER]) {
 }
 
 // ─── INDEX SYMBOL CACHE ──────────────────────────────────────────────────────
-// ^VIX, ^GSPC etc. are fetched by multiple services concurrently.
-// Yahoo rate-limits crumb requests (429) when hit in rapid succession.
-// Cache index quotes for 5 minutes process-wide so every caller shares one result.
+// ^VIX etc. are fetched by multiple services concurrently.
+// Cache for 15 minutes — matches ATLAS TTL and prevents any source from being
+// hammered across parallel bot cycles and nightly scan batches.
 const _indexQuoteCache = new Map(); // symbol → { data, ts }
-const INDEX_QUOTE_TTL  = 5 * 60 * 1000; // 5 minutes
+const INDEX_QUOTE_TTL  = 15 * 60 * 1000; // 15 minutes (was 5 min — enough for ^VIX accuracy)
+
+// ── VIX source 1: CBOE free delayed endpoint ─────────────────────────────────
+// CBOE is the creator and authoritative source for VIX. Their CDN returns the
+// current index value for free with no API key and no rate limit concerns.
+async function _getVixFromCBOE() {
+    const axios = require('axios');
+    const resp  = await axios.get(
+        'https://cdn.cboe.com/api/global/delayed_quotes/quotes/_VIX.json',
+        { timeout: 8000, headers: { 'User-Agent': 'Mozilla/5.0' } }
+    );
+    const d = resp.data?.data;
+    if (!d) throw new Error('CBOE VIX: no data field in response');
+    const value     = d.current_price ?? d.close ?? 0;
+    const prevClose = d.prev_day_close ?? value;
+    if (!value) throw new Error('CBOE VIX: zero/null value returned');
+    return {
+        symbol:        '^VIX',
+        price:         value,
+        change:        value - prevClose,
+        changePercent: prevClose ? ((value - prevClose) / prevClose) * 100 : 0,
+        volume:        0,
+        avgVolume:     0,
+        marketCap:     0,
+        high52w:       null,
+        low52w:        null
+    };
+}
+
+// ── VIX source 2: Polygon indices (requires index-tier subscription) ──────────
+async function _getVixFromPolygon() {
+    const axios = require('axios');
+    const key   = process.env.POLYGON_API_KEY;
+    const resp  = await axios.get('https://api.polygon.io/v3/snapshot', {
+        params:  { 'ticker.any_of': 'I:VIX', apiKey: key },
+        timeout: 8000
+    });
+    const r = (resp.data?.results || [])[0];
+    if (!r || r.error) throw new Error(`Polygon VIX: ${r?.error || 'no data'}`);
+    const value     = r.value ?? r.session?.close ?? 0;
+    if (!value) throw new Error('Polygon VIX: no value in response');
+    const prevClose = r.session?.previous_close ?? value;
+    return {
+        symbol:        '^VIX',
+        price:         value,
+        change:        value - prevClose,
+        changePercent: prevClose ? ((value - prevClose) / prevClose) * 100 : 0,
+        volume: 0, avgVolume: 0, marketCap: 0, high52w: null, low52w: null
+    };
+}
 
 async function getIndexQuote(symbol) {
     const now    = Date.now();
     const cached = _indexQuoteCache.get(symbol);
     if (cached && now - cached.ts < INDEX_QUOTE_TTL) return cached.data;
+
+    // ^VIX: try CBOE → Polygon → Yahoo → stale cache → throw
+    if (symbol === '^VIX') {
+        // 1. CBOE — free, authoritative, no rate limit
+        try {
+            const data = await _getVixFromCBOE();
+            _indexQuoteCache.set(symbol, { data, ts: now });
+            logger.info('[DataProvider] VIX from CBOE', { vix: data.price });
+            return data;
+        } catch (cboeErr) {
+            logger.warn('[DataProvider] CBOE VIX failed', { error: cboeErr.message });
+        }
+        // 2. Polygon (works if subscription includes indices)
+        if (process.env.POLYGON_API_KEY) {
+            try {
+                const data = await _getVixFromPolygon();
+                _indexQuoteCache.set(symbol, { data, ts: now });
+                logger.info('[DataProvider] VIX from Polygon', { vix: data.price });
+                return data;
+            } catch (polyErr) {
+                logger.debug('[DataProvider] Polygon VIX unavailable', { error: polyErr.message });
+            }
+        }
+        // 3. Yahoo last resort — may 429 but worth one attempt
+    }
 
     try {
         const data = await yahooProvider.getQuote(symbol);
@@ -424,7 +500,7 @@ async function getIndexQuote(symbol) {
         return data;
     } catch (err) {
         if (cached) {
-            // Return stale value rather than propagating a 429 to all callers
+            // Return stale value — a 15-min-old VIX is far better than crashing the bot
             logger.warn(`[DataProvider] Index quote stale-served for ${symbol} (${Math.round((now - cached.ts) / 60000)}min old)`, { error: err.message });
             return cached.data;
         }
@@ -435,8 +511,8 @@ async function getIndexQuote(symbol) {
 // Wrap primary provider calls with Yahoo fallback so a transient Alpaca/Polygon
 // error never takes down the signal pipeline.
 async function withYahooFallback(method, label, ...args) {
-    // Index symbols (^VIX…) AND sector ETFs (IWM, XLK…) are Yahoo-only — serve
-    // all of them from the 5-min process-wide cache to prevent startup 429 bursts.
+    // Index symbols (^VIX, ^GSPC…) route through getIndexQuote() which tries CBOE/Polygon
+    // first, Yahoo last — shared 15-min cache prevents 429 bursts across parallel callers.
     if (method === 'getQuote' && args[0]) {
         const sym = (args[0] || '').toUpperCase();
         if (args[0].startsWith('^') || args[0].startsWith('=') || YAHOO_ONLY_SYMBOLS.has(sym)) {
@@ -486,7 +562,12 @@ async function withYahooFallback(method, label, ...args) {
 // missing tail days, full fetch only on first encounter.
 const localProvider = (() => {
     const { query } = require('../config/database');
-    const underlyingProvider = PROVIDER === 'alpaca' ? alpacaProvider : yahooProvider;
+    // Use the real configured provider as the API fallback — not Yahoo by default.
+    // When PROVIDER=polygon, Polygon has full bar history; falling back to Yahoo would
+    // silently give stale/rate-limited data and completely bypass our paid subscription.
+    const underlyingProvider = PROVIDER === 'polygon' ? polygonProvider
+                             : PROVIDER === 'alpaca'  ? alpacaProvider
+                             : yahooProvider;
     const name = `Local Cache -> ${underlyingProvider.name}`;
     logger.info(`[DataProvider] Initializing with main provider: ${name}`);
 
@@ -547,6 +628,10 @@ const localProvider = (() => {
      *   Old code required 215 rows for a 220-day window — the cache NEVER hit.
      */
     async function getBars(symbol, interval = '1d', lookbackDays = 90) {
+        // Index symbols (^VIX, ^GSPC …) are not in daily_bars and not served by Polygon/Alpaca.
+        if (symbol.startsWith('^') || symbol.startsWith('=')) {
+            return yahooProvider.getBars(symbol, interval, lookbackDays);
+        }
         if (interval !== '1d') {
             return underlyingProvider.getBars(symbol, interval, lookbackDays);
         }
@@ -622,9 +707,13 @@ const localProvider = (() => {
 })();
 
 module.exports = {
-    getBars:       (...args) => withYahooFallback('getBars', 'bar fetch', ...args),
-    getQuote:      (...args) => withYahooFallback('getQuote', 'quote fetch', ...args),
-    searchSymbols: (...args) => withYahooFallback('searchSymbols', 'symbol search', ...args),
+    // Route daily bar requests through localProvider so the 112k+ rows in daily_bars
+    // are actually used. localProvider handles: cache-hit (zero API call), delta-fetch
+    // (only missing tail days), and full-fetch on first encounter. Quotes, options, and
+    // symbol search still go through the normal provider-with-Yahoo-fallback path.
+    getBars:         (...args) => localProvider.getBars(...args),
+    getQuote:        (...args) => withYahooFallback('getQuote',      'quote fetch',   ...args),
+    searchSymbols:   (...args) => withYahooFallback('searchSymbols', 'symbol search', ...args),
     getOptionsChain: (...args) => withYahooFallback('getOptionsChain', 'options chain fetch', ...args),
     getActiveProvider: () => activeProvider
 };

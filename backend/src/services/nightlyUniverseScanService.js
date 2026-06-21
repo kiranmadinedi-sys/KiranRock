@@ -83,6 +83,59 @@ function _isMarketHours() {
 }
 
 /**
+ * Derive recommendation label from a numeric score.
+ * Must match the thresholds in analyzeStockWithAI (≥75=STRONG BUY, ≥65=BUY, ≤25=STRONG SELL, ≤35=SELL).
+ */
+function _deriveRecommendation(score) {
+    if (score == null) return 'HOLD';
+    if (score >= 75) return 'STRONG BUY';
+    if (score >= 65) return 'BUY';
+    if (score <= 25) return 'STRONG SELL';
+    if (score <= 35) return 'SELL';
+    return 'HOLD';
+}
+
+/**
+ * Compute 3-day EMA of a raw daily score using the two most recent prior days.
+ * Weights: today 50%, yesterday 30%, day-before-yesterday 20%.
+ * Returns rawScore unchanged when there is no prior history (new stock).
+ * Logs a warning when the smoothed score moves >15 points from yesterday.
+ */
+async function _computeSmoothedScore(symbol, rawScore, today) {
+    if (rawScore == null) return rawScore;
+    try {
+        const res = await query(
+            `SELECT ai_score
+             FROM daily_universe_analysis
+             WHERE symbol = $1
+               AND analysis_date >= $2::date - INTERVAL '3 days'
+               AND analysis_date <  $2::date
+               AND ai_score IS NOT NULL
+             ORDER BY analysis_date DESC
+             LIMIT 2`,
+            [symbol, today]
+        );
+        if (res.rows.length === 0) return rawScore; // no history — use raw as-is
+
+        // ai_score in the DB is already the smoothed value from prior days
+        const prev1 = parseFloat(res.rows[0].ai_score);
+        const prev2 = res.rows.length > 1 ? parseFloat(res.rows[1].ai_score) : prev1;
+
+        const smoothed = Math.round(rawScore * 0.5 + prev1 * 0.3 + prev2 * 0.2);
+
+        const delta = smoothed - prev1;
+        if (Math.abs(delta) > 15) {
+            console.warn(
+                `[NightlyScan] Score spike: ${symbol} raw=${rawScore} smoothed=${smoothed} prev=${prev1} (Δ${delta > 0 ? '+' : ''}${delta}) — manual review advised`
+            );
+        }
+        return smoothed;
+    } catch (_) {
+        return rawScore; // fail-safe: never crash the scan over smoothing
+    }
+}
+
+/**
  * Upserts one analysis row into daily_universe_analysis.
  */
 async function _upsert(symbol, date, analysis, passedPrescreen, exclusionReason) {
@@ -155,10 +208,13 @@ async function runNightlyUniverseScan(opts = {}) {
         // getStockUniverse() hits Yahoo for every symbol to get price/volume data,
         // which floods the rate limit before AI analysis even starts.
         // analyzeStockWithAI() fetches its own data per-ticker at a safe throttled rate.
+        const _timeout = (p, ms, fallback) =>
+            Promise.race([p, new Promise(r => setTimeout(() => r(fallback), ms))]);
+
         const [symbolList, vixLevel, regime] = await Promise.all([
             marketScreenerService.getStockOnlySymbolList(), // ETFs excluded — analyzeStockWithAI returns null for them
-            getVixLevel(),
-            marketRegimeService.getMarketRegime()
+            _timeout(getVixLevel(), 15000, 15),                          // fallback VIX=15 if Yahoo hangs
+            _timeout(marketRegimeService.getMarketRegime(), 15000, null) // fallback regime=null → NEUTRAL
         ]);
 
         let symbols = symbolList;
@@ -224,6 +280,17 @@ async function runNightlyUniverseScan(opts = {}) {
                             analysis.isNewTicker = true;
                         }
 
+                        // Apply 3-day EMA smoothing to kill single-day whipsaws.
+                        // Raw score is preserved in analysis.rawScore (written to metadata).
+                        // Smoothed score replaces ai_score and is used for ranking + prescreen.
+                        const rawScore = analysis.aiScore;
+                        const smoothedScore = await _computeSmoothedScore(stock.symbol, rawScore, today);
+                        if (smoothedScore !== rawScore) {
+                            analysis.rawScore      = rawScore;
+                            analysis.aiScore       = smoothedScore;
+                            analysis.recommendation = _deriveRecommendation(smoothedScore);
+                        }
+
                         // Pre-screen: accept STRONG BUY or BUY above an absolute floor.
                         // The live scan applies the user's minBuyScore; overnight we use a
                         // lower floor (70) so borderline candidates aren't lost prematurely.
@@ -233,7 +300,7 @@ async function runNightlyUniverseScan(opts = {}) {
 
                         const exclusionReason = passedPrescreen
                             ? null
-                            : `${analysis.recommendation} / score ${analysis.aiScore}`;
+                            : `${analysis.recommendation} / score ${analysis.aiScore}${rawScore !== smoothedScore ? ` (raw ${rawScore})` : ''}`;
 
                         await _upsert(stock.symbol, today, analysis, passedPrescreen, exclusionReason);
 

@@ -733,6 +733,22 @@ async function initializeDatabase() {
         `);
         console.log('✓ Created live_score_cache table');
 
+        // ATLAS global sentiment — single-row DB cache so worker restarts don't
+        // trigger a 90-second Yahoo market-data fetch before the nightly scan.
+        await query(`
+            CREATE TABLE IF NOT EXISTS global_sentiment_cache (
+                id              INTEGER      PRIMARY KEY DEFAULT 1,
+                sentiment_label TEXT         NOT NULL,
+                global_score    NUMERIC(6,4) NOT NULL,
+                base_adj        SMALLINT     NOT NULL,
+                breakdown       JSONB,
+                raw_data        JSONB,
+                updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+                CONSTRAINT global_sentiment_singleton CHECK (id = 1)
+            )
+        `);
+        console.log('✓ Created global_sentiment_cache table');
+
         // Fundamentals cache — DB-backed, 7-day TTL, survives restarts
         await query(`
             CREATE TABLE IF NOT EXISTS fundamentals_cache (
@@ -816,6 +832,27 @@ async function initializeDatabase() {
             ON sentinel_order_acknowledgements(idempotency_key)
         `);
         console.log('✓ Created sentinel_order_acknowledgements table');
+
+        // Score calibration suggestions — persisted by scoreCalibratorService
+        await query(`
+            CREATE TABLE IF NOT EXISTS calibration_suggestions (
+                id               BIGSERIAL    PRIMARY KEY,
+                user_id          VARCHAR(50)  NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                suggested_floor  INTEGER,
+                current_floor    INTEGER,
+                confidence       VARCHAR(10),
+                total_trades     INTEGER,
+                reason           TEXT,
+                has_enough_data  BOOLEAN,
+                report_json      JSONB        NOT NULL DEFAULT '{}'::jsonb,
+                created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+            )
+        `);
+        await query(`
+            CREATE INDEX IF NOT EXISTS idx_calibration_suggestions_user_created
+            ON calibration_suggestions(user_id, created_at DESC)
+        `);
+        console.log('✓ Created calibration_suggestions table');
 
         console.log('\n✓ Database initialization completed successfully!\n');
         return true;

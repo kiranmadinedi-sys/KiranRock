@@ -1,21 +1,29 @@
 /**
- * SEC EDGAR Connector — Form 4 Insider Transactions
+ * SEC EDGAR Connector — Form 4 Insider Transactions + Form 8-K Material Events
  *
- * Fetches legally-disclosed insider buy/sell data directly from the US Securities
- * and Exchange Commission EDGAR database.  No API key required.  Free, official,
- * and updated within 2 business days of each insider transaction.
+ * Fetches legally-disclosed insider buy/sell data and material-event 8-K filings
+ * directly from the US Securities and Exchange Commission EDGAR database.
+ * No API key required.  Free, official source.
  *
- * Data flow:
+ * Data flow (Form 4):
  *   1. company_tickers.json  — ticker → CIK mapping (cached 24h)
  *   2. /submissions/CIK*.json — list of recent Form 4 filings for a CIK
  *   3. /Archives/edgar/data/…/form4.xml — individual transaction XML (parsed via regex)
  *
+ * Data flow (Form 8-K):
+ *   1. company_tickers.json  — same CIK mapping
+ *   2. /submissions/CIK*.json — filings array includes an `items` field for 8-K
+ *      listing space-separated item numbers (e.g. "1.01 5.02 9.01")
+ *
  * SEC rate-limit guidance: ≤10 req/sec, identify yourself via User-Agent.
  * We cap at ~5 req/sec (200 ms gap) to stay well within limits.
  *
- * Returned transaction shape (Finnhub-compatible):
+ * Returned Form 4 transaction shape (Finnhub-compatible):
  *   { change, price, transactionCode, filingDate, insiderName, insiderTitle,
  *     isOfficer, isDirector, dollarValue }
+ *
+ * Returned Form 8-K shape:
+ *   { filingDate: string, items: string[] }  e.g. items: ['1.01', '5.02', '9.01']
  */
 
 const { logger } = require('../utils/logger');
@@ -28,8 +36,11 @@ const TICKERS_URL = 'https://www.sec.gov/files/company_tickers.json';
 
 const CIK_CACHE_TTL     = 24 * 60 * 60 * 1000;  // 24 h — tickers rarely change
 const INSIDER_CACHE_TTL =  6 * 60 * 60 * 1000;  //  6 h — enough freshness intraday
+const FORM8K_CACHE_TTL  = 12 * 60 * 60 * 1000;  // 12 h — 8-K filings are infrequent
 const MAX_FILINGS       = 8;                      // Form 4 filings to parse per symbol
+const MAX_8K_FILINGS    = 6;                      // 8-K filings to inspect per symbol
 const REQUEST_GAP_MS    = 220;                    // ~4.5 req/sec — comfortably under SEC limit
+const FORM8K_LOOKBACK_D = 90;                     // days to look back for 8-K signals
 
 let _tikMap     = null;   // { AAPL: '0000320193', ... }
 let _tikLoaded  = 0;
@@ -204,4 +215,58 @@ async function getInsiderTransactions(symbol) {
     }
 }
 
-module.exports = { getInsiderTransactions, getCik };
+// ── Form 8-K ──────────────────────────────────────────────────────────────────
+
+/**
+ * Returns recent 8-K filings for a ticker with their item numbers.
+ * The SEC submissions JSON exposes an `items` field (space-separated) for each
+ * 8-K entry — e.g. "1.01 5.02 9.01" — so no extra HTTP fetches are needed.
+ * Results are cached for 12 hours per symbol.
+ *
+ * @param {string} symbol
+ * @returns {Promise<Array<{filingDate: string, items: string[]}>>}
+ */
+async function getRecentForm8K(symbol) {
+    const cacheKey = `edgar_8k_${symbol}`;
+    const cached   = cacheService.get(cacheKey);
+    if (cached !== null) return cached;
+
+    try {
+        const cik = await getCik(symbol);
+        if (!cik) {
+            cacheService.set(cacheKey, [], FORM8K_CACHE_TTL);
+            return [];
+        }
+
+        const sub    = await _get(`${EDGAR_BASE}/submissions/CIK${cik}.json`);
+        const recent = sub.filings?.recent ?? {};
+        const forms  = recent.form        ?? [];
+        const dates  = recent.filingDate  ?? [];
+        const rawItems = recent.items     ?? [];   // space-separated item numbers per filing
+
+        const cutoff = new Date();
+        cutoff.setDate(cutoff.getDate() - FORM8K_LOOKBACK_D);
+
+        const filings = forms
+            .map((f, i) => ({ form: f, date: dates[i], rawItems: rawItems[i] || '' }))
+            .filter(x => x.form === '8-K' && x.date && new Date(x.date) >= cutoff)
+            .slice(0, MAX_8K_FILINGS)
+            .map(x => ({
+                filingDate: x.date,
+                items: x.rawItems
+                    .split(/[\s,]+/)
+                    .map(s => s.trim())
+                    .filter(Boolean)
+            }));
+
+        logger.info(`[SECEdgar] ${symbol}: ${filings.length} 8-K filings in last ${FORM8K_LOOKBACK_D}d`);
+        cacheService.set(cacheKey, filings, FORM8K_CACHE_TTL);
+        return filings;
+
+    } catch (err) {
+        logger.warn(`[SECEdgar] 8-K fetch failed for ${symbol}: ${err.message}`);
+        return [];
+    }
+}
+
+module.exports = { getInsiderTransactions, getRecentForm8K, getCik };

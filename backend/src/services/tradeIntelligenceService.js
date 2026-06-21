@@ -306,6 +306,10 @@ async function closeExecutionByRef(userId, closure) {
 async function closeLatestOpenExecution(userId, closure) {
     try {
         await ensureTradeIntelligenceSchema();
+        const _outcome = closure.outcome || (
+            (normalizeNumber(closure.pnlPercent) || 0) > 0.5 ? 'win' :
+            (normalizeNumber(closure.pnlPercent) || 0) < -0.5 ? 'loss' : 'breakeven'
+        );
         await query(
             `WITH target AS (
                 SELECT id
@@ -322,6 +326,7 @@ async function closeLatestOpenExecution(userId, closure) {
                  exit_price = $4,
                  pnl = $5,
                  pnl_percent = $6,
+                 outcome = $8,
                  closed_at = NOW(),
                  updated_at = NOW(),
                  metadata = COALESCE(journal.metadata, '{}'::jsonb) || $7::jsonb
@@ -334,7 +339,8 @@ async function closeLatestOpenExecution(userId, closure) {
                 normalizeNumber(closure.exitPrice),
                 normalizeNumber(closure.pnl),
                 normalizeNumber(closure.pnlPercent),
-                JSON.stringify(closure.metadata || {})
+                JSON.stringify(closure.metadata || {}),
+                _outcome
             ]
         );
     } catch (error) {

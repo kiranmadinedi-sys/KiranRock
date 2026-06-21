@@ -98,7 +98,9 @@ async function loadOptionsFromDB(symbol, maxAgeMs = optionsCacheMaxAgeMs) {
 
 async function saveOptionsToDB(symbol, payload) {
     if (!payload || !Array.isArray(payload.options) || payload.options.length === 0) return;
+    const sym = String(symbol).toUpperCase();
     try {
+        // Rolling cache — one row per symbol, always fresh
         await query(
             `INSERT INTO options_chain_cache (symbol, fetched_at, stock_price, options_count, payload, source)
              VALUES ($1, NOW(), $2, $3, $4::jsonb, 'yahoo')
@@ -108,15 +110,45 @@ async function saveOptionsToDB(symbol, payload) {
                options_count = EXCLUDED.options_count,
                payload       = EXCLUDED.payload,
                source        = EXCLUDED.source`,
-            [
-                String(symbol).toUpperCase(),
-                payload.stockPrice ?? null,
-                payload.options.length,
-                JSON.stringify(payload.options)
-            ]
+            [sym, payload.stockPrice ?? null, payload.options.length, JSON.stringify(payload.options)]
         );
     } catch (error) {
-        console.warn(`[Options] DB cache write failed for ${symbol}:`, error.message);
+        console.warn(`[Options] DB cache write failed for ${sym}:`, error.message);
+    }
+
+    // Historical append — build long-term options dataset (one row per contract per day)
+    try {
+        const today = new Date().toISOString().split('T')[0];
+        for (const opt of payload.options) {
+            await query(
+                `INSERT INTO options_chain_history
+                    (symbol, captured_date, expiration_date, option_type, strike,
+                     bid, ask, last_price, volume, open_interest, implied_volatility,
+                     delta, gamma, theta, vega, stock_price, days_to_exp, source)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'yahoo')
+                 ON CONFLICT (symbol, captured_date, expiration_date, option_type, strike)
+                 DO UPDATE SET
+                   bid=EXCLUDED.bid, ask=EXCLUDED.ask, last_price=EXCLUDED.last_price,
+                   volume=EXCLUDED.volume, open_interest=EXCLUDED.open_interest,
+                   implied_volatility=EXCLUDED.implied_volatility,
+                   delta=EXCLUDED.delta, gamma=EXCLUDED.gamma,
+                   theta=EXCLUDED.theta, vega=EXCLUDED.vega,
+                   stock_price=EXCLUDED.stock_price, days_to_exp=EXCLUDED.days_to_exp`,
+                [
+                    sym, today, opt.expirationDate, opt.optionType,
+                    opt.strikePrice,
+                    opt.bid ?? null, opt.ask ?? null, opt.lastPrice ?? null,
+                    opt.volume ?? null, opt.openInterest ?? null, opt.impliedVolatility ?? null,
+                    opt.greeks?.delta ?? null, opt.greeks?.gamma ?? null,
+                    opt.greeks?.theta ?? null, opt.greeks?.vega ?? null,
+                    payload.stockPrice ?? null,
+                    opt.daysToExpiration ?? null
+                ]
+            ).catch(() => {}); // ignore per-row conflicts silently
+        }
+        console.info(`[Options] Persisted ${payload.options.length} contracts to history for ${sym} (${today})`);
+    } catch (histErr) {
+        console.warn(`[Options] History write failed for ${sym}:`, histErr.message);
     }
 }
 
@@ -419,7 +451,16 @@ async function getOptionsWithGreeks(symbol, marketCap = null) {
                 options: []
             };
         }
-        
+
+        // Cache-first: serve from DB during market hours to avoid live API calls.
+        // The 8 AM pre-market warmup populates this; a 23-hour window keeps the
+        // cache valid all day while allowing the next morning's warmup to refresh it.
+        const cached = await loadOptionsFromDB(symbol, 23 * 60 * 60 * 1000);
+        if (cached && cached.options.length > 0) {
+            console.info(`[Options] DB cache hit for ${symbol} — ${cached.options.length} contracts, age ${(cached.cache.ageMs / 3_600_000).toFixed(1)}h`);
+            return cached;
+        }
+
         const optionsChain = await getOptionsChain(symbol);
         
         const quote = await dataProvider.getQuote(symbol);
@@ -502,29 +543,33 @@ async function getOptionsWithGreeks(symbol, marketCap = null) {
             };
         }
         
-        const candidateExpirations = (optionsChain.expirationDates || [])
-            .filter((exp) => {
-                const expirationDate = new Date(exp);
-                const daysToExpiration = Math.ceil((expirationDate - new Date()) / (1000 * 60 * 60 * 24));
-                return daysToExpiration >= 7 && daysToExpiration <= 60;
-            })
-            .slice(0, 4);
+        // Yahoo's initial response already includes calls + puts for the nearest
+        // expiration — use them directly.  The old per-expiration loop issued N
+        // additional yf.options(symbol, {date}) calls which exhausted the Yahoo
+        // crumb rate limit (429).  One call per symbol is all we need.
+        const nearExpRaw = (optionsChain.expirationDates || [])[0];
+        if (!nearExpRaw) {
+            const cachedFallback = await buildCachedFallbackResponse(symbol, stockPrice, 'No Yahoo expirations returned');
+            if (cachedFallback) return cachedFallback;
+            return { symbol, stockPrice, error: 'No options data available', options: [] };
+        }
 
-        // Process a focused set of expirations to avoid provider rate limits.
-        for (const exp of candidateExpirations) {
-            const expirationDate = new Date(exp);
-            const daysToExpiration = Math.max(1, Math.ceil((expirationDate - new Date()) / (1000 * 60 * 60 * 24)));
-            
-            // Get options for this expiration
-            const chainData = await yahooFinance.options(symbol, { date: exp });
-            
-            // Process calls
-            for (const call of chainData.calls || []) {
+        // expirationDates may be Unix timestamps (seconds) or ISO strings
+        const expirationDate = new Date(
+            Number.isFinite(Number(nearExpRaw)) && Number(nearExpRaw) > 1_000_000_000
+                ? Number(nearExpRaw) * 1000
+                : nearExpRaw
+        );
+        const daysToExpiration = Math.max(1, Math.ceil((expirationDate - new Date()) / (1000 * 60 * 60 * 24)));
+        const expirationDateStr = expirationDate.toISOString().split('T')[0];
+
+        if (daysToExpiration >= 7 && daysToExpiration <= 60) {
+            for (const call of optionsChain.calls || []) {
                 optionsWithGreeks.push(normalizeOptionContract({
                     symbol,
                     stockPrice,
                     strikePrice: call.strike,
-                    expirationDate: expirationDate.toISOString().split('T')[0],
+                    expirationDate: expirationDateStr,
                     daysToExpiration,
                     optionType: 'call',
                     bid: call.bid || 0,
@@ -535,14 +580,12 @@ async function getOptionsWithGreeks(symbol, marketCap = null) {
                     impliedVolatility: call.impliedVolatility || historicVolatility
                 }));
             }
-            
-            // Process puts
-            for (const put of chainData.puts || []) {
+            for (const put of optionsChain.puts || []) {
                 optionsWithGreeks.push(normalizeOptionContract({
                     symbol,
                     stockPrice,
                     strikePrice: put.strike,
-                    expirationDate: expirationDate.toISOString().split('T')[0],
+                    expirationDate: expirationDateStr,
                     daysToExpiration,
                     optionType: 'put',
                     bid: put.bid || 0,
@@ -646,5 +689,6 @@ module.exports = {
     calculateGamma,
     calculateTheta,
     calculateVega,
-    findOptionsOpportunities
+    findOptionsOpportunities,
+    saveOptionsToDB
 };

@@ -538,4 +538,401 @@ router.get('/calibration', protect, async (req, res) => {
     }
 });
 
+// ─── Trade Attribution ────────────────────────────────────────────────────────
+
+// Create a stable DB view the first time any user hits this endpoint so the
+// user can query it directly: SELECT * FROM trade_attribution WHERE user_id=...
+let _tradeAttributionViewCreated = false;
+async function ensureTradeAttributionView(query) {
+    if (_tradeAttributionViewCreated) return;
+    await query(`
+        CREATE OR REPLACE VIEW trade_attribution AS
+        SELECT
+            j.id,
+            j.user_id,
+            j.symbol,
+            j.score,
+            j.confidence,
+            j.regime,
+            j.setup_family,
+            j.strategy_family,
+            j.outcome,
+            j.entry_price,
+            j.exit_price,
+            j.pnl,
+            j.pnl_percent,
+            j.opened_at,
+            j.closed_at,
+            EXTRACT(DAY FROM (j.closed_at - j.opened_at))::int AS hold_days,
+            CASE
+                WHEN j.score >= 95 THEN '95-100'
+                WHEN j.score >= 90 THEN '90-94'
+                WHEN j.score >= 85 THEN '85-89'
+                WHEN j.score >= 80 THEN '80-84'
+                WHEN j.score IS NOT NULL THEN '< 80'
+                ELSE 'No Score'
+            END AS score_bucket,
+            j.metadata->>'sector'               AS sector,
+            j.metadata->>'exitReason'           AS exit_reason,
+            j.metadata->>'winLossReason'        AS win_loss_reason,
+            (j.metadata->>'atrPct')::numeric    AS atr_pct,
+            (j.metadata->>'daysToEarnings')::numeric      AS dte_at_entry,
+            (j.metadata->>'daysToEarningsAtExit')::numeric AS dte_at_exit,
+            j.metadata->>'bullBearRatio'        AS bull_bear_ratio
+        FROM trade_decision_journal j
+        WHERE j.decision_phase = 'CLOSED'
+          AND j.pnl IS NOT NULL
+    `);
+    _tradeAttributionViewCreated = true;
+}
+
+/**
+ * GET /api/performance/trade-attribution?days=180&outcome=win|loss|breakeven
+ *
+ * Returns per-trade attribution detail plus aggregation breakdowns by:
+ *   score bucket · confidence bucket · sector · regime · exit reason · hold period
+ *
+ * Each aggregation row includes avgWinPct + avgLossPct so the frontend can
+ * compute % expectancy = (winRate/100 * avgWinPct) - ((1 - winRate/100) * |avgLossPct|)
+ *
+ * Also returns post-exit drift (5d and 10d) from daily_bars for trades where
+ * that data exists — answers "did we exit too early or at the right time?"
+ */
+router.get('/trade-attribution', protect, async (req, res) => {
+    try {
+        const { query } = require('../config/database');
+        await ensureTradeAttributionView(query);
+
+        const userId  = req.userId;
+        const days    = Math.max(7, Math.min(parseInt(req.query.days) || 365, 730));
+        const symbol  = typeof req.query.symbol === 'string' ? req.query.symbol.toUpperCase() : null;
+        const sector  = typeof req.query.sector === 'string' ? req.query.sector : null;
+        const outcome = typeof req.query.outcome === 'string' ? req.query.outcome : null;
+
+        const extraClauses = [];
+        const params = [userId, days];
+        if (symbol)  { params.push(symbol);  extraClauses.push(`j.symbol = $${params.length}`); }
+        if (sector)  { params.push(sector);  extraClauses.push(`j.metadata->>'sector' = $${params.length}`); }
+        if (outcome) { params.push(outcome); extraClauses.push(`j.outcome = $${params.length}`); }
+        const extraWhere = extraClauses.length ? 'AND ' + extraClauses.join(' AND ') : '';
+
+        // ── 1. Per-trade rows with post-exit drift from daily_bars ─────────────
+        const tradesRes = await query(`
+            SELECT
+                j.id,
+                j.symbol,
+                j.score,
+                j.confidence,
+                j.regime,
+                j.setup_family,
+                j.strategy_family,
+                j.outcome,
+                j.entry_price,
+                j.exit_price,
+                j.pnl,
+                j.pnl_percent,
+                j.opened_at,
+                j.closed_at,
+                EXTRACT(DAY FROM (j.closed_at - j.opened_at))::int AS hold_days,
+                j.metadata->>'sector'               AS sector,
+                j.metadata->>'exitReason'           AS exit_reason,
+                j.metadata->>'winLossReason'        AS win_loss_reason,
+                j.metadata->>'atrPct'               AS atr_pct,
+                j.metadata->>'daysToEarnings'       AS dte_at_entry,
+                j.metadata->>'daysToEarningsAtExit' AS dte_at_exit,
+                j.metadata->>'bullBearRatio'        AS bull_bear_ratio,
+                j.metadata->'autoTags'              AS auto_tags,
+                -- Post-exit drift: closest daily_bars close >= 5 calendar days after exit
+                (SELECT ROUND(((b5.close - j.exit_price) / NULLIF(j.exit_price,0) * 100)::numeric, 2)
+                 FROM daily_bars b5
+                 WHERE b5.symbol = j.symbol
+                   AND b5.timestamp >= j.closed_at + INTERVAL '5 days'
+                   AND b5.timestamp <= j.closed_at + INTERVAL '9 days'
+                 ORDER BY b5.timestamp ASC LIMIT 1
+                ) AS post_exit_drift_5d,
+                (SELECT ROUND(((b10.close - j.exit_price) / NULLIF(j.exit_price,0) * 100)::numeric, 2)
+                 FROM daily_bars b10
+                 WHERE b10.symbol = j.symbol
+                   AND b10.timestamp >= j.closed_at + INTERVAL '10 days'
+                   AND b10.timestamp <= j.closed_at + INTERVAL '16 days'
+                 ORDER BY b10.timestamp ASC LIMIT 1
+                ) AS post_exit_drift_10d
+            FROM trade_decision_journal j
+            WHERE j.user_id = $1
+              AND j.decision_phase = 'CLOSED'
+              AND j.pnl IS NOT NULL
+              AND j.closed_at >= NOW() - ($2 * INTERVAL '1 day')
+              ${extraWhere}
+            ORDER BY j.closed_at DESC
+            LIMIT 200
+        `, params);
+
+        // ── 2. Aggregations ────────────────────────────────────────────────────
+        // avgWinPct / avgLossPct enable % expectancy on the frontend without
+        // needing separate API calls.
+        const aggParams = [userId, days];
+        if (symbol)  aggParams.push(symbol);
+        if (sector)  aggParams.push(sector);
+        if (outcome) aggParams.push(outcome);
+
+        const buildAgg = (groupExpr) => query(`
+            SELECT
+                ${groupExpr} AS bucket,
+                COUNT(*)                                                              AS total,
+                COUNT(*) FILTER (WHERE pnl > 0)                                     AS wins,
+                ROUND(COUNT(*) FILTER (WHERE pnl > 0)::numeric / NULLIF(COUNT(*),0) * 100, 1)
+                                                                                     AS win_rate,
+                ROUND(AVG(pnl_percent)::numeric, 2)                                 AS avg_return,
+                ROUND(SUM(pnl)::numeric, 2)                                         AS total_pnl,
+                ROUND(AVG(CASE WHEN pnl > 0 THEN pnl     ELSE NULL END)::numeric, 2) AS avg_win,
+                ROUND(AVG(CASE WHEN pnl < 0 THEN pnl     ELSE NULL END)::numeric, 2) AS avg_loss,
+                ROUND(AVG(CASE WHEN pnl > 0 THEN pnl_percent ELSE NULL END)::numeric, 2) AS avg_win_pct,
+                ROUND(AVG(CASE WHEN pnl < 0 THEN pnl_percent ELSE NULL END)::numeric, 2) AS avg_loss_pct
+            FROM trade_decision_journal j
+            WHERE j.user_id = $1
+              AND j.decision_phase = 'CLOSED'
+              AND j.pnl IS NOT NULL
+              AND j.closed_at >= NOW() - ($2 * INTERVAL '1 day')
+              ${extraWhere}
+            GROUP BY bucket
+            ORDER BY total_pnl DESC NULLS LAST
+        `, aggParams);
+
+        // Exit Quality aggregation uses a CTE to join daily_bars once per trade,
+        // then aggregates both P&L metrics and post-exit drift by exit reason.
+        const exitQualityAgg = query(`
+            WITH td AS (
+                SELECT
+                    j.pnl,
+                    j.pnl_percent,
+                    j.exit_price,
+                    j.closed_at,
+                    j.symbol,
+                    COALESCE(j.metadata->>'exitReason', 'untagged') AS exit_reason,
+                    (SELECT b5.close
+                     FROM daily_bars b5
+                     WHERE b5.symbol = j.symbol
+                       AND b5.timestamp >= j.closed_at + INTERVAL '5 days'
+                       AND b5.timestamp <= j.closed_at + INTERVAL '9 days'
+                     ORDER BY b5.timestamp ASC LIMIT 1) AS price_5d,
+                    (SELECT b10.close
+                     FROM daily_bars b10
+                     WHERE b10.symbol = j.symbol
+                       AND b10.timestamp >= j.closed_at + INTERVAL '10 days'
+                       AND b10.timestamp <= j.closed_at + INTERVAL '16 days'
+                     ORDER BY b10.timestamp ASC LIMIT 1) AS price_10d
+                FROM trade_decision_journal j
+                WHERE j.user_id = $1
+                  AND j.decision_phase = 'CLOSED'
+                  AND j.pnl IS NOT NULL
+                  AND j.closed_at >= NOW() - ($2 * INTERVAL '1 day')
+                  ${extraWhere}
+            )
+            SELECT
+                exit_reason                                                           AS bucket,
+                COUNT(*)                                                              AS total,
+                COUNT(*) FILTER (WHERE pnl > 0)                                     AS wins,
+                ROUND(COUNT(*) FILTER (WHERE pnl > 0)::numeric / NULLIF(COUNT(*),0) * 100, 1) AS win_rate,
+                ROUND(AVG(pnl_percent)::numeric, 2)                                 AS avg_return,
+                ROUND(SUM(pnl)::numeric, 2)                                         AS total_pnl,
+                ROUND(AVG(CASE WHEN pnl > 0 THEN pnl     ELSE NULL END)::numeric, 2) AS avg_win,
+                ROUND(AVG(CASE WHEN pnl < 0 THEN pnl     ELSE NULL END)::numeric, 2) AS avg_loss,
+                ROUND(AVG(CASE WHEN pnl > 0 THEN pnl_percent ELSE NULL END)::numeric, 2) AS avg_win_pct,
+                ROUND(AVG(CASE WHEN pnl < 0 THEN pnl_percent ELSE NULL END)::numeric, 2) AS avg_loss_pct,
+                ROUND(AVG(CASE WHEN price_5d  IS NOT NULL
+                               THEN (price_5d  - exit_price) / NULLIF(exit_price,0) * 100
+                          END)::numeric, 2) AS avg_drift_5d,
+                ROUND(AVG(CASE WHEN price_10d IS NOT NULL
+                               THEN (price_10d - exit_price) / NULLIF(exit_price,0) * 100
+                          END)::numeric, 2) AS avg_drift_10d,
+                COUNT(*) FILTER (WHERE price_10d IS NOT NULL)                       AS drift_sample_count
+            FROM td
+            GROUP BY exit_reason
+            ORDER BY total DESC
+        `, aggParams);
+
+        const [byScore, byConfidence, bySector, byRegime, byExit, byHold, byOutcome] = await Promise.all([
+            buildAgg(`CASE
+                WHEN score >= 95 THEN '95-100'
+                WHEN score >= 90 THEN '90-94'
+                WHEN score >= 85 THEN '85-89'
+                WHEN score >= 80 THEN '80-84'
+                WHEN score IS NOT NULL THEN '< 80'
+                ELSE 'No Score'
+            END`),
+            buildAgg(`CASE
+                WHEN confidence >= 90 THEN '90-100'
+                WHEN confidence >= 80 THEN '80-89'
+                WHEN confidence >= 70 THEN '70-79'
+                WHEN confidence IS NOT NULL THEN '< 70'
+                ELSE 'No Conf'
+            END`),
+            buildAgg(`COALESCE(metadata->>'sector', 'Unknown')`),
+            buildAgg(`COALESCE(regime, 'UNKNOWN')`),
+            exitQualityAgg,  // replaces plain buildAgg for byExit — includes drift
+            buildAgg(`CASE
+                WHEN EXTRACT(DAY FROM (closed_at - opened_at)) <= 1  THEN '0-1d'
+                WHEN EXTRACT(DAY FROM (closed_at - opened_at)) <= 3  THEN '2-3d'
+                WHEN EXTRACT(DAY FROM (closed_at - opened_at)) <= 7  THEN '4-7d'
+                WHEN EXTRACT(DAY FROM (closed_at - opened_at)) <= 14 THEN '8-14d'
+                ELSE '15+d'
+            END`),
+            buildAgg(`COALESCE(outcome, 'unknown')`),
+        ]);
+
+        const mapAgg = (rows, includeDrift = false) => rows.map(r => {
+            const wr = parseFloat(r.win_rate) || 0;
+            const awp = parseFloat(r.avg_win_pct) || 0;
+            const alp = parseFloat(r.avg_loss_pct) || 0; // negative
+            const expectancyPct = parseFloat(((wr / 100) * awp + (1 - wr / 100) * alp).toFixed(2));
+            const base = {
+                bucket:        r.bucket,
+                total:         parseInt(r.total),
+                wins:          parseInt(r.wins),
+                winRate:       wr,
+                avgReturn:     parseFloat(r.avg_return) || 0,
+                totalPnl:      parseFloat(r.total_pnl) || 0,
+                avgWin:        parseFloat(r.avg_win) || 0,
+                avgLoss:       parseFloat(r.avg_loss) || 0,
+                avgWinPct:     awp,
+                avgLossPct:    alp,
+                expectancyPct,
+            };
+            if (!includeDrift) return base;
+            return {
+                ...base,
+                avgDrift5d:       r.avg_drift_5d  != null ? parseFloat(r.avg_drift_5d)  : null,
+                avgDrift10d:      r.avg_drift_10d != null ? parseFloat(r.avg_drift_10d) : null,
+                driftSampleCount: parseInt(r.drift_sample_count) || 0,
+            };
+        });
+
+        // ── 3. Post-exit summary across all closed trades ──────────────────────
+        // Average drift tells us whether exits are systematically early or late.
+        const driftRows = tradesRes.rows.filter(r => r.post_exit_drift_5d != null);
+        const avgDrift5d  = driftRows.length
+            ? parseFloat((driftRows.reduce((s, r) => s + parseFloat(r.post_exit_drift_5d), 0) / driftRows.length).toFixed(2))
+            : null;
+        const driftRows10 = tradesRes.rows.filter(r => r.post_exit_drift_10d != null);
+        const avgDrift10d = driftRows10.length
+            ? parseFloat((driftRows10.reduce((s, r) => s + parseFloat(r.post_exit_drift_10d), 0) / driftRows10.length).toFixed(2))
+            : null;
+
+        res.json({
+            days,
+            filters: { symbol, sector, outcome },
+            totalClosed: tradesRes.rows.length,
+            postExitSummary: {
+                avgDrift5d,
+                avgDrift10d,
+                tradesWithDriftData: driftRows.length,
+            },
+            trades: tradesRes.rows.map(r => ({
+                id:              r.id,
+                symbol:          r.symbol,
+                score:           r.score     != null ? parseFloat(r.score)      : null,
+                confidence:      r.confidence != null ? parseFloat(r.confidence) : null,
+                regime:          r.regime,
+                setupFamily:     r.setup_family,
+                strategyFamily:  r.strategy_family,
+                outcome:         r.outcome,
+                entryPrice:      r.entry_price  != null ? parseFloat(r.entry_price)  : null,
+                exitPrice:       r.exit_price   != null ? parseFloat(r.exit_price)   : null,
+                pnl:             r.pnl          != null ? parseFloat(r.pnl)          : null,
+                pnlPct:          r.pnl_percent  != null ? parseFloat(r.pnl_percent)  : null,
+                openedAt:        r.opened_at,
+                closedAt:        r.closed_at,
+                holdDays:        r.hold_days,
+                sector:          r.sector,
+                exitReason:      r.exit_reason,
+                winLossReason:   r.win_loss_reason,
+                atrPct:          r.atr_pct      != null ? parseFloat(r.atr_pct)      : null,
+                dteAtEntry:      r.dte_at_entry  != null ? parseFloat(r.dte_at_entry)  : null,
+                dteAtExit:       r.dte_at_exit   != null ? parseFloat(r.dte_at_exit)   : null,
+                bullBearRatio:   r.bull_bear_ratio != null ? parseFloat(r.bull_bear_ratio) : null,
+                autoTags:        r.auto_tags || [],
+                postExitDrift5d:  r.post_exit_drift_5d  != null ? parseFloat(r.post_exit_drift_5d)  : null,
+                postExitDrift10d: r.post_exit_drift_10d != null ? parseFloat(r.post_exit_drift_10d) : null,
+            })),
+            byScore:       mapAgg(byScore.rows),
+            byConfidence:  mapAgg(byConfidence.rows),
+            bySector:      mapAgg(bySector.rows),
+            byRegime:      mapAgg(byRegime.rows),
+            byExit:        mapAgg(byExit.rows, true),  // includes avgDrift5d/10d
+            byHold:        mapAgg(byHold.rows),
+            byOutcome:     mapAgg(byOutcome.rows),
+        });
+    } catch (err) {
+        logger.error('Trade attribution endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ─── Weekly Trading Reports ───────────────────────────────────────────────────
+
+const weeklyTradingReportService = require('../services/weeklyTradingReportService');
+
+/**
+ * GET /api/performance/trading-report
+ * Returns the most recent stored weekly trading performance report for the user.
+ * If none stored, generates the current week on-the-fly.
+ */
+router.get('/trading-report', protect, async (req, res) => {
+    try {
+        const report = await weeklyTradingReportService.getLatestReport(req.userId);
+        res.json(report);
+    } catch (err) {
+        logger.error('Trading report endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/performance/trading-report/history
+ * Returns a list of past weekly reports (summary only) for the user.
+ */
+router.get('/trading-report/history', protect, async (req, res) => {
+    try {
+        const limit = Math.min(parseInt(req.query.limit) || 12, 52);
+        const history = await weeklyTradingReportService.getReportHistory(req.userId, limit);
+        res.json(history);
+    } catch (err) {
+        logger.error('Trading report history endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/performance/trading-report/:id
+ * Returns a specific historical weekly report by ID.
+ */
+router.get('/trading-report/:id', protect, async (req, res) => {
+    try {
+        const report = await weeklyTradingReportService.getReportById(req.userId, parseInt(req.params.id));
+        if (!report) return res.status(404).json({ error: 'Report not found' });
+        res.json(report);
+    } catch (err) {
+        logger.error('Trading report by id endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * POST /api/performance/trading-report/generate
+ * Manually generates (or regenerates) the weekly report for the current or specified week.
+ * Body: { weekStart?: 'YYYY-MM-DD', weekEnd?: 'YYYY-MM-DD' }
+ */
+router.post('/trading-report/generate', protect, async (req, res) => {
+    try {
+        const { weekStart, weekEnd } = req.body?.weekStart
+            ? req.body
+            : weeklyTradingReportService.currentWeekRange();
+        const report = await weeklyTradingReportService.generateWeeklyReport(req.userId, weekStart, weekEnd);
+        res.json({ success: true, report });
+    } catch (err) {
+        logger.error('Generate trading report endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = router;

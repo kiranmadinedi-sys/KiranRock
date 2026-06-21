@@ -84,15 +84,16 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
     };
 
     const navItems = [
-        { href: '/dashboard',       label: 'Dashboard',  icon: '📊' },
         { href: '/portfolio',       label: 'Portfolio',  icon: '💼' },
+        { href: '/dashboard',       label: 'Dashboard',  icon: '📊' },
         { href: '/performance',     label: 'Performance',icon: '📈' },
         { href: '/recommendations', label: 'Picks',      icon: '🎯' },
         { href: '/alerts',          label: 'Alerts',     icon: '🔔' },
         { href: '/news',            label: 'News',       icon: '📰' },
         { href: '/weekly',          label: 'Weekly',     icon: '📅' },
         { href: '/ai-trading',      label: 'AI Bot',     icon: '🤖' },
-        { href: '/options-bot',     label: 'Options',    icon: '⚙️' },
+        { href: '/options-chain',   label: 'Chains',     icon: '📊' },
+        { href: '/options-bot',     label: 'Options Bot',icon: '⚙️' },
         { href: '/swing-trading',   label: 'Swing',      icon: '🔄' },
         { href: '/backtest',        label: 'Backtest',   icon: '🧪' },
         { href: '/scalping',        label: 'Scalping',   icon: '⚡' },

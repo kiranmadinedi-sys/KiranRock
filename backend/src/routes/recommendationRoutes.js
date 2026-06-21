@@ -6,14 +6,35 @@ const { getWeeklyPredictions } = require('../services/weeklyPredictionService');
 const { query } = require('../config/database');
 const { enrichWithMarketHours, getETContext } = require('../services/marketHoursEnrichmentService');
 
+const DEFAULT_MIN_SCORE = 85; // matches the bot's default minBuyScore
+
+/**
+ * Fetch the user's configured min_buy_score from risk_configs (falls back to DEFAULT_MIN_SCORE).
+ */
+async function getUserMinScore(userId) {
+    try {
+        const r = await query(
+            'SELECT min_buy_score FROM risk_configs WHERE user_id = $1',
+            [userId]
+        );
+        const val = parseFloat(r.rows[0]?.min_buy_score);
+        return Number.isFinite(val) ? val : DEFAULT_MIN_SCORE;
+    } catch {
+        return DEFAULT_MIN_SCORE;
+    }
+}
+
 /**
  * Load predictions from the nightly PANTHEON scan (daily_universe_analysis).
  * Returns null if no recent scan data is available — caller falls back to live analysis.
  *
  * Maps DB rows → the same shape that analyzeStockForWeek() returns so the
  * recommendation service works without modification.
+ *
+ * @param {number} limit     — max rows to fetch from DB
+ * @param {number} minScore  — minimum ai_score to show (default DEFAULT_MIN_SCORE)
  */
-async function loadPredictionsFromNightlyScan(limit = 500) {
+async function loadPredictionsFromNightlyScan(limit = 500, minScore = DEFAULT_MIN_SCORE) {
     try {
         const LATEST_DATE = `(
             SELECT MAX(analysis_date)
@@ -36,10 +57,10 @@ async function loadPredictionsFromNightlyScan(limit = 500) {
               AND l.scan_date  = d.analysis_date
               AND l.live_scored_at > NOW() - INTERVAL '10 minutes'
              WHERE d.analysis_date = ${LATEST_DATE}
-               AND d.ai_score IS NOT NULL
+               AND COALESCE(l.ai_score, d.ai_score) >= $2
              ORDER BY COALESCE(l.ai_score, d.ai_score) DESC
              LIMIT $1`,
-            [limit]
+            [limit, minScore]
         );
 
         if (!res.rows.length) return null;
@@ -60,33 +81,57 @@ async function loadPredictionsFromNightlyScan(limit = 500) {
                 rec === 'SELL'        ? 'Sell'         :
                 rec === 'STRONG SELL' ? 'Strong Sell'  : 'Hold';
 
-            // ── CONFIDENCE (cap at 85% — no model is perfect) ─────────────────────
-            // Formula: maps score 50→10%, 70→40%, 85→63%, 100→85%
-            // Adds a small uncertainty floor so confidence never reaches 100%.
-            const rawConf   = Math.round((score - 50) / 50 * 75 + 10);
-            const confidence = Math.min(85, Math.max(10, rawConf));
+            // ── ATR% — stock-price-relative volatility (ATR in dollar / price) ────
+            // Future scans store atrPct directly; older rows compute it on the fly.
+            const currentPrice = parseFloat(meta.price) || 0;
+            const atrRaw  = parseFloat(meta.atr || 0);
+            const atrPct  = parseFloat(meta.atrPct)
+                || ((currentPrice > 0 && atrRaw > 0) ? (atrRaw / currentPrice * 100) : 2);
 
-            // ── RISK SCORE (15 minimum — zero risk is impossible in markets) ───────
-            // Base: inverted score. Adjusted by volatility and sector risk premium.
-            const stockVol   = parseFloat(meta.volatility || meta.atr || 0);
-            const volPremium = stockVol > 3 ? 10 : stockVol > 2 ? 5 : 0; // high-vol stocks are riskier
+            // ── CONFIDENCE (signal-adjusted, not a simple score→value map) ─────────
+            // Base maps score 50→10%, 70→37%, 85→58%, 100→80% — leaves ±5 room for signals.
+            // Signal adjustments differentiate stocks that share the same raw PANTHEON score.
+            const rsiRaw   = parseFloat(meta.rsi || 60);
+            const volRatio = parseFloat(meta.volumeRatio || 1);
+            const newsSent = parseFloat(meta.newsSentiment || 0);
+            const aboveBoth = (meta.aboveMa50 !== undefined && meta.aboveMa200 !== undefined)
+                ? (meta.aboveMa50 && meta.aboveMa200) : null;
+
+            const rsiAdj  = rsiRaw > 80 ? -4 : rsiRaw > 70 ? -2 : rsiRaw > 52 ? 2 : -3;
+            const volAdj  = volRatio > 1.5 ? 3 : volRatio > 1.1 ? 1 : volRatio < 0.7 ? -3 : 0;
+            const newsAdj = newsSent > 20 ? 2 : newsSent < -10 ? -3 : 0;
+            const maAdj   = aboveBoth === true ? 1 : aboveBoth === false ? -2 : 0;
+
+            const rawConf    = Math.round((score - 50) / 50 * 70 + 10);
+            const confidence = Math.min(85, Math.max(10, rawConf + rsiAdj + volAdj + newsAdj + maAdj));
+
+            // ── RISK SCORE (ATR%-based floor — replaces fixed $ATR dollar check) ──
+            // Floor = 8 + atrPct*3 so a 1.4% daily-range stock floors at ~12, 3% at ~17.
+            // This naturally differentiates defensive (low ATR%) vs volatile stocks.
             const SECTOR_RISK = { Technology: 5, 'Consumer Discretionary': 5, Healthcare: 0, Industrials: 0, 'Real Estate': 5, Financials: 0, 'Communication Services': 5 };
             const sectorPremium = SECTOR_RISK[sector] ?? 3;
-            const baseRisk  = Math.round(100 - score);
-            const riskScore = Math.min(85, Math.max(15, baseRisk + volPremium + sectorPremium));
-            const riskLevel = riskScore < 30 ? 'Low' : riskScore < 55 ? 'Moderate' : 'High';
+            const volPremium  = atrPct > 3 ? 12 : atrPct > 2 ? 6 : atrPct > 1.5 ? 3 : 2;
+            const volFloor    = Math.max(8, Math.round(8 + atrPct * 3));
+            const baseRisk    = Math.round(100 - score);
+            // Tiered earnings risk: tighter = higher adj. 0-4d already blocks entry via -15 score penalty.
+            const dte = meta.daysToEarnings != null ? parseInt(meta.daysToEarnings) : null;
+            const earningsAdj = (dte !== null && dte >= 0 && dte <= 5)  ? 8
+                              : (dte !== null && dte >= 6 && dte <= 10) ? 5
+                              : (dte !== null && dte >= 11 && dte <= 15) ? 2
+                              : 0;
+            const riskScore   = Math.min(85, Math.max(volFloor, baseRisk + volPremium + sectorPremium + earningsAdj));
+            const riskLevel   = riskScore < 30 ? 'Low' : riskScore < 55 ? 'Moderate' : 'High';
 
-            // ── EXPECTED MOVE (stock-specific, not fixed 8%) ──────────────────────
-            // Base move from setup family, scaled by each stock's actual volatility.
-            // Benchmarks against a 2% reference vol so high-beta stocks get larger targets.
+            // ── EXPECTED MOVE (ATR%-scaled, not dollar-ATR) ───────────────────────
+            // volScale uses atrPct so a $20 and $400 stock with same daily-range % behave identically.
             const setupBase = {
                 breakout_leader:      score >= 90 ? 8.0 : 5.5,
                 quality_continuation: score >= 85 ? 6.0 : 4.0,
                 oversold_reversal:    score >= 80 ? 5.0 : 3.0,
             };
             const baseMove    = setupBase[row.setup_family] ?? Math.max(2, (score - 60) / 5);
-            const volScale    = stockVol > 0 ? Math.min(1.6, Math.max(0.6, stockVol / 2.0)) : 1.0;
-            const scoreFactor = 0.7 + (score / 100) * 0.3; // score 70→0.91×, score 100→1.0×
+            const volScale    = atrPct > 0 ? Math.min(1.6, Math.max(0.6, atrPct / 2.0)) : 1.0;
+            const scoreFactor = 0.7 + (score / 100) * 0.3;
             const expectedMove = Math.max(1.5, Math.round(baseMove * volScale * scoreFactor * 10) / 10);
 
             // ── RISK-ADJUSTED SCORE (rank by reward/risk, not raw score) ─────────
@@ -102,10 +147,9 @@ async function loadPredictionsFromNightlyScan(limit = 500) {
 
             const riskFactors = [];
             if (sectorCount[sector] > 2) riskFactors.push(`Sector concentration: ${sectorCount[sector]} ${sector} picks`);
-            if (volPremium > 0)          riskFactors.push(`High volatility stock`);
-            if (meta.earningsFlag)       riskFactors.push(`Earnings approaching`);
-
-            const currentPrice = parseFloat(meta.price) || 0;
+            if (atrPct > 3)              riskFactors.push(`High volatility (ATR ${atrPct.toFixed(1)}% daily)`);
+            else if (atrPct > 2)         riskFactors.push(`Elevated volatility (ATR ${atrPct.toFixed(1)}% daily)`);
+            if (earningsAdj > 0)         riskFactors.push(`Earnings in ${dte}d (+${earningsAdj} risk)`);
 
             return {
                 symbol:        row.symbol,
@@ -142,6 +186,8 @@ async function loadPredictionsFromNightlyScan(limit = 500) {
                     riskScore,
                     riskLevel,
                     riskFactors,
+                    daysToEarnings:       dte,
+                    earningsRiskAdjustment: earningsAdj > 0 ? earningsAdj : undefined,
                 },
 
                 rationale: [
@@ -183,12 +229,13 @@ router.get('/', protect, async (req, res) => {
             forceLive = 'false'
         } = req.query;
 
+        const minScore = await getUserMinScore(userId);
         let predictions = null;
         let dataSource  = 'nightly_scan';
 
         // Primary: use pre-scored nightly PANTHEON data — instant, no API calls
         if (forceLive !== 'true') {
-            predictions = await loadPredictionsFromNightlyScan(500);
+            predictions = await loadPredictionsFromNightlyScan(500, minScore);
         }
 
         // Fallback: live analysis (slow — hits Yahoo Finance for every stock)
@@ -250,8 +297,9 @@ router.get('/quick', protect, async (req, res) => {
         const userId = req.user.id;
         const { riskTolerance = 'moderate' } = req.query;
 
+        const minScore = await getUserMinScore(userId);
         // Try nightly scan first (top 50 by score), then live fallback
-        let predictions = await loadPredictionsFromNightlyScan(50);
+        let predictions = await loadPredictionsFromNightlyScan(50, minScore);
         if (!predictions) {
             const weeklyData = await getWeeklyPredictions({ limit: 50, universe: 'MEGA_CAP' });
             predictions = weeklyData?.predictions || weeklyData?.topPicks || [];
@@ -294,7 +342,8 @@ router.get('/portfolio-actions', protect, async (req, res) => {
         const userId = req.user.id;
         const { universe = 'TOP_200' } = req.query;
 
-        let predictions = await loadPredictionsFromNightlyScan(500);
+        const minScore = await getUserMinScore(userId);
+        let predictions = await loadPredictionsFromNightlyScan(500, minScore);
         if (!predictions) {
             const weeklyData = await getWeeklyPredictions({ limit: 500, universe: universe.toUpperCase() });
             predictions = weeklyData?.predictions || weeklyData?.topPicks || [];

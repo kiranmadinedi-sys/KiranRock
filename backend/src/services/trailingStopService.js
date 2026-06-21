@@ -76,12 +76,17 @@ async function _cancelOrder(keyId, secretKey, base, orderId) {
 }
 
 async function _createStopOrder(keyId, secretKey, base, symbol, qty, stopPrice) {
+    // Alpaca does not support GTC stop orders for fractional quantities — use 'day' instead.
+    // The trailing stop service re-places day stops on every cycle so fractional positions
+    // stay protected throughout the trading session.
+    const isFractional = qty !== Math.floor(qty);
+    const tif = isFractional ? 'day' : 'gtc';
     const resp = await axios.post(`${base}/orders`, {
         symbol,
         qty:           String(qty),
         side:          'sell',
         type:          'stop',
-        time_in_force: 'gtc',
+        time_in_force: tif,
         stop_price:    String(parseFloat(stopPrice.toFixed(2)))
     }, { headers: _headers(keyId, secretKey), timeout: 10000 });
     return resp.data;
@@ -143,8 +148,29 @@ async function adjustForUser(userId) {
         if (!currentPrice || currentPrice <= 0) continue;
 
         const gainPct    = ((currentPrice - entryPrice) / entryPrice) * 100;
+        const isFractional = parseFloat(row.quantity) !== Math.floor(parseFloat(row.quantity));
+
+        // Fractional DAY stops expire at EOD — re-place them each cycle regardless of gain.
+        // We do this BEFORE the gain threshold check so a fractional position is never left
+        // unprotected overnight or after the previous day's stop expired.
+        if (isFractional) {
+            const allSellOrders  = openOrders.filter(o => o.symbol === symbol && o.side === 'sell');
+            const existingStop   = allSellOrders.find(o => o.type === 'stop' || o.type === 'stop_limit');
+            if (!existingStop) {
+                const renewStop = parseFloat((entryPrice * (1 - 0.07)).toFixed(2));
+                const safeStop  = renewStop >= currentPrice ? parseFloat((currentPrice * 0.97).toFixed(2)) : renewStop;
+                logger.info('[TrailingStop] Fractional DAY stop expired — renewing', { userId, symbol, safeStop });
+                try {
+                    await _createStopOrder(keyId, secretKey, base, symbol, parseFloat(row.quantity), safeStop);
+                    await _sendAlert(userId, symbol, null, safeStop, gainPct, currentPrice, 'PLACED');
+                } catch (err) {
+                    logger.warn('[TrailingStop] Failed to renew fractional stop', { userId, symbol, err: err.message });
+                }
+            }
+        }
+
         const stopTarget = targetStopPct(gainPct);
-        if (stopTarget === null) continue; // position hasn't moved enough
+        if (stopTarget === null) continue; // position hasn't moved enough to raise the stop
 
         const newStopPrice = parseFloat((entryPrice * (1 + stopTarget / 100)).toFixed(2));
 
@@ -265,8 +291,12 @@ async function _sendAlert(userId, symbol, oldStop, newStop, gainPct, price, acti
             : action === 'RECREATED'
             ? `Stop was missing — recreated at $${newStop.toFixed(2)} (position now protected)`
             : `Protective stop placed at break-even`;
+
+        const userRes  = await query('SELECT username FROM users WHERE id = $1', [userId]).catch(() => ({ rows: [] }));
+        const username = userRes.rows[0]?.username || userId;
+
         const msg = [
-            `${icon} *Trailing Stop ${action}* — ${symbol}`,
+            `${icon} *Trailing Stop ${action}* — ${symbol} (${username})`,
             `Current price: $${parseFloat(price).toFixed(2)}  (+${gainStr}%)`,
             `Stop: ${oldStr} → *$${newStop.toFixed(2)}*`,
             `_${subtitle}_`

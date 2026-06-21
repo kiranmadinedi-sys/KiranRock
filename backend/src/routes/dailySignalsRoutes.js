@@ -21,9 +21,33 @@ const LATEST_PASSED_DATE = `(
       AND  passed_prescreen = true
 )`;
 
+// In-memory cache — keyed by date string (or 'latest'). Avoids repeated DB+ATLAS round-trips.
+// TTL: 5 min during market hours so live_score_cache overlays stay fresh; stale data is fine otherwise.
+const _cache = new Map(); // key → { payload, expiresAt }
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function _cacheGet(key) {
+    const entry = _cache.get(key);
+    if (!entry || Date.now() > entry.expiresAt) { _cache.delete(key); return null; }
+    return entry.payload;
+}
+function _cacheSet(key, payload) {
+    _cache.set(key, { payload, expiresAt: Date.now() + CACHE_TTL_MS });
+}
+
+// Wraps a promise with a hard timeout — ATLAS/Yahoo calls can hang on 429s.
+function _withTimeout(promise, ms) {
+    return Promise.race([promise, new Promise(resolve => setTimeout(() => resolve(null), ms))]);
+}
+
 router.get('/', protect, async (req, res) => {
     try {
         const requestedDate = req.query.date || null;
+        const cacheKey = requestedDate || 'latest';
+
+        const cached = _cacheGet(cacheKey);
+        if (cached) return res.json(cached);
+
         const dateExpr = requestedDate ? `$1::date` : LATEST_PASSED_DATE;
         const params   = requestedDate ? [requestedDate] : [];
 
@@ -101,8 +125,8 @@ router.get('/', protect, async (req, res) => {
                 params
             ).catch(() => ({ rows: [] })),
 
-            // Live global market sentiment (ATLAS) — always fresh, 15-min cache
-            globalSentimentService.getGlobalSentiment().catch(() => null)
+            // Live global market sentiment (ATLAS) — hard 3s timeout so a Yahoo 429 never blocks the page
+            _withTimeout(globalSentimentService.getGlobalSentiment().catch(() => null), 3000)
         ]);
 
         const summary      = summaryRes.rows[0] || { scanDate: null, total: 0, strongBuy: 0, buy: 0, topScore: null, avgScore: null };
@@ -110,7 +134,7 @@ router.get('/', protect, async (req, res) => {
         const generatedAt  = metaRes.rows[0]?.generated_at || null;
         const rescanAlerts = metaRes.rows[0]?.rescan_alerts || [];
 
-        res.json({
+        const payload = {
             scanDate:     summary.scanDate,
             generatedAt,
             rescanAlerts,
@@ -144,7 +168,11 @@ router.get('/', protect, async (req, res) => {
                 oracleVerdict:   r.oracleVerdict || null,
                 smartMoneyScore: r.smartMoneyScore != null ? parseFloat(r.smartMoneyScore) : null
             }))
-        });
+        };
+
+        // Only cache when scan data exists — don't cache "no data" responses
+        if (payload.scanDate) _cacheSet(cacheKey, payload);
+        res.json(payload);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

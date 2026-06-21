@@ -317,4 +317,113 @@ router.get('/trade-attribution', protect, async (req, res) => {
     }
 });
 
+/**
+ * POST /api/system/eod-ingest
+ *
+ * Manually trigger EOD bar ingestion (normally runs at 6:30 PM ET automatically).
+ * Useful for: catching up after a missed run, backfilling a specific date,
+ * or testing the pipeline before the scheduled time.
+ *
+ * Body (optional): { "date": "YYYY-MM-DD" }
+ *   Defaults to today ET if omitted.
+ */
+router.post('/eod-ingest', protect, async (req, res) => {
+    try {
+        const { runEodIngestion } = require('../services/eodIngestionService');
+        const tradingDate = req.body?.date || null;
+        // Run in background — don't hold the HTTP connection open for 30+ seconds
+        res.json({ queued: true, date: tradingDate || 'today-ET', message: 'EOD ingestion started in background' });
+        runEodIngestion(tradingDate ? { tradingDate } : {}).catch(err => {
+            const { logger } = require('../utils/logger');
+            logger.error('[SystemRoute] Background EOD ingestion failed', { error: err.message });
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/system/eod-status
+ *
+ * Returns a snapshot of the local daily_bars data warehouse:
+ * total bars, symbols covered, date range, and freshness.
+ */
+router.get('/eod-status', protect, async (req, res) => {
+    try {
+        const [stats, freshness] = await Promise.all([
+            query(`
+                SELECT
+                    COUNT(*)             AS total_bars,
+                    COUNT(DISTINCT symbol) AS total_symbols,
+                    MIN(timestamp)::date AS oldest_bar,
+                    MAX(timestamp)::date AS newest_bar
+                FROM daily_bars
+            `),
+            query(`
+                SELECT symbol, MAX(timestamp)::date AS last_bar
+                FROM daily_bars
+                GROUP BY symbol
+                ORDER BY last_bar ASC
+                LIMIT 10
+            `)
+        ]);
+        const s = stats.rows[0];
+        res.json({
+            totalBars:    parseInt(s.total_bars, 10),
+            totalSymbols: parseInt(s.total_symbols, 10),
+            oldestBar:    s.oldest_bar,
+            newestBar:    s.newest_bar,
+            staleSymbols: freshness.rows,   // symbols with the oldest last-bar dates
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/system/halt-status
+ *
+ * Returns whether HALT_ALL is active and the reason it was set.
+ * Used by the UI trading-status panel so the operator can see if the bot is frozen.
+ */
+router.get('/halt-status', protect, async (req, res) => {
+    try {
+        const ctrl = await query('SELECT halt_all_reason, halt_all_set_at FROM system_controls WHERE id=1');
+        const row  = ctrl.rows[0] || {};
+        res.json({
+            halted:  !!row.halt_all_reason,
+            reason:  row.halt_all_reason  || null,
+            set_at:  row.halt_all_set_at  || null,
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * POST /api/system/halt/clear
+ *
+ * Clears the HALT_ALL emergency stop in both DB and Redis so the bot resumes trading.
+ * Requires explicit { "confirm": true } in body to prevent accidental clears.
+ */
+router.post('/halt/clear', protect, async (req, res) => {
+    if (!req.body?.confirm) {
+        return res.status(400).json({ error: 'Send { "confirm": true } to confirm clearing the halt' });
+    }
+    try {
+        await query('UPDATE system_controls SET halt_all_reason = NULL, halt_all_set_at = NULL, updated_at = NOW() WHERE id = 1');
+        // Also clear from Redis (best-effort)
+        try {
+            const redisState = require('../services/redisStateService');
+            await redisState.clearHaltAll();
+        } catch { /* Redis unavailable — DB clear is sufficient */ }
+
+        const { logger } = require('../utils/logger');
+        logger.info('[SystemRoute] HALT_ALL cleared by operator via UI', { userId: req.user?.id });
+        res.json({ cleared: true, message: 'HALT_ALL cleared — bot will resume on next scheduler tick (within 5 min)' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = router;

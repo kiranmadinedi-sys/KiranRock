@@ -83,7 +83,9 @@ async function checkLiveReadiness(userId = null, {
                     ) t
                 `, [userId]),
 
-                // BLOCKER: stop-loss failures (OPEN_WITH_STOP with no terminal state after 1 day)
+                // BLOCKER: stop-loss failures (OPEN_WITH_STOP with no terminal state after 1 day,
+                // but ONLY if the position is no longer held — swing trades stay OPEN_WITH_STOP
+                // for many days/weeks while the position is active, which is correct behaviour).
                 query(`
                     SELECT COUNT(*) AS cnt FROM (
                         SELECT DISTINCT o.idempotency_key FROM order_audit_log o
@@ -98,6 +100,12 @@ async function checkLiveReadiness(userId = null, {
                               SELECT 1 FROM order_audit_log t
                               WHERE t.idempotency_key = o.idempotency_key
                                 AND t.state IN ('STOPPED','CLOSED','CLOSED_MANUAL','CANCELED','REJECTED')
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM holdings h
+                              WHERE h.symbol = o.symbol
+                                AND ($1::text IS NULL OR h.user_id = $1)
+                                AND h.quantity > 0
                           )
                     ) t
                 `, [userId]),
@@ -243,10 +251,34 @@ async function acknowledgeBlockers(userId, reason = 'Acknowledged by operator') 
           )
     `);
 
+    // 5. Gather stop-loss failures: OPEN_WITH_STOP with no terminal state, position no longer held
+    const stopFailKeys = await query(`
+        SELECT DISTINCT o.idempotency_key FROM order_audit_log o
+        WHERE o.state = 'OPEN_WITH_STOP'
+          AND ($1::text IS NULL OR o.user_id = $1)
+          AND o.created_at >= NOW() - INTERVAL '${Math.max(1, BLOCKER_DAYS)} days'
+          AND o.created_at < NOW() - INTERVAL '1 day'
+          AND o.idempotency_key NOT IN (
+              SELECT idempotency_key FROM sentinel_order_acknowledgements
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM order_audit_log t
+              WHERE t.idempotency_key = o.idempotency_key
+                AND t.state IN ('STOPPED','CLOSED','CLOSED_MANUAL','CANCELED','REJECTED')
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM holdings h
+              WHERE h.symbol = o.symbol
+                AND ($1::text IS NULL OR h.user_id = $1)
+                AND h.quantity > 0
+          )
+    `, [userId]);
+
     const allOrderKeys = [
         ...dupeKeys.rows.map(r => r.idempotency_key),
         ...stormKeys.rows.map(r => r.idempotency_key),
         ...stuckKeys.rows.map(r => r.idempotency_key),
+        ...stopFailKeys.rows.map(r => r.idempotency_key),
     ];
     const uniqueKeys = [...new Set(allOrderKeys)];
 
@@ -265,13 +297,15 @@ async function acknowledgeBlockers(userId, reason = 'Acknowledged by operator') 
 
     logger.info('[SENTINEL] Blockers acknowledged', {
         userId, reason,
-        reconErrorsAcknowledged: reconResult.rowCount,
-        orderKeysAcknowledged:   orderAcknowledged,
+        reconErrorsAcknowledged:  reconResult.rowCount,
+        orderKeysAcknowledged:    orderAcknowledged,
+        stopFailuresAcknowledged: stopFailKeys.rows.length,
     });
 
     return {
-        reconErrorsAcknowledged: reconResult.rowCount,
-        orderKeysAcknowledged:   orderAcknowledged,
+        reconErrorsAcknowledged:  reconResult.rowCount,
+        orderKeysAcknowledged:    orderAcknowledged,
+        stopFailuresAcknowledged: stopFailKeys.rows.length,
     };
 }
 

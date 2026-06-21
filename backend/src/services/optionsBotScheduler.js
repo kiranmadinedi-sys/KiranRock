@@ -179,8 +179,8 @@ async function collectOptionsChains() {
             failures.push(symbol);
             logger.error('[Options Prewarm] Failed to cache symbol', { symbol, error: error.message });
         }
-        // 2-second gap between symbols — avoids Yahoo Finance 429s
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // 8-second gap between symbols — gives Yahoo crumb time to refresh
+        await new Promise(resolve => setTimeout(resolve, 8000));
     }
 
     logger.info('[Options Prewarm] Collection complete', { succeeded, failed });

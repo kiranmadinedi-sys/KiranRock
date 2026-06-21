@@ -4,6 +4,44 @@ const tradingAccountService = require('./tradingAccountService');
 const tradesDb = require('./tradesDatabaseService');
 const { savePortfolioSnapshot } = require('./portfolioSnapshotService');
 const { buildPortfolioHistory } = require('./portfolioHistoryService');
+const brokerService = require('./brokerService');
+
+// Per-user Alpaca data cache — avoids hammering Alpaca on every 30-second frontend poll.
+// TTL: 20s during market hours (fresh enough for live display), 5 min outside.
+const _alpacaCache = new Map(); // userId -> { positions, equity, cash, fetchedAt }
+
+function _isMarketHours() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric',
+        hour12: false, weekday: 'short'
+    }).formatToParts(new Date());
+    const day  = parts.find(p => p.type === 'weekday').value;
+    const hour = parseInt(parts.find(p => p.type === 'hour').value, 10);
+    const min  = parseInt(parts.find(p => p.type === 'minute').value, 10);
+    if (day === 'Sat' || day === 'Sun') return false;
+    const t = hour + min / 60;
+    return t >= 9.5 && t < 16;
+}
+
+async function _getAlpacaData(userId) {
+    const ttlMs  = _isMarketHours() ? 20_000 : 5 * 60_000;
+    const cached = _alpacaCache.get(userId);
+    if (cached && Date.now() - cached.fetchedAt < ttlMs) return cached;
+
+    const result = { positions: [], equity: null, cash: null, fetchedAt: Date.now() };
+    try {
+        const [alpacaPositions, alpacaAccount] = await Promise.all([
+            brokerService.getPositions(userId),
+            brokerService.getAccountInfo(userId)
+        ]);
+        result.positions = alpacaPositions || [];
+        if (alpacaAccount?.portfolioValue > 0) result.equity = alpacaAccount.portfolioValue;
+        if (alpacaAccount?.cashBalance   > 0) result.cash   = alpacaAccount.cashBalance;
+    } catch (_) { /* simulated broker or creds not configured — ignore */ }
+
+    _alpacaCache.set(userId, result);
+    return result;
+}
 
 /**
  * Get complete portfolio with real-time valuations
@@ -22,7 +60,17 @@ const getPortfolioSummary = async (userId) => {
         (firstBuyRows || []).forEach(r => {
             if (r && r.symbol) firstBoughtMap[r.symbol] = r.first_bought;
         });
-        
+
+        // Fetch Alpaca live positions + equity (cached per-user to avoid hitting Alpaca
+        // on every 30-second frontend poll — TTL 20s market hours, 5 min otherwise).
+        const alpacaData    = await _getAlpacaData(userId);
+        const alpacaPriceMap = {};
+        for (const p of alpacaData.positions) {
+            if (p.symbol && p.currentPrice) alpacaPriceMap[p.symbol] = p.currentPrice;
+        }
+        const alpacaEquity = alpacaData.equity;
+        const alpacaCash   = alpacaData.cash;
+
         // Get current prices for all holdings
         const holdingsWithCurrentPrice = await Promise.all(
             holdings.map(async (holding) => {
@@ -30,16 +78,19 @@ const getPortfolioSummary = async (userId) => {
                     // lookup precomputed firstBought for this symbol
                     const firstBought = firstBoughtMap[holding.symbol] || null;
 
-                    // Try live price; if unavailable, fall back to cached holding.currentPrice or averagePrice
-                    let currentPrice = null;
-                    try {
-                        currentPrice = await marketQuoteService.getCurrentPrice(holding.symbol);
-                    } catch (e) {
-                        currentPrice = null;
+                    // 1) Alpaca live position price — authoritative for live accounts, never stale
+                    // 2) Yahoo Finance fallback — for symbols not currently in Alpaca positions
+                    // 3) Cached holding price or cost basis
+                    let currentPrice = alpacaPriceMap[holding.symbol] ?? null;
+                    if (currentPrice === null) {
+                        try {
+                            currentPrice = await marketQuoteService.getCurrentPrice(holding.symbol);
+                        } catch (e) {
+                            currentPrice = null;
+                        }
                     }
-
                     if (currentPrice === null || currentPrice === undefined) {
-                        currentPrice = holding.currentPrice != null ? holding.currentPrice : holding.averagePrice;
+                        currentPrice = holding.currentPrice ?? holding.averagePrice;
                     }
 
                     const currentValue = currentPrice * holding.quantity;
@@ -140,19 +191,20 @@ const getPortfolioSummary = async (userId) => {
         const sellTrades = trades.filter(t => t.type === 'SELL');
         const totalRealizedPL = sellTrades.reduce((sum, t) => sum + (t.profitLoss || 0), 0);
         
-        // Total portfolio value
-        const totalPortfolioValue = account.balance + totalCurrentValue;
-        
+        // Total portfolio value — prefer Alpaca equity for live accounts (exact mark-to-market)
+        const cashBalance = alpacaCash ?? account.balance;
+        const totalPortfolioValue = alpacaEquity ?? (cashBalance + totalCurrentValue);
+
         // Total invested (deposits - withdrawals)
         const totalInvested = account.totalDeposited - account.totalWithdrawn;
-        
+
         // Overall return
         const overallPL = totalPortfolioValue - totalInvested;
         const overallReturn = totalInvested > 0 ? (overallPL / totalInvested) * 100 : 0;
-        
+
         const portfolioSummary = {
             account: {
-                cashBalance: account.balance,
+                cashBalance,
                 totalDeposited: account.totalDeposited,
                 totalWithdrawn: account.totalWithdrawn
             },
@@ -168,7 +220,7 @@ const getPortfolioSummary = async (userId) => {
                 overallPL,
                 overallReturn,
                 numberOfPositions: holdings.length,
-                cashBalance: account.balance
+                cashBalance
             }
         };
 

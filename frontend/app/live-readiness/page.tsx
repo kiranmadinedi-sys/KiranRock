@@ -55,13 +55,24 @@ interface AttributionData {
     byScore: ScoreRow[];
 }
 
+interface HaltStatus {
+    halted: boolean;
+    reason: string | null;
+    set_at: string | null;
+}
+
 export default function LiveReadinessPage() {
     const [readiness, setReadiness] = useState<ReadinessData | null>(null);
     const [health, setHealth] = useState<HealthData | null>(null);
     const [attribution, setAttribution] = useState<AttributionData | null>(null);
+    const [haltStatus, setHaltStatus] = useState<HaltStatus | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+    const [ackLoading, setAckLoading] = useState(false);
+    const [ackResult, setAckResult] = useState<string | null>(null);
+    const [haltClearLoading, setHaltClearLoading] = useState(false);
+    const [haltClearResult, setHaltClearResult] = useState<string | null>(null);
 
     const fetchAll = useCallback(async () => {
         try {
@@ -70,10 +81,11 @@ export default function LiveReadinessPage() {
             if (token) headers['Authorization'] = `Bearer ${token}`;
 
             const base = getApiBaseUrl();
-            const [rRes, hRes, aRes] = await Promise.all([
+            const [rRes, hRes, aRes, haltRes] = await Promise.all([
                 fetch(`${base}/api/system/live-readiness`, { headers }),
                 fetch(`${base}/api/system/health-dashboard`, { headers }),
                 fetch(`${base}/api/system/trade-attribution?days=90`, { headers }),
+                fetch(`${base}/api/system/halt-status`, { headers }),
             ]);
 
             if (!rRes.ok) throw new Error(`Live-readiness: ${rRes.status}`);
@@ -82,6 +94,7 @@ export default function LiveReadinessPage() {
             setReadiness(await rRes.json());
             setHealth(await hRes.json());
             if (aRes.ok) setAttribution(await aRes.json());
+            if (haltRes.ok) setHaltStatus(await haltRes.json());
 
             setError(null);
             setLastRefresh(new Date());
@@ -137,6 +150,59 @@ export default function LiveReadinessPage() {
 
     const pnlColor = (v: number) => v > 0 ? 'text-green-600 dark:text-green-400' : v < 0 ? 'text-red-500 dark:text-red-400' : 'text-gray-500';
 
+    const clearHalt = async () => {
+        if (!confirm('Clear the Emergency Stop (HALT_ALL)?\n\nOnly do this if you\'ve confirmed the root cause is resolved. The bot will resume trading on the next scheduler tick (within 5 minutes).')) return;
+        setHaltClearLoading(true);
+        setHaltClearResult(null);
+        try {
+            const token = localStorage.getItem('token');
+            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+            const res = await fetch(`${getApiBaseUrl()}/api/system/halt/clear`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ confirm: true }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || res.statusText);
+            setHaltClearResult(data.message);
+            await fetchAll();
+        } catch (err: any) {
+            setHaltClearResult(`Error: ${err.message}`);
+        } finally {
+            setHaltClearLoading(false);
+        }
+    };
+
+    const acknowledgeBlockers = async () => {
+        if (!confirm('Acknowledge all current SENTINEL blockers?\n\nOnly do this after confirming the issues were caused by a known bug that is now fixed. Audit records are NOT deleted.')) return;
+        setAckLoading(true);
+        setAckResult(null);
+        try {
+            const token = localStorage.getItem('token');
+            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+            if (token) headers['Authorization'] = `Bearer ${token}`;
+            const res = await fetch(`${getApiBaseUrl()}/api/system/sentinel/acknowledge-blockers`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ reason: 'Acknowledged via SENTINEL UI — known bug confirmed fixed' }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || res.statusText);
+            const { acknowledged } = data;
+            setAckResult(
+                `Cleared: ${acknowledged.orderKeysAcknowledged} order keys, ` +
+                `${acknowledged.stopFailuresAcknowledged} stop-loss failures, ` +
+                `${acknowledged.reconErrorsAcknowledged} recon errors`
+            );
+            await fetchAll();
+        } catch (err: any) {
+            setAckResult(`Error: ${err.message}`);
+        } finally {
+            setAckLoading(false);
+        }
+    };
+
     return (
         <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
             <AppHeader />
@@ -165,12 +231,82 @@ export default function LiveReadinessPage() {
                         >
                             ↻ Refresh
                         </button>
+                        {readiness && !readiness.liveReady && (
+                            <button
+                                onClick={acknowledgeBlockers}
+                                disabled={ackLoading}
+                                className="px-3 py-1.5 text-sm font-medium bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-lg transition-colors"
+                            >
+                                {ackLoading ? 'Clearing…' : '✓ Acknowledge Blockers'}
+                            </button>
+                        )}
                     </div>
                 </div>
 
                 {error && (
                     <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-400 text-sm">
                         {error}
+                    </div>
+                )}
+
+                {ackResult && (
+                    <div className={`p-4 rounded-lg text-sm border ${
+                        ackResult.startsWith('Error')
+                            ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-700 dark:text-red-400'
+                            : 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800 text-green-700 dark:text-green-400'
+                    }`}>
+                        {ackResult.startsWith('Error') ? '✗ ' : '✓ '}{ackResult}
+                    </div>
+                )}
+
+                {/* ─── Emergency Stop (HALT_ALL) Banner ─── */}
+                {haltStatus && (
+                    <div className={`rounded-xl p-5 border-2 flex flex-col sm:flex-row items-start sm:items-center gap-4 ${
+                        haltStatus.halted
+                            ? 'bg-red-50 dark:bg-red-900/20 border-red-500 dark:border-red-600 animate-pulse'
+                            : 'bg-green-50 dark:bg-green-900/20 border-green-400 dark:border-green-600'
+                    }`}>
+                        <div className="text-4xl">{haltStatus.halted ? '🛑' : '🤖'}</div>
+                        <div className="flex-1">
+                            <div className={`text-lg font-bold ${haltStatus.halted ? 'text-red-700 dark:text-red-300' : 'text-green-700 dark:text-green-300'}`}>
+                                {haltStatus.halted ? 'BOT EMERGENCY STOP — Trading Frozen' : 'Bot Active — No Emergency Stop'}
+                            </div>
+                            {haltStatus.halted && (
+                                <>
+                                    <div className="text-sm text-red-600 dark:text-red-400 mt-1 font-mono break-all">{haltStatus.reason}</div>
+                                    {haltStatus.set_at && (
+                                        <div className="text-xs text-red-500 dark:text-red-400 mt-1">
+                                            Set at: {new Date(haltStatus.set_at).toLocaleString()}
+                                        </div>
+                                    )}
+                                </>
+                            )}
+                            {!haltStatus.halted && (
+                                <div className="text-sm text-green-600 dark:text-green-400 mt-1">All scheduler cycles running normally</div>
+                            )}
+                        </div>
+                        {haltStatus.halted && (
+                            <div className="flex flex-col gap-2 items-end">
+                                <button
+                                    onClick={clearHalt}
+                                    disabled={haltClearLoading}
+                                    className="px-4 py-2 text-sm font-bold bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white rounded-lg transition-colors whitespace-nowrap"
+                                >
+                                    {haltClearLoading ? 'Clearing…' : '🔓 Clear Emergency Stop'}
+                                </button>
+                                <span className="text-xs text-red-500 dark:text-red-400">Bot resumes within 5 min</span>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {haltClearResult && (
+                    <div className={`p-4 rounded-lg text-sm border ${
+                        haltClearResult.startsWith('Error')
+                            ? 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-700 dark:text-red-400'
+                            : 'bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800 text-green-700 dark:text-green-400'
+                    }`}>
+                        {haltClearResult.startsWith('Error') ? '✗ ' : '✓ '}{haltClearResult}
                     </div>
                 )}
 

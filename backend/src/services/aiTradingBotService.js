@@ -30,12 +30,14 @@ const AI_RECOMMENDED_STOCKS = [
 // Trading strategy parameters
 // Default trading strategy parameters
 const DEFAULT_STRATEGY_CONFIG = {
-    minCashReserve: 0.10, // Keep 10% in cash
-    maxPositionSize: 0.20, // Max 20% in single stock
-    rebalanceThreshold: 0.05, // Rebalance if position drifts 5%
-    stopLoss: -0.15, // Sell if position loses 15%
-    takeProfit: 0.30, // Consider taking profit at 30% gain
-    volatilityThreshold: 0.25 // Reduce position if volatility > 25%
+    minCashReserve: 0.20, // Keep 20% cash reserve (was 10% — tighter safety buffer)
+    maxPositionSize: 0.10, // Max 10% per stock (was 20% — prevents single-stock overexposure)
+    rebalanceThreshold: 0.05,
+    stopLoss: -0.07,      // Sell at -7% loss (was -15% — now matches Alpaca stop level)
+    takeProfit: 0.20,     // Take profit at 20% gain (was 30% — lock in wins sooner)
+    volatilityThreshold: 0.25,
+    maxOpenPositions: 4,  // Never hold more than 4 positions simultaneously
+    maxOrderNotional: 500 // Hard cap: max $500 per single trade
 };
 
 // Helper to get user-specific AI trading settings
@@ -96,8 +98,14 @@ async function analyzeStock(symbol, vixData = null, preloadedSentiment = null) {
         const volume = q.volume || 0;
         const avgVolume = q.avgVolume || volume;
 
-        // Enhanced momentum score with better weighting
-        const momentumScore = change > 2 ? 1 : change > 0.5 ? 0.7 : change > 0 ? 0.4 : change > -2 ? -0.3 : -1;
+        // Momentum score — penalise stocks already up >3% (overextended, chase risk)
+        // Reward early movers (+0.5 to +2%), neutral on flat, negative on down
+        const momentumScore = change > 4  ? -0.3 // overextended — gap-chase risk
+                            : change > 2  ? 0.6
+                            : change > 0.5 ? 1.0  // sweet spot: early momentum
+                            : change > 0   ? 0.3
+                            : change > -2  ? -0.4
+                            : -1.0;
 
         // Volume score (higher volume = more interest and liquidity)
         const volumeRatio = volume / avgVolume;
@@ -238,13 +246,14 @@ async function generatePortfolioAllocation(userId, availableBalance) {
     for (const stock of candidateStocks) {
         const analysis = await analyzeStock(stock.symbol, null, sentimentMap[stock.symbol]);
 
-        // Only buy stocks with strong signals (BUY or STRONG BUY)
-        if (analysis && (analysis.recommendation === 'BUY' || analysis.recommendation === 'STRONG BUY') && analysis.aiScore >= 60) {
-            // Dynamic weight based on precomputed score, with max 20% per position
+        // Only buy on high-conviction signals (score ≥ 70, not just 60)
+        if (analysis && analysis.recommendation === 'STRONG BUY' && analysis.aiScore >= 70) {
+            // Cap order notional: smaller of formula amount or hard $500 cap
             const scoreWeight = (stock._precomputedScore || 75) / totalScore;
             const dynamicWeight = Math.min(scoreWeight, strategyConfig.maxPositionSize);
-            const targetAmount = investmentAmount * dynamicWeight;
-            const shares = Math.floor(targetAmount / analysis.price);
+            const formulaAmount = investmentAmount * dynamicWeight;
+            const cappedAmount = Math.min(formulaAmount, strategyConfig.maxOrderNotional || 500);
+            const shares = Math.floor(cappedAmount / analysis.price);
 
             if (shares > 0) {
                 allocations.push({
@@ -505,13 +514,23 @@ async function rebalancePortfolio(userId) {
         
         // Execute rebalancing actions
         const executedActions = [];
+        let openPositionCount = currentHoldings.length;
+        const maxPositions = strategyConfig.maxOpenPositions || 4;
+
         for (const action of rebalanceActions) {
+            // Hard cap: never open new positions beyond maxOpenPositions
+            if (action.action === 'BUY' && openPositionCount >= maxPositions) {
+                executedActions.push({ ...action, executed: false, error: `Position cap reached (${openPositionCount}/${maxPositions})` });
+                continue;
+            }
             try {
                 let result;
                 if (action.action === 'BUY') {
                     result = await executeLegacyAIBuyOrder(userId, action.symbol, action.quantity, action.aiScore || null, action.sector || null);
+                    openPositionCount++;
                 } else {
                     result = await executeLegacyAISellOrder(userId, action.symbol, action.quantity, action.reason || null);
+                    openPositionCount = Math.max(0, openPositionCount - 1);
                 }
                 
                 executedActions.push({

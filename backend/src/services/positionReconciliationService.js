@@ -79,12 +79,13 @@ async function _auditLog(userId, discrepancy, symbol, dbQty, brokerQty, action, 
  */
 async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
     const result = {
-        ok:       true,
-        phantoms: [],
-        drifts:   [],
-        shadows:  [],
-        fixes:    [],
-        errors:   []
+        ok:           true,
+        networkError: false,  // true = transient network failure, don't halt trading
+        phantoms:     [],
+        drifts:       [],
+        shadows:      [],
+        fixes:        [],
+        errors:       []
     };
 
     // Skip when using the simulated broker — no Alpaca to compare against.
@@ -98,7 +99,7 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
     let dbRows;
     try {
         const res = await query(
-            `SELECT symbol, quantity FROM holdings WHERE user_id = $1 AND quantity > 0`,
+            `SELECT symbol, quantity, average_price, current_price, sector FROM holdings WHERE user_id = $1 AND quantity > 0`,
             [userId]
         );
         dbRows = res.rows;
@@ -114,28 +115,49 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
     try {
         alpacaPositions = await _fetchAlpacaPositions(userId);
     } catch (err) {
+        // Distinguish transient network errors (DNS, timeout, 5xx) from real failures.
+        // Network errors are self-healing — don't halt trading; just skip this run.
+        const isNetworkErr = err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED' ||
+                             err.code === 'ETIMEDOUT'  || err.code === 'ECONNRESET'  ||
+                             (err.response?.status >= 500);
+        if (isNetworkErr) {
+            logger.warn('[Reconcile] Alpaca unreachable (transient) — skipping reconciliation run', {
+                userId, err: err.message, code: err.code
+            });
+            result.networkError = true;
+            return result;   // ok=true, networkError=true — caller must NOT halt trading
+        }
         logger.error('[Reconcile] Failed to fetch Alpaca positions', { userId, err: err.message });
         result.ok = false;
         result.errors.push(`Alpaca fetch failed: ${err.message}`);
         return result;
     }
 
-    // Build lookup maps (symbol → quantity, normalised to uppercase)
-    const dbMap     = new Map(dbRows.map(r => [r.symbol.toUpperCase(), parseInt(r.quantity)]));
+    // Build lookup maps (symbol → quantity, normalised to uppercase).
+    // Use parseFloat so fractional share positions (e.g. 0.269 ASML) are preserved.
+    // Skip short positions (negative qty) — the bot is long-only; shorts are manual/external.
+    const dbMap     = new Map(dbRows.map(r => [r.symbol.toUpperCase(), parseFloat(r.quantity)]));
     const alpacaMap = new Map(
-        alpacaPositions.map(p => [p.symbol.toUpperCase(), parseInt(p.qty)])
+        alpacaPositions
+            .filter(p => parseFloat(p.qty) > 0)   // exclude short positions (qty < 0)
+            .map(p => [p.symbol.toUpperCase(), parseFloat(p.qty)])
     );
 
     // ── Step 3: detect discrepancies ─────────────────────────────────────────
 
     for (const [symbol, dbQty] of dbMap) {
         const alpacaQty = alpacaMap.get(symbol);
-        if (alpacaQty === undefined || alpacaQty === 0) {
+        if (alpacaQty === undefined || alpacaQty < 0.0001) {
+            // Alpaca has no meaningful position — DB record is phantom
             result.phantoms.push(symbol);
             logger.warn('[Reconcile] PHANTOM detected', { userId, symbol, dbQty });
-        } else if (alpacaQty !== dbQty) {
-            result.drifts.push({ symbol, dbQty, alpacaQty });
-            logger.warn('[Reconcile] DRIFT detected', { userId, symbol, dbQty, alpacaQty });
+        } else {
+            // Allow up to 0.5% drift before flagging (covers rounding in fractional fills)
+            const pctDiff = Math.abs(alpacaQty - dbQty) / Math.max(alpacaQty, 0.0001);
+            if (pctDiff > 0.005 && Math.abs(alpacaQty - dbQty) > 0.0001) {
+                result.drifts.push({ symbol, dbQty, alpacaQty });
+                logger.warn('[Reconcile] DRIFT detected', { userId, symbol, dbQty, alpacaQty });
+            }
         }
     }
 
@@ -149,16 +171,103 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
     // ── Step 4: auto-fix + write immutable audit row ──────────────────────────
 
     for (const symbol of result.phantoms) {
-        const dbQty = dbMap.get(symbol);
+        const dbQty    = dbMap.get(symbol);
+        const dbRow    = dbRows.find(r => r.symbol.toUpperCase() === symbol) || {};
+        const entryPrice = parseFloat(dbRow.average_price || 0);
+
+        // Prefer actual Alpaca FILL activity price for this symbol (most accurate).
+        // Fall back to current_price, then stored stop price (least accurate — stop orders
+        // may have been trailed up significantly since the original bracket was placed).
+        let exitPrice = parseFloat(dbRow.current_price || 0);
+        let priceSource = 'current_price';
         try {
+            const userDb = require('./userDatabaseService');
+            const creds  = await userDb.getUserAlpacaCredentials(userId);
+            const axiosLib = require('axios');
+            const base = (creds?.isPaper !== false) ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets';
+            const headers = {
+                'APCA-API-KEY-ID':     creds?.keyId || process.env.ALPACA_KEY_ID,
+                'APCA-API-SECRET-KEY': creds?.secretKey || process.env.ALPACA_SECRET_KEY
+            };
+            // Look for the most recent sell FILL for this symbol since the DB entry was created
+            const since = dbRow.purchase_date || dbRow.created_at;
+            const actRes = await axiosLib.get(`${base}/v2/account/activities`, {
+                headers,
+                params: { activity_type: 'FILL', after: since ? new Date(since).toISOString() : undefined },
+                timeout: 8000
+            });
+            const fills = (actRes.data || []).filter(
+                a => a.symbol === symbol && (a.side === 'sell' || a.side === 'sell_short') && parseFloat(a.price) > 0
+            ).sort((a, b) => new Date(b.transaction_time) - new Date(a.transaction_time));
+            if (fills.length > 0) {
+                exitPrice   = parseFloat(fills[0].price);
+                priceSource = `alpaca_fill@${fills[0].transaction_time?.slice(0,10)}`;
+            }
+        } catch (_) {
+            // If Alpaca activities call fails, fall through to stored stop price
+            try {
+                const stopRow = await query(
+                    `SELECT metadata FROM order_audit_log
+                     WHERE user_id = $1 AND UPPER(symbol) = $2 AND state = 'OPEN_WITH_STOP'
+                     ORDER BY created_at DESC LIMIT 1`,
+                    [userId, symbol]
+                );
+                const sp = parseFloat(stopRow.rows[0]?.metadata?.stopPrice || 0);
+                if (sp > 0) { exitPrice = sp; priceSource = 'stop_order_estimate'; }
+            } catch (_2) {}
+        }
+
+        try {
+            // 1. Delete the phantom holding (Alpaca is source of truth)
             await query(
                 `DELETE FROM holdings WHERE user_id = $1 AND UPPER(symbol) = $2`,
                 [userId, symbol]
             );
+
+            // 2. Write a SELL to the trades table so transaction history stays complete.
+            //    Marks the exit as reconciler-detected so analysts know the price is estimated.
+            if (entryPrice > 0 && dbQty > 0) {
+                const fillPrice = exitPrice > 0 ? exitPrice : entryPrice;
+                const total     = parseFloat((fillPrice * dbQty).toFixed(4));
+                const pnl       = parseFloat(((fillPrice - entryPrice) * dbQty).toFixed(4));
+                const pnlPct    = parseFloat(((fillPrice - entryPrice) / entryPrice * 100).toFixed(4));
+                await query(
+                    `INSERT INTO trades
+                         (user_id, symbol, action, quantity, price, total, trade_date,
+                          executed_by, notes, pnl, pnl_percent, status)
+                     VALUES ($1, $2, 'SELL', $3, $4, $5, NOW(),
+                             'reconciler',
+                             $8,
+                             $6, $7, 'CLOSED')`,
+                    [userId, symbol, dbQty, fillPrice, total, pnl, pnlPct,
+                     `Alpaca stop/exit detected by position reconciler — price source: ${priceSource}`]
+                );
+            }
+
+            // 3. Close any open stop-order entries in order_audit_log so SENTINEL stays clean.
+            await query(
+                `INSERT INTO order_audit_log
+                     (idempotency_key, symbol, state, user_id, metadata, created_at)
+                 SELECT idempotency_key, symbol, 'CLOSED', user_id,
+                        jsonb_build_object(
+                            'reason',    'Alpaca stop-fill — reconciler-detected',
+                            'exitPrice', $3::text
+                        ),
+                        NOW()
+                 FROM order_audit_log
+                 WHERE user_id = $1 AND UPPER(symbol) = $2 AND state = 'OPEN_WITH_STOP'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM order_audit_log t2
+                       WHERE t2.idempotency_key = order_audit_log.idempotency_key
+                         AND t2.state IN ('STOPPED','CLOSED','CLOSED_MANUAL','CANCELED','REJECTED')
+                   )`,
+                [userId, symbol, exitPrice?.toFixed(2) || '0']
+            );
+
             await _auditLog(userId, 'PHANTOM', symbol, dbQty, 0, 'DELETED',
-                `DB held ${dbQty} shares; Alpaca: none`, trigger);
-            result.fixes.push(`PHANTOM fixed: deleted ${symbol} (DB had ${dbQty})`);
-            logger.info('[Reconcile] Fixed PHANTOM — deleted DB holding', { userId, symbol, dbQty });
+                `DB held ${dbQty} shares; Alpaca: none. SELL recorded @ ~$${exitPrice.toFixed(2)}`, trigger);
+            result.fixes.push(`PHANTOM fixed: deleted ${symbol} (DB had ${dbQty}, sell logged @ ~$${exitPrice.toFixed(2)})`);
+            logger.info('[Reconcile] Fixed PHANTOM — deleted holding, logged SELL', { userId, symbol, dbQty, exitPrice });
         } catch (err) {
             await _auditLog(userId, 'PHANTOM', symbol, dbQty, 0, 'ERROR', err.message, trigger);
             result.errors.push(`Failed to delete phantom ${symbol}: ${err.message}`);
@@ -276,9 +385,9 @@ async function runMorningReconciliation(activeUsers, { trigger = 'SCHEDULED' } =
                 try { await alertService.sendMessage(user.id, lines.join('\n')); } catch (_) {}
             }
 
-            // If auto-fix failed, set Redis HALT_ALL so the bot won't trade
-            // with an uncertain position picture.
-            if (!r.ok) {
+            // If auto-fix of a real mismatch failed, halt trading until resolved manually.
+            // Network errors (r.networkError=true) are transient — never halt for those.
+            if (!r.ok && !r.networkError) {
                 try {
                     const redisState = require('./redisStateService');
                     const reason = `RECON_FAILURE: position reconciliation errors for user ${user.id} — ${r.errors.join('; ')}`;

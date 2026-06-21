@@ -110,8 +110,9 @@ async function refreshMasterAssets() {
         await Promise.all(batch.map(a => query(`
             INSERT INTO asset_universe
                 (symbol, name, exchange, asset_class, tradable, shortable,
-                 marginable, easy_to_borrow, fractionable, status, last_refreshed_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, NOW())
+                 marginable, easy_to_borrow, fractionable, status, last_refreshed_at,
+                 first_added_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, NOW(), NOW())
             ON CONFLICT (symbol) DO UPDATE SET
                 name             = EXCLUDED.name,
                 exchange         = EXCLUDED.exchange,

@@ -2,9 +2,12 @@ const bcrypt = require('bcryptjs');
 const { query } = require('../config/database');
 
 const DEFAULT_AI_TRADING_SETTINGS = {
-    stopLoss: 0.06,
-    takeProfit: 0.3,
-    minCashReserve: 0
+    stopLoss: 0.07,
+    takeProfit: 0.20,
+    minCashReserve: 0.20,
+    maxPositionSize: 0.10,
+    maxOpenPositions: 4,
+    maxOrderNotional: 500
 };
 
 let ensureSchemaPromise = null;
@@ -16,7 +19,9 @@ function normalizeAITradingSettings(updates = {}) {
         'rebalanceThreshold',
         'stopLoss',
         'takeProfit',
-        'volatilityThreshold'
+        'volatilityThreshold',
+        'maxOpenPositions',
+        'maxOrderNotional'
     ];
 
     return numericFields.reduce((normalized, field) => {

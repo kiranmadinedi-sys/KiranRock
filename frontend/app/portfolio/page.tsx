@@ -77,6 +77,13 @@ function PortfolioPage() {
     const [resetAmount, setResetAmount] = useState('');
     const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
     const autoRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Position detail sheet
+    const [selectedPosition, setSelectedPosition] = useState<any | null>(null);
+    const [showPositionSheet, setShowPositionSheet] = useState(false);
+    // What the price badge shows — cycles on tap when sheet is closed
+    type DisplayMode = 'price' | 'pct_change' | 'equity' | 'total_return' | 'total_pct';
+    const [displayMode, setDisplayMode] = useState<DisplayMode>('price');
+    const [showDisplayPicker, setShowDisplayPicker] = useState(false);
 
     const formatDate = (iso: string) => {
         try {
@@ -149,7 +156,7 @@ function PortfolioPage() {
         let cancelled = false;
 
         const schedule = () => {
-            const delay = isMarketHours() ? 30_000 : 5 * 60_000;
+            const delay = 60_000; // always refresh every 1 minute
             autoRefreshRef.current = setTimeout(async () => {
                 if (cancelled) return;
                 await silentRefreshPortfolio();
@@ -449,109 +456,386 @@ function PortfolioPage() {
         interaction: { mode: 'index' as const, intersect: false },
     };
 
-    // ── Holdings list — shared between sidebar (desktop) and inline (mobile) ──
+    // ── Mini sparkline SVG — Robinhood style (deterministic noise + trend) ──
+    const MiniSparkline = ({ symbol, plPct }: { symbol: string; plPct: number }) => {
+        const isUp = plPct >= 0;
+        const seed = symbol.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+        const W = 80, H = 32, pts = 14;
+        const rand = (i: number) => ((seed * 9301 + i * 49297 + 233) % 1000) / 1000;
+        const points: [number, number][] = Array.from({ length: pts }, (_, i) => {
+            const t = i / (pts - 1);
+            // More organic noise with local variation
+            const noise = (rand(i) - 0.5) * 0.4 + (rand(i * 3 + 7) - 0.5) * 0.15;
+            const trend = isUp ? t * 0.55 : -t * 0.55;
+            const y = 0.5 - trend + noise;
+            return [Math.round(t * (W - 2) + 1), Math.round(Math.max(0.05, Math.min(0.95, y)) * H)];
+        });
+        // Smooth curve using quadratic bezier midpoints
+        let d = `M${points[0][0]},${points[0][1]}`;
+        for (let i = 1; i < points.length - 1; i++) {
+            const mx = (points[i][0] + points[i+1][0]) / 2;
+            const my = (points[i][1] + points[i+1][1]) / 2;
+            d += ` Q${points[i][0]},${points[i][1]} ${mx},${my}`;
+        }
+        d += ` L${points[pts-1][0]},${points[pts-1][1]}`;
+        // Dotted midline (Robinhood shows a subtle dotted reference line)
+        const color = isUp ? '#00c805' : '#ff5000';
+        return (
+            <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className="flex-shrink-0">
+                <line x1="1" y1={H/2} x2={W-1} y2={H/2} stroke={color} strokeWidth="0.8" strokeDasharray="2,3" opacity="0.25" />
+                <path d={d} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+        );
+    };
+
+    // ── Display mode badge label per holding ──────────────────────────────────
+    const getBadgeValue = (h: any, mode: DisplayMode): string => {
+        const plPct  = h.unrealizedPLPercent || 0;
+        const plVal  = h.unrealizedPL || 0;
+        const qty    = parseFloat(h.quantity) || 0;
+        const cur    = qty > 0 && h.currentValue ? h.currentValue / qty : 0;
+        const entry  = h.averagePrice || 0;
+        const equity = h.currentValue || 0;
+        switch (mode) {
+            case 'price':      return `$${cur.toFixed(2)}`;
+            case 'pct_change': return `${plPct >= 0 ? '+' : ''}${plPct.toFixed(2)}%`;
+            case 'equity':     return `$${equity.toFixed(2)}`;
+            case 'total_return': return `${plVal >= 0 ? '+$' : '-$'}${Math.abs(plVal).toFixed(2)}`;
+            case 'total_pct':    return `${plPct >= 0 ? '+' : ''}${plPct.toFixed(2)}%`;
+        }
+    };
+
+    // ── Position compact row (Robinhood list style) ───────────────────────────
+    const PositionRow = ({ h }: { h: any }) => {
+        const plPct = h.unrealizedPLPercent || 0;
+        const plVal = h.unrealizedPL || 0;
+        const isUp  = plVal >= 0;
+        const qty   = parseFloat(h.quantity) || 0;
+        const stale = isPriceStale(h);
+
+        const badgeLabel = getBadgeValue(h, displayMode);
+        const badgeColor = isUp ? '#00c805' : '#ff5000'; // Robinhood green / orange-red
+
+        return (
+            <div className="flex items-center gap-3 px-4 py-4 border-b border-white/[0.06] active:bg-white/[0.04] transition-colors">
+                {/* Symbol + shares — no avatar, just text like Robinhood */}
+                <div className="min-w-0 w-28 flex-shrink-0">
+                    <div className="font-bold text-[var(--color-text-primary)] text-base leading-tight tracking-wide">
+                        {h.symbol}
+                    </div>
+                    <div className="text-[13px] text-[var(--color-text-secondary)] mt-0.5 truncate">
+                        {qty % 1 !== 0 ? qty.toFixed(4) : qty} shares
+                        {stale && <span className="ml-1.5 text-[10px] text-amber-500 opacity-70">·stale</span>}
+                    </div>
+                </div>
+
+                {/* Mini sparkline — flex-1 so it fills available space */}
+                <div className="flex-1 flex items-center justify-center">
+                    <MiniSparkline symbol={h.symbol} plPct={plPct} />
+                </div>
+
+                {/* Price badge — Robinhood style: border only, NO fill, colored text */}
+                <button
+                    onClick={() => { setSelectedPosition(h); setShowPositionSheet(true); }}
+                    style={{ borderColor: badgeColor, color: badgeColor }}
+                    className="flex-shrink-0 w-[104px] text-center px-3 py-2.5 rounded-2xl border-[1.5px] bg-transparent font-bold text-[15px] tabular-nums transition-opacity active:opacity-70"
+                >
+                    {badgeLabel}
+                </button>
+            </div>
+        );
+    };
+
+    // ── Position detail bottom sheet ──────────────────────────────────────────
+    const PositionDetailSheet = () => {
+        const h = selectedPosition;
+        if (!h) return null;
+
+        const plPct      = h.unrealizedPLPercent || 0;
+        const plVal      = h.unrealizedPL || 0;
+        const entryPrice = h.averagePrice || 0;
+        const qty        = parseFloat(h.quantity) || 0;
+        const curPrice   = qty > 0 && h.currentValue ? h.currentValue / qty : entryPrice;
+        const stopPrice  = h.stopPrice  != null ? parseFloat(h.stopPrice)  : null;
+        const targetPrice= h.targetPrice!= null ? parseFloat(h.targetPrice): null;
+        const stopLocked = h.stopLocked === true;
+        const isFrac     = qty !== Math.floor(qty);
+        const isUp       = plVal >= 0;
+
+        const stopVsEntry = stopPrice != null && entryPrice > 0
+            ? ((stopPrice - entryPrice) / entryPrice) * 100 : null;
+        const stopTypeLabel = isFrac ? 'DAY Stop' : 'GTC Stop';
+        const stopIcon = stopLocked ? '🔒' : isFrac ? '📅' : '🛑';
+        const stopBadgeColor = stopVsEntry == null ? 'text-gray-400'
+            : stopVsEntry > 0.5 ? 'text-emerald-400'
+            : stopVsEntry > -1  ? 'text-amber-400'
+            :                     'text-red-400';
+        const stopBgColor = stopVsEntry == null ? 'bg-gray-800'
+            : stopVsEntry > 0.5 ? 'bg-emerald-900/50 border border-emerald-700/40'
+            : stopVsEntry > -1  ? 'bg-amber-900/50 border border-amber-700/40'
+            :                     'bg-red-900/50 border border-red-700/40';
+
+        // Risk bar
+        const lo = Math.min(stopPrice ?? curPrice * 0.85, curPrice * 0.85);
+        const hi = Math.max(targetPrice ?? curPrice * 1.20, curPrice * 1.15);
+        const range = hi - lo || 1;
+        const barStop   = stopPrice   != null ? Math.max(0, Math.min(100, ((stopPrice   - lo) / range) * 100)) : 0;
+        const barEntry  =                       Math.max(0, Math.min(100, ((entryPrice  - lo) / range) * 100));
+        const barCur    =                       Math.max(0, Math.min(100, ((curPrice    - lo) / range) * 100));
+        const barTarget = targetPrice != null ? Math.max(0, Math.min(100, ((targetPrice - lo) / range) * 100)) : 95;
+
+        const DISPLAY_OPTIONS: { key: DisplayMode; label: string; value: string }[] = [
+            { key: 'price',        label: 'Last price',           value: getBadgeValue(h, 'price') },
+            { key: 'pct_change',   label: 'Percent change',       value: getBadgeValue(h, 'pct_change') },
+            { key: 'equity',       label: 'Your equity',          value: getBadgeValue(h, 'equity') },
+            { key: 'total_return', label: 'Total return',         value: getBadgeValue(h, 'total_return') },
+            { key: 'total_pct',    label: 'Total percent change', value: getBadgeValue(h, 'total_pct') },
+        ];
+
+        return (
+            <>
+                {/* Backdrop */}
+                <div className="fixed inset-0 bg-black/70 z-40 backdrop-blur-sm"
+                    onClick={() => setShowPositionSheet(false)} />
+
+                {/* Sheet */}
+                <div className="fixed inset-x-0 bottom-0 z-50 max-w-lg mx-auto">
+                    <div className="bg-[#111] rounded-t-3xl border-t border-white/10 overflow-hidden max-h-[90vh] overflow-y-auto">
+
+                        {/* Drag handle */}
+                        <div className="flex justify-center pt-3 pb-1">
+                            <div className="w-10 h-1 rounded-full bg-gray-600" />
+                        </div>
+
+                        {/* Header */}
+                        <div className="flex items-center justify-between px-5 pt-2 pb-4">
+                            <div className="flex items-center gap-3">
+                                <div className={`w-11 h-11 rounded-xl ${tickerColor(h.symbol)} flex items-center justify-center text-white font-black text-sm shadow`}>
+                                    {h.symbol.slice(0, 2)}
+                                </div>
+                                <div>
+                                    <div className="text-white font-black text-lg">{h.symbol}</div>
+                                    <div className="text-gray-400 text-xs">{qty % 1 !== 0 ? qty.toFixed(4) : qty} shares</div>
+                                </div>
+                            </div>
+                            <button onClick={() => setShowPositionSheet(false)} className="w-8 h-8 flex items-center justify-center rounded-full bg-white/10 text-gray-400 hover:bg-white/20">✕</button>
+                        </div>
+
+                        {/* Price + P&L hero */}
+                        <div className="px-5 pb-4 border-b border-white/[0.08]">
+                            <div className="text-3xl font-black text-white tabular-nums">${curPrice.toFixed(2)}</div>
+                            <div className={`mt-1 flex items-center gap-2 ${isUp ? 'text-emerald-400' : 'text-red-400'}`}>
+                                <span className="text-sm font-bold">{isUp ? '▲' : '▼'} {signedUsd(plVal)}</span>
+                                <span className="text-sm">({signedPct(plPct)})</span>
+                                <span className="text-xs text-gray-500">total return</span>
+                            </div>
+                        </div>
+
+                        {/* Key stats grid */}
+                        <div className="grid grid-cols-2 gap-px bg-white/[0.05] border-b border-white/[0.08]">
+                            {[
+                                { label: 'Entry Price',   value: `$${entryPrice.toFixed(2)}` },
+                                { label: 'Market Value',  value: `$${(h.currentValue || 0).toFixed(2)}` },
+                                { label: 'Cost Basis',    value: `$${(entryPrice * qty).toFixed(2)}` },
+                                { label: 'Shares',        value: qty % 1 !== 0 ? qty.toFixed(4) : String(qty) },
+                            ].map(stat => (
+                                <div key={stat.label} className="bg-[#111] px-5 py-3">
+                                    <div className="text-[10px] text-gray-500 uppercase tracking-wider mb-0.5">{stat.label}</div>
+                                    <div className="text-sm font-bold text-white tabular-nums">{stat.value}</div>
+                                </div>
+                            ))}
+                        </div>
+
+                        {/* Risk bar */}
+                        <div className="px-5 py-4 border-b border-white/[0.08]">
+                            <div className="text-[10px] font-bold uppercase tracking-wider text-gray-500 mb-3">Position Range</div>
+                            <div className="relative h-2 bg-gray-800 rounded-full mb-4">
+                                {/* Filled zone: stop → current */}
+                                <div
+                                    className={`absolute h-full rounded-full ${isUp ? 'bg-gradient-to-r from-amber-600 to-emerald-500' : 'bg-gradient-to-r from-red-800 to-red-500'}`}
+                                    style={{ left: `${barStop}%`, width: `${Math.max(1, barCur - barStop)}%` }}
+                                />
+                                {/* Target zone: current → target (light) */}
+                                {targetPrice != null && (
+                                    <div className="absolute h-full rounded-full bg-blue-900/50"
+                                        style={{ left: `${barCur}%`, width: `${Math.max(0, barTarget - barCur)}%` }} />
+                                )}
+                                {/* Markers */}
+                                {stopPrice != null && <div className="absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-red-500 border-2 border-red-400 shadow-lg shadow-red-500/40" style={{ left: `calc(${barStop}% - 6px)` }} />}
+                                <div className="absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-gray-400 border border-gray-300" style={{ left: `calc(${barEntry}% - 4px)` }} />
+                                <div className={`absolute top-1/2 -translate-y-1/2 w-4 h-4 rounded-full border-2 shadow-lg ${isUp ? 'bg-emerald-400 border-emerald-300 shadow-emerald-500/40' : 'bg-red-400 border-red-300 shadow-red-500/40'}`} style={{ left: `calc(${barCur}% - 8px)` }} />
+                                {targetPrice != null && <div className="absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-blue-500 border-2 border-blue-400 shadow-lg shadow-blue-500/40" style={{ left: `calc(${Math.min(barTarget, 97)}% - 6px)` }} />}
+                            </div>
+                            {/* Labels */}
+                            <div className="flex justify-between text-[10px]">
+                                {stopPrice != null ? (
+                                    <div className="text-red-400">
+                                        <div className="font-bold">Stop</div>
+                                        <div>${stopPrice.toFixed(2)}</div>
+                                    </div>
+                                ) : <div />}
+                                <div className="text-gray-400 text-center">
+                                    <div className="font-bold">Entry</div>
+                                    <div>${entryPrice.toFixed(2)}</div>
+                                </div>
+                                <div className={`text-center font-bold ${isUp ? 'text-emerald-400' : 'text-red-400'}`}>
+                                    <div>Now</div>
+                                    <div>${curPrice.toFixed(2)}</div>
+                                </div>
+                                {targetPrice != null ? (
+                                    <div className="text-blue-400 text-right">
+                                        <div className="font-bold">Target</div>
+                                        <div>${targetPrice.toFixed(2)}</div>
+                                    </div>
+                                ) : <div />}
+                            </div>
+                        </div>
+
+                        {/* Trailing stop section */}
+                        <div className="px-5 py-4 border-b border-white/[0.08]">
+                            <div className="text-[10px] font-bold uppercase tracking-wider text-gray-500 mb-3">Stop Protection</div>
+                            {stopPrice == null ? (
+                                <div className="flex items-center gap-2 p-3 rounded-xl bg-red-900/30 border border-red-700/40">
+                                    <span className="text-red-400 text-lg">⚠️</span>
+                                    <div>
+                                        <div className="text-red-400 font-bold text-sm">No stop placed</div>
+                                        <div className="text-xs text-gray-500">Monitor will auto-place on next cycle</div>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className={`p-3 rounded-xl ${stopBgColor}`}>
+                                    <div className="flex items-center justify-between mb-2">
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-base">{stopIcon}</span>
+                                            <span className={`font-black text-base ${stopBadgeColor}`}>${stopPrice.toFixed(2)}</span>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <span className={`text-xs font-bold px-2 py-0.5 rounded-md ${isFrac ? 'bg-amber-900/60 text-amber-400' : 'bg-indigo-900/60 text-indigo-400'}`}>
+                                                {isFrac ? '📅 DAY' : '🔄 GTC'}
+                                            </span>
+                                            {stopLocked && (
+                                                <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-emerald-900/60 text-emerald-400">
+                                                    🔒 Profit locked
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-3 gap-2 text-center">
+                                        <div>
+                                            <div className="text-[10px] text-gray-500">Stop type</div>
+                                            <div className={`text-xs font-bold ${stopBadgeColor}`}>{isFrac ? 'Fixed DAY' : plPct > 5 ? 'Trailing GTC' : 'Fixed GTC'}</div>
+                                        </div>
+                                        <div>
+                                            <div className="text-[10px] text-gray-500">vs Entry</div>
+                                            <div className={`text-xs font-bold ${stopBadgeColor}`}>
+                                                {stopVsEntry != null ? `${stopVsEntry >= 0 ? '+' : ''}${stopVsEntry.toFixed(1)}%` : '—'}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <div className="text-[10px] text-gray-500">Downside</div>
+                                            <div className="text-xs font-bold text-gray-300">
+                                                {curPrice > 0 ? `-${(((curPrice - stopPrice) / curPrice) * 100).toFixed(1)}%` : '—'}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                            {/* Target row */}
+                            {targetPrice != null && (
+                                <div className="mt-2 flex items-center justify-between p-3 rounded-xl bg-blue-900/30 border border-blue-700/40">
+                                    <div className="flex items-center gap-2">
+                                        <span>🎯</span>
+                                        <div>
+                                            <div className="text-[10px] text-gray-500">Target price</div>
+                                            <div className="text-sm font-bold text-blue-400">${targetPrice.toFixed(2)}</div>
+                                        </div>
+                                    </div>
+                                    <div className="text-right">
+                                        <div className="text-[10px] text-gray-500">Potential gain</div>
+                                        <div className="text-sm font-bold text-blue-400">
+                                            +{(((targetPrice - entryPrice) / entryPrice) * 100).toFixed(1)}%
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Display data picker (like Robinhood's badge toggle) */}
+                        <div className="px-5 py-4 border-b border-white/[0.08]">
+                            <div className="text-[10px] font-bold uppercase tracking-wider text-gray-500 mb-2">Display data</div>
+                            {DISPLAY_OPTIONS.map(opt => (
+                                <button key={opt.key} onClick={() => setDisplayMode(opt.key)}
+                                    className="w-full flex items-center justify-between py-3 border-b border-white/[0.05] last:border-0 hover:bg-white/[0.04] transition-colors">
+                                    <span className="text-white text-sm">{opt.label}</span>
+                                    <div className="flex items-center gap-3">
+                                        <span className="text-gray-400 text-sm tabular-nums">{opt.value}</span>
+                                        {displayMode === opt.key && <span className="text-emerald-400 text-lg">✓</span>}
+                                    </div>
+                                </button>
+                            ))}
+                        </div>
+
+                        {/* Bottom spacer for home indicator */}
+                        <div className="h-8" />
+                    </div>
+                </div>
+            </>
+        );
+    };
+
+    // ── Holdings panel ────────────────────────────────────────────────────────
     const holdingsPanel = (
-        <div>
-            <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-[var(--color-text-secondary)] px-4 lg:px-6 pt-6 pb-2">
-                Stocks {positionCount > 0 && <span className="ml-1 text-[var(--color-accent)]">({positionCount})</span>}
-            </p>
+        <div className="pb-2">
+            {/* Header — Robinhood style: "STOCKS & ETFS (n)" left, "Price ⇄" right */}
+            <div className="flex items-center justify-between px-4 pt-5 pb-1">
+                <span className="text-[11px] font-semibold uppercase tracking-[0.15em] text-[var(--color-text-secondary)]">
+                    Stocks &amp; ETFs{positionCount > 0 ? ` (${positionCount})` : ''}
+                </span>
+                {holdings.length > 0 && (
+                    <button
+                        onClick={() => {
+                            const modes: DisplayMode[] = ['price','pct_change','equity','total_return','total_pct'];
+                            const idx = modes.indexOf(displayMode);
+                            setDisplayMode(modes[(idx + 1) % modes.length]);
+                        }}
+                        className="flex items-center gap-1 text-[13px] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+                    >
+                        <span>{displayMode === 'price' ? 'Price' : displayMode === 'pct_change' ? '% Change' : displayMode === 'equity' ? 'Equity' : displayMode === 'total_return' ? 'Return $' : 'Return %'}</span>
+                        <span className="opacity-50">⇄</span>
+                    </button>
+                )}
+            </div>
+
             {holdings.length === 0 ? (
-                <div className="px-4 lg:px-6 py-8 text-center">
-                    <div className="text-3xl mb-2">📈</div>
-                    <p className="text-sm text-[var(--color-text-secondary)]">No positions yet</p>
+                <div className="mx-3 py-12 text-center rounded-2xl border border-white/[0.06] bg-gray-900/50">
+                    <div className="text-4xl mb-3">📈</div>
+                    <p className="text-sm font-semibold text-gray-400">No positions yet</p>
+                    <p className="text-xs text-gray-600 mt-1 mb-4">Deposit funds to start trading</p>
                     <button onClick={() => setShowDepositModal(true)}
-                        className="mt-3 px-5 py-2 rounded-full bg-[var(--color-accent)] text-white text-sm font-bold hover:opacity-90 transition-opacity">
+                        className="px-6 py-2.5 rounded-full bg-[var(--color-accent)] text-white text-sm font-bold hover:opacity-90 transition-opacity">
                         Deposit Funds
                     </button>
                 </div>
             ) : (
-                <div>
-                    {holdings.map(h => {
-                        const plPct = h.unrealizedPLPercent || 0;
-                        const plVal = h.unrealizedPL || 0;
-                        const stale = isPriceStale(h);
+                <>
+                    {holdings.map(h => <PositionRow key={h.symbol} h={h} />)}
 
-                        // Trailing stop display
-                        const stopPrice    = h.stopPrice   != null ? h.stopPrice   : null;
-                        const targetPrice  = h.targetPrice != null ? h.targetPrice : null;
-                        const stopLocked   = h.stopLocked  === true;
-                        const entryPrice   = h.averagePrice || 0;
-                        const stopGainPct  = stopPrice != null && entryPrice > 0
-                            ? ((stopPrice - entryPrice) / entryPrice) * 100
-                            : null;
-                        // colour: green = locked in profit, amber = at break-even, red = below entry
-                        const stopColor = stopGainPct == null
-                            ? 'text-[var(--color-text-secondary)]'
-                            : stopGainPct > 0.05
-                                ? 'text-green-400'
-                                : stopGainPct >= -0.05
-                                    ? 'text-amber-400'
-                                    : 'text-red-400';
-
-                        return (
-                            <div key={h.symbol} className="px-4 lg:px-6 py-3.5 border-b border-[var(--color-border)] hover:bg-[var(--color-bg-tertiary)] transition-colors cursor-default">
-                                <div className="flex items-center justify-between gap-3">
-                                    <div className="flex items-center gap-3 min-w-0">
-                                        <div className={`w-9 h-9 rounded-full ${tickerColor(h.symbol)} flex items-center justify-center text-white font-bold text-xs flex-shrink-0`}>
-                                            {h.symbol.slice(0, 2)}
-                                        </div>
-                                        <div className="min-w-0">
-                                            <div className="font-bold text-[var(--color-text-primary)] text-sm leading-tight">{h.symbol}</div>
-                                            <div className="text-xs text-[var(--color-text-secondary)] truncate">
-                                                {h.quantity} shares @ {usd(entryPrice)}
-                                                {stale && <span className="text-yellow-500 ml-1" title="Price may be stale">⚠</span>}
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div className="text-right flex-shrink-0">
-                                        <div className="font-bold text-[var(--color-text-primary)] tabular-nums text-sm">{usd(h.currentValue || 0)}</div>
-                                        <div className={`text-xs font-semibold tabular-nums ${plVal >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-                                            {signedPct(plPct)}
-                                        </div>
-                                    </div>
+                    {/* Summary footer card */}
+                    <div className="mx-4 mt-2 mb-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-tertiary)] px-4 py-3">
+                        <div className="grid grid-cols-3 gap-3">
+                            {[
+                                { label: 'Market Value', value: usd(totalHoldingsValue), color: 'text-[var(--color-text-primary)]' },
+                                { label: 'Unrealized P/L', value: signedUsd(totalUnrealizedPL), color: totalUnrealizedPL >= 0 ? 'text-green-600' : 'text-red-500' },
+                                { label: 'Realized P/L', value: signedUsd(totalRealizedPL), color: totalRealizedPL >= 0 ? 'text-green-600' : 'text-red-500' },
+                            ].map(s => (
+                                <div key={s.label} className="text-center">
+                                    <div className="text-[10px] text-[var(--color-text-secondary)] mb-0.5">{s.label}</div>
+                                    <div className={`text-xs font-bold tabular-nums ${s.color}`}>{s.value}</div>
                                 </div>
-
-                                {/* Stop / Target row */}
-                                {(stopPrice != null || targetPrice != null) && (
-                                    <div className="mt-1.5 ml-12 flex items-center gap-3 text-[11px]">
-                                        {stopPrice != null && (
-                                            <span className={`flex items-center gap-1 ${stopColor}`}>
-                                                <span>{stopLocked ? '🔒' : '🛑'}</span>
-                                                <span className="font-semibold">Stop {usd(stopPrice)}</span>
-                                                {stopGainPct != null && (
-                                                    <span className="opacity-75">
-                                                        ({stopGainPct >= 0 ? '+' : ''}{stopGainPct.toFixed(1)}%)
-                                                    </span>
-                                                )}
-                                            </span>
-                                        )}
-                                        {targetPrice != null && (
-                                            <span className="flex items-center gap-1 text-blue-400">
-                                                <span>🎯</span>
-                                                <span className="font-semibold">Target {usd(targetPrice)}</span>
-                                            </span>
-                                        )}
-                                    </div>
-                                )}
-                            </div>
-                        );
-                    })}
-                    {/* Summary footer */}
-                    <div className="px-4 lg:px-6 py-3 bg-[var(--color-bg-tertiary)]">
-                        <div className="flex justify-between items-center text-xs">
-                            <span className="text-[var(--color-text-secondary)]">Invested</span>
-                            <span className="font-bold text-[var(--color-text-primary)] tabular-nums">{usd(totalHoldingsValue)}</span>
-                        </div>
-                        <div className="flex justify-between items-center text-xs mt-1">
-                            <span className="text-[var(--color-text-secondary)]">Unrealized P/L</span>
-                            <span className={`font-bold tabular-nums ${totalUnrealizedPL >= 0 ? 'text-green-500' : 'text-red-500'}`}>{signedUsd(totalUnrealizedPL)}</span>
-                        </div>
-                        <div className="flex justify-between items-center text-xs mt-1">
-                            <span className="text-[var(--color-text-secondary)]">Realized P/L</span>
-                            <span className={`font-bold tabular-nums ${totalRealizedPL >= 0 ? 'text-green-500' : 'text-red-500'}`}>{signedUsd(totalRealizedPL)}</span>
+                            ))}
                         </div>
                     </div>
-                </div>
+                </>
             )}
         </div>
     );
@@ -559,6 +843,10 @@ function PortfolioPage() {
     // ── Render ──────────────────────────────────────────────────────────────────
     return (
         <div className="min-h-screen bg-[var(--color-bg-primary)]">
+
+        {/* Position detail bottom sheet */}
+        {showPositionSheet && <PositionDetailSheet />}
+
         <div className="max-w-7xl mx-auto lg:flex lg:items-start">
 
             {/* ═══════════════════════════════════════════════════════════════════
@@ -574,18 +862,31 @@ function PortfolioPage() {
                         {usd(totalPortfolioValue)}
                     </div>
 
-                    <div className={`mt-2 flex items-center gap-1.5 text-sm font-semibold ${chartUp ? 'text-green-500' : 'text-red-500'}`}>
-                        <span className="text-base leading-none">{chartUp ? '▲' : '▼'}</span>
-                        <span>{signedUsd(portfolioChange.value)}</span>
-                        <span className="opacity-80">({signedPct(portfolioChange.percent)})</span>
-                        <span className="text-[var(--color-text-secondary)] font-normal text-xs ml-1">{portfolioChange.label}</span>
-                    </div>
+                    {(() => {
+                        // When market is closed, the chart-range delta is misleading ("Today" actually
+                        // spans days/weeks). Show unrealized P&L instead, clearly labelled.
+                        const showUnrealized = !isMarketHours();
+                        const displayVal     = showUnrealized ? totalUnrealizedPL : portfolioChange.value;
+                        const displayPct     = showUnrealized
+                            ? (totalHoldingsValue > 0 ? (totalUnrealizedPL / (totalHoldingsValue - totalUnrealizedPL)) * 100 : 0)
+                            : portfolioChange.percent;
+                        const displayLabel   = showUnrealized ? 'Unrealized' : portfolioChange.label;
+                        const isPos          = displayVal >= 0;
+                        return (
+                            <div className={`mt-2 flex items-center gap-1.5 text-sm font-semibold ${isPos ? 'text-green-500' : 'text-red-500'}`}>
+                                <span className="text-base leading-none">{isPos ? '▲' : '▼'}</span>
+                                <span>{signedUsd(displayVal)}</span>
+                                <span className="opacity-80">({signedPct(displayPct)})</span>
+                                <span className="text-[var(--color-text-secondary)] font-normal text-xs ml-1">{displayLabel}</span>
+                            </div>
+                        );
+                    })()}
 
                     {/* Live refresh indicator */}
                     <div className="mt-2 flex items-center gap-1.5">
                         <span className={`inline-block w-1.5 h-1.5 rounded-full ${isMarketHours() ? 'bg-green-400 animate-pulse' : 'bg-gray-500'}`} />
                         <span className="text-[11px] text-[var(--color-text-secondary)]">
-                            {isMarketHours() ? 'Live · updates every 30s' : 'Market closed · updates every 5m'}
+                            {isMarketHours() ? 'Live · updates every 1 min' : 'Market closed · updates every 1 min'}
                             {lastRefreshed && (
                                 <span className="ml-1 opacity-60">
                                     · {lastRefreshed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
@@ -640,18 +941,67 @@ function PortfolioPage() {
                     </div>
                 </div>
 
-                {/* ── 4 stat cells (compact inline row) ── */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 border-b border-[var(--color-border)]">
+                {/* ── Stats grid — 6 cells, 3×2, plain-English labels ── */}
+                <div className="grid grid-cols-3 border-b border-[var(--color-border)]">
                     {[
-                        { label: 'Portfolio', value: usd(totalPortfolioValue), sub: signedPct(overallReturn) + ' total', subColor: overallReturn >= 0 ? 'text-green-500' : 'text-red-500' },
-                        { label: 'Cash', value: usd(cashBalance), sub: 'Available', subColor: 'text-[var(--color-text-secondary)]' },
-                        { label: 'Invested', value: usd(totalHoldingsValue), sub: `${positionCount} position${positionCount !== 1 ? 's' : ''}`, subColor: 'text-[var(--color-text-secondary)]' },
-                        { label: 'Total P/L', value: signedUsd(overallPL), sub: `Unrealized: ${signedUsd(totalUnrealizedPL)}`, subColor: totalUnrealizedPL >= 0 ? 'text-green-500' : 'text-red-500' },
+                        {
+                            label: 'Portfolio Value',
+                            tooltip: 'Cash + all open positions at current market price',
+                            value: usd(totalPortfolioValue),
+                            valueColor: 'text-[var(--color-text-primary)]',
+                            sub: `Cash ${ usd(cashBalance) } + Positions ${ usd(totalHoldingsValue) }`,
+                            subColor: 'text-[var(--color-text-secondary)]',
+                        },
+                        {
+                            label: 'Cash Available',
+                            tooltip: 'Cash ready to invest — not tied up in positions',
+                            value: usd(cashBalance),
+                            valueColor: 'text-[var(--color-text-primary)]',
+                            sub: 'Ready to invest',
+                            subColor: 'text-[var(--color-text-secondary)]',
+                        },
+                        {
+                            label: 'Open Positions',
+                            tooltip: 'Current market value of all stocks you hold right now',
+                            value: usd(totalHoldingsValue),
+                            valueColor: 'text-[var(--color-text-primary)]',
+                            sub: `${positionCount} stocks held`,
+                            subColor: 'text-[var(--color-text-secondary)]',
+                        },
+                        {
+                            label: 'Account Return',
+                            tooltip: 'Total portfolio value vs total money you deposited — your overall account gain/loss',
+                            value: signedUsd(overallPL),
+                            valueColor: overallPL >= 0 ? 'text-green-500' : 'text-red-500',
+                            sub: 'vs total deposited',
+                            subColor: 'text-[var(--color-text-secondary)]',
+                        },
+                        {
+                            label: 'Realized P/L',
+                            tooltip: 'Profit/loss from trades you already closed — this is locked in and does not change',
+                            value: signedUsd(totalRealizedPL),
+                            valueColor: totalRealizedPL >= 0 ? 'text-green-500' : 'text-red-500',
+                            sub: 'Closed trades · locked in',
+                            subColor: 'text-[var(--color-text-secondary)]',
+                        },
+                        {
+                            label: 'Unrealized P/L',
+                            tooltip: 'Current gain/loss on open positions — changes every minute with market price',
+                            value: signedUsd(totalUnrealizedPL),
+                            valueColor: totalUnrealizedPL >= 0 ? 'text-green-500' : 'text-red-500',
+                            sub: 'Open positions · live',
+                            subColor: 'text-[var(--color-text-secondary)]',
+                        },
                     ].map((stat, i) => (
-                        <div key={stat.label} className={`px-4 lg:px-10 py-4 ${i < 3 ? 'border-r border-[var(--color-border)]' : ''} ${i >= 2 ? 'border-t sm:border-t-0 border-[var(--color-border)]' : ''}`}>
-                            <div className="text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-secondary)] mb-1">{stat.label}</div>
-                            <div className={`text-base font-bold tabular-nums ${stat.label === 'Total P/L' ? (overallPL >= 0 ? 'text-green-500' : 'text-red-500') : 'text-[var(--color-text-primary)]'}`}>{stat.value}</div>
-                            <div className={`text-[11px] font-semibold mt-0.5 ${stat.subColor}`}>{stat.sub}</div>
+                        <div key={stat.label}
+                            title={stat.tooltip}
+                            className={`px-3 lg:px-6 py-3.5 cursor-help
+                                ${i % 3 !== 2 ? 'border-r border-[var(--color-border)]' : ''}
+                                ${i >= 3 ? 'border-t border-[var(--color-border)]' : ''}
+                            `}>
+                            <div className="text-[9px] font-bold uppercase tracking-wider text-[var(--color-text-secondary)] mb-1 leading-tight">{stat.label}</div>
+                            <div className={`text-sm font-bold tabular-nums ${stat.valueColor}`}>{stat.value}</div>
+                            <div className={`text-[10px] mt-0.5 leading-tight ${stat.subColor}`}>{stat.sub}</div>
                         </div>
                     ))}
                 </div>
@@ -698,21 +1048,45 @@ function PortfolioPage() {
                             )}
                         </div>
 
-                        {/* Ledger summary pills */}
+                        {/* Ledger summary — mobile-friendly grid */}
                         {ledgerData && (
-                            <div className="flex gap-2 flex-wrap mb-5">
-                                {[
-                                    { label: 'Deposits', value: ledgerData.totalDeposits, color: 'text-blue-500' },
-                                    { label: 'Withdrawals', value: ledgerData.totalWithdrawals, color: 'text-orange-500' },
-                                    { label: 'Buys', value: ledgerData.totalBuys, color: 'text-green-500' },
-                                    { label: 'Sells', value: ledgerData.totalSells, color: 'text-red-500' },
-                                    { label: 'Commissions', value: ledgerData.totalCommission, color: 'text-[var(--color-text-secondary)]' },
-                                ].map(item => (
-                                    <div key={item.label} className="bg-[var(--color-card)] border border-[var(--color-border)] rounded-xl px-4 py-2 flex items-center gap-2">
-                                        <span className="text-xs text-[var(--color-text-secondary)]">{item.label}</span>
-                                        <span className={`text-sm font-bold ${item.color}`}>${item.value.toFixed(2)}</span>
-                                    </div>
-                                ))}
+                            <div className="mb-5 rounded-2xl border border-[var(--color-border)] bg-[var(--color-card)] overflow-hidden">
+                                <div className="px-4 py-3 border-b border-[var(--color-border)] flex items-center justify-between">
+                                    <span className="text-xs font-bold uppercase tracking-wider text-[var(--color-text-secondary)]">Account Activity Summary</span>
+                                    {ledgerData.source === 'alpaca' && (
+                                        <span className="text-[10px] font-semibold text-emerald-500 bg-emerald-500/10 px-2 py-0.5 rounded-full">Live from Alpaca</span>
+                                    )}
+                                    {ledgerData.source === 'db_fallback' && (
+                                        <span className="text-[10px] font-semibold text-amber-500 bg-amber-500/10 px-2 py-0.5 rounded-full">Local DB</span>
+                                    )}
+                                </div>
+                                <div className="grid grid-cols-3 divide-x divide-y divide-[var(--color-border)]">
+                                    {[
+                                        { icon: '💰', label: 'Deposited', value: ledgerData.totalDeposits, valueColor: 'text-blue-500', hint: 'Cash added to account' },
+                                        { icon: '📤', label: 'Withdrawn', value: ledgerData.totalWithdrawals, valueColor: 'text-orange-500', hint: 'Cash taken out' },
+                                        { icon: '📈', label: 'Dividends', value: ledgerData.totalDividends || 0, valueColor: 'text-purple-500', hint: 'Dividends received' },
+                                        { icon: '🛒', label: 'Total Bought', value: ledgerData.totalBuys, valueColor: 'text-green-600', hint: 'Value of all buy orders' },
+                                        { icon: '💵', label: 'Total Sold', value: ledgerData.totalSells, valueColor: 'text-red-500', hint: 'Value of all sell orders' },
+                                        { icon: '🏦', label: 'Commissions', value: ledgerData.totalCommission, valueColor: 'text-[var(--color-text-secondary)]', hint: 'Fees paid' },
+                                    ].map(item => (
+                                        <div key={item.label} className="px-3 py-3.5 flex flex-col gap-1" title={item.hint}>
+                                            <div className="flex items-center gap-1.5">
+                                                <span className="text-sm">{item.icon}</span>
+                                                <span className="text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wide leading-tight">{item.label}</span>
+                                            </div>
+                                            <div className={`text-sm font-bold tabular-nums ${item.valueColor}`}>
+                                                ${item.value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                                {/* Net flow row */}
+                                <div className="px-4 py-2.5 bg-[var(--color-bg-tertiary)] border-t border-[var(--color-border)] flex items-center justify-between">
+                                    <span className="text-xs text-[var(--color-text-secondary)]">Net cash flow (Deposits − Withdrawals)</span>
+                                    <span className={`text-sm font-bold tabular-nums ${(ledgerData.totalDeposits - ledgerData.totalWithdrawals) >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                                        ${(ledgerData.totalDeposits - ledgerData.totalWithdrawals).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                    </span>
+                                </div>
                             </div>
                         )}
 
@@ -755,7 +1129,12 @@ function PortfolioPage() {
                                                 const badge = trade.type === 'BUY' ? 'bg-green-500/15 text-green-600' : trade.type === 'SELL' ? 'bg-red-500/15 text-red-600' : trade.type === 'DEPOSIT' ? 'bg-blue-500/15 text-blue-600' : trade.type === 'WITHDRAWAL' ? 'bg-amber-500/15 text-amber-600' : 'bg-gray-500/15 text-[var(--color-text-secondary)]';
                                                 const isCash = trade.type === 'DEPOSIT' || trade.type === 'WITHDRAWAL';
                                                 const amount = trade.total ?? ((trade.price ?? 0) * (trade.quantity ?? 0));
-                                                const hasPnl = trade.pnl != null;
+                                                const hasPnl      = trade.pnl != null;
+                                                const hasUnrealized = !hasPnl && trade.unrealizedPL != null;
+                                                const plValue     = hasPnl ? trade.pnl : (hasUnrealized ? trade.unrealizedPL : null);
+                                                const plPct       = hasPnl ? trade.pnlPercent : (hasUnrealized ? trade.unrealizedPLPercent : null);
+                                                const plColor     = plValue == null ? 'text-[var(--color-text-secondary)]'
+                                                    : plValue >= 0 ? 'text-green-500' : 'text-red-500';
                                                 return (
                                                     <tr key={trade.id} className="hover:bg-[var(--color-bg-tertiary)] transition-colors">
                                                         <td className="px-4 py-3 whitespace-nowrap text-xs text-[var(--color-text-secondary)]">{new Date(trade.timestamp).toLocaleString()}</td>
@@ -764,8 +1143,24 @@ function PortfolioPage() {
                                                         <td className="px-4 py-3 whitespace-nowrap text-right text-[var(--color-text-secondary)]">{isCash ? '—' : trade.quantity}</td>
                                                         <td className="px-4 py-3 whitespace-nowrap text-right text-[var(--color-text-secondary)]">{isCash ? '—' : `$${(trade.price ?? 0).toFixed(2)}`}</td>
                                                         <td className="px-4 py-3 whitespace-nowrap text-right font-semibold text-[var(--color-text-primary)]">${(amount ?? 0).toFixed(2)}</td>
-                                                        <td className={`px-4 py-3 whitespace-nowrap text-right font-semibold ${hasPnl ? (trade.pnl >= 0 ? 'text-green-500' : 'text-red-500') : 'text-[var(--color-text-secondary)]'}`}>
-                                                            {hasPnl ? `${trade.pnl >= 0 ? '+' : ''}$${trade.pnl.toFixed(2)}` : '—'}
+                                                        <td className={`px-4 py-3 whitespace-nowrap text-right font-semibold ${plColor}`}>
+                                                            {plValue == null ? '—' : (
+                                                                <span className="inline-flex flex-col items-end gap-0.5">
+                                                                    <span>
+                                                                        {plValue >= 0 ? '+' : '-'}${Math.abs(plValue).toFixed(2)}
+                                                                        {plPct != null && (
+                                                                            <span className="ml-1 text-xs opacity-75">
+                                                                                ({plPct >= 0 ? '+' : ''}{plPct.toFixed(1)}%)
+                                                                            </span>
+                                                                        )}
+                                                                    </span>
+                                                                    {hasUnrealized && (
+                                                                        <span className="px-1 py-px text-[9px] font-semibold uppercase tracking-wide rounded bg-amber-500/15 text-amber-600">
+                                                                            unrealized
+                                                                        </span>
+                                                                    )}
+                                                                </span>
+                                                            )}
                                                         </td>
                                                         <td className="px-4 py-3 whitespace-nowrap text-center">
                                                             {trade.aiScore != null ? <span className={`px-2 py-0.5 text-xs font-bold rounded-full ${trade.aiScore >= 80 ? 'bg-green-500/15 text-green-600' : trade.aiScore >= 60 ? 'bg-yellow-500/15 text-yellow-600' : 'bg-gray-500/15 text-[var(--color-text-secondary)]'}`}>{trade.aiScore}</span> : '—'}

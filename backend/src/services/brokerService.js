@@ -303,6 +303,26 @@ const alpacaBroker = (() => {
 
         const { client, isPaper } = await getClientForUser(userId);
 
+        // Cash guard — never buy with margin. Check actual Alpaca cash before submitting.
+        // Alpaca automatically extends margin if we don't check, running the account negative.
+        try {
+            const acctInfo = await client.getAccount();
+            const availableCash = parseFloat(acctInfo.cash);
+            const orderCost = (quote.price || 0) * quantity * 1.01; // 1% buffer for limit slippage
+            if (availableCash < orderCost) {
+                logger.warn('[Broker:Alpaca] Cash guard blocked order — insufficient cash (no margin)', {
+                    symbol, quantity, orderCost: orderCost.toFixed(2), availableCash: availableCash.toFixed(2)
+                });
+                await logOrderState(idemKey, userId, symbol, 'REJECTED', 'VALIDATED', {
+                    reason: `Cash guard: need $${orderCost.toFixed(2)}, have $${availableCash.toFixed(2)} cash`
+                });
+                throw new Error(`Cash guard: insufficient cash ($${availableCash.toFixed(2)}) for $${orderCost.toFixed(2)} order — margin blocked`);
+            }
+        } catch (cashErr) {
+            if (cashErr.message.startsWith('Cash guard')) throw cashErr;
+            logger.warn('[Broker:Alpaca] Could not verify cash balance — proceeding with caution', { err: cashErr.message });
+        }
+
         const entryLimit  = parseFloat(((quote.price || quote.ask || 0) * 1.005).toFixed(2));
         const stopPrice   = meta.stopPrice  > 0 ? parseFloat(meta.stopPrice.toFixed(2))  : parseFloat((entryLimit * 0.93).toFixed(2));
         const targetPrice = meta.targetPrice > 0 ? parseFloat(meta.targetPrice.toFixed(2)) : parseFloat((entryLimit * 1.10).toFixed(2));
@@ -374,8 +394,9 @@ const alpacaBroker = (() => {
                 meta.aiScore  || null,
                 meta.sector   || null,
                 JSON.stringify({
-                    signalPrice: meta.signalPrice || entryLimit,
-                    regime:      meta.regime      || null,
+                    signalPrice:   meta.signalPrice   || entryLimit,
+                    regime:        meta.regime        || null,
+                    oraclePattern: meta.oraclePattern || null,
                     stopPrice,
                     targetPrice,
                     bracketOrder: true
@@ -506,11 +527,12 @@ const alpacaBroker = (() => {
                 `ALPACA_${isPaper ? 'PAPER' : 'LIVE'}_FRAC`,
                 meta.aiScore || null, meta.sector || null,
                 JSON.stringify({
-                    signalPrice: meta.signalPrice || fillPrice,
-                    regime:      meta.regime      || null,
-                    stopPrice:   effectiveStop,
-                    targetPrice: effectiveTarget,
-                    fractional:  true
+                    signalPrice:   meta.signalPrice   || fillPrice,
+                    regime:        meta.regime        || null,
+                    oraclePattern: meta.oraclePattern || null,
+                    stopPrice:     effectiveStop,
+                    targetPrice:   effectiveTarget,
+                    fractional:    true
                 }),
                 fillPrice
             ).catch(err => {
@@ -647,7 +669,7 @@ const alpacaBroker = (() => {
         const positions = await client.getPositions();
         return positions.map(p => ({
             symbol:        p.symbol,
-            qty:           parseInt(p.qty),
+            qty:           parseFloat(p.qty),
             avgEntryPrice: parseFloat(p.avg_entry_price),
             currentPrice:  parseFloat(p.current_price),
             marketValue:   parseFloat(p.market_value),

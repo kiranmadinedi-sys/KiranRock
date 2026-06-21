@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { protect: authenticateToken } = require('../middleware/authMiddleware');
 const ollamaService = require('../services/ollamaService');
+const claudeAssistant = require('../services/claudeAssistantService');
 const { query } = require('../config/database');
 const marketRegimeService = require('../services/marketRegimeService');
 const precomputedUniverseService = require('../services/precomputedUniverseService');
@@ -151,6 +152,19 @@ router.post('/enquiry', authenticateToken, async (req, res) => {
 
         if (!question || typeof question !== 'string') {
             return res.status(400).json({ error: 'Question is required' });
+        }
+
+        // ── Personal assistant — kmadined only, powered by Claude API ────────
+        const KMADINED = 'ca632c53-8798-46f4-be94-29be0fede7f2';
+        if (userId === KMADINED) {
+            logger.info('[Enquiry] Claude assistant path', { userId, questionLength: question.length });
+            try {
+                const answer = await claudeAssistant.chat(question);
+                return res.json({ answer, timestamp: new Date().toISOString(), engine: 'claude' });
+            } catch (claudeErr) {
+                logger.error('[Enquiry] Claude assistant failed', { error: claudeErr.message });
+                return res.status(500).json({ error: 'Assistant is unavailable. Please try again shortly.' });
+            }
         }
 
         logger.info('[Enquiry] Processing question', { userId, questionLength: question.length });

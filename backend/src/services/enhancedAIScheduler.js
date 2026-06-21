@@ -14,6 +14,18 @@ const alertService = require('./telegramAlertService');
 const CHECK_INTERVAL = 5 * 60 * 1000;
 let schedulerInterval = null;
 let isRunning = false;
+let isRunningAt = null; // timestamp when isRunning was set — used by watchdog
+
+// Watchdog: if isRunning has been true for > 6 minutes, something is stuck.
+// Force-reset so the next tick can proceed instead of freezing the whole day.
+const LOCK_MAX_AGE_MS = 6 * 60 * 1000;
+function _watchdogCheck() {
+    if (isRunning && isRunningAt && (Date.now() - isRunningAt) > LOCK_MAX_AGE_MS) {
+        console.error(`[Enhanced AI Scheduler] ⚠ isRunning stuck for ${Math.round((Date.now()-isRunningAt)/60000)} min — force-resetting lock`);
+        isRunning = false;
+        isRunningAt = null;
+    }
+}
 
 // Set AI_TRADING_ENABLED=false in .env to pause all autonomous trading without
 // stopping the scheduler process (position monitoring / EOD cleanup still run).
@@ -36,17 +48,20 @@ async function getActiveAIUsers() {
  * Main scheduler function
  */
 async function runScheduledTrading() {
+    _watchdogCheck(); // reset lock if stuck > 6 min before evaluating
     if (isRunning) {
-        console.log('[Enhanced AI Scheduler] Previous run still in progress, skipping...');
+        const stuckMin = isRunningAt ? Math.round((Date.now() - isRunningAt) / 60000) : '?';
+        console.log(`[Enhanced AI Scheduler] Previous run still in progress (${stuckMin} min), skipping...`);
         return;
     }
-    
+
     const timestamp = new Date().toISOString();
     console.log(`\n${'='.repeat(80)}`);
     console.log(`[Enhanced AI Scheduler] Starting at ${timestamp}`);
     console.log(`${'='.repeat(80)}\n`);
-    
+
     isRunning = true;
+    isRunningAt = Date.now();
 
     try {
         // Hard pause: set AI_TRADING_ENABLED=false to stop new trades instantly.
@@ -92,36 +107,39 @@ async function runScheduledTrading() {
         
         console.log(`[Enhanced AI Scheduler] Found ${activeUsers.length} users with AI trading enabled\n`);
         
-        // Process each user
-        for (const user of activeUsers) {
-            console.log(`\n${'-'.repeat(80)}`);
-            console.log(`[Enhanced AI Scheduler] Processing user: ${user.username} (ID: ${user.id})`);
-            console.log(`${'-'.repeat(80)}\n`);
-            
+        // Process all users in PARALLEL — sequential processing meant the last user
+        // could be 25–60s behind on every cycle, missing time-sensitive opportunities.
+        // Each user gets an independent 4-minute hard timeout so one slow account
+        // cannot delay or block other accounts.
+        const CYCLE_TIMEOUT_MS = 4 * 60 * 1000;
+
+        async function processUser(user) {
+            console.log(`[Enhanced AI Scheduler] ▶ Starting user: ${user.username} (${user.id})`);
             try {
-                const result = await enhancedAITradingBot.executeAutonomousTrading(user.id);
-                
+                const timeoutResult = {
+                    success: false,
+                    message: 'Trading cycle timed out (>4 min) — skipped to prevent scheduler freeze',
+                    tradesExecuted: 0, capitalDeployed: 0, opportunitiesFound: 0, trades: []
+                };
+                const result = await Promise.race([
+                    enhancedAITradingBot.executeAutonomousTrading(user.id),
+                    new Promise(resolve => setTimeout(() => resolve(timeoutResult), CYCLE_TIMEOUT_MS))
+                ]);
+
                 if (result.success) {
-                    console.log(`[Enhanced AI Scheduler] ✓ User ${user.username}: ${result.message || 'Trading completed'}`);
-                    
+                    console.log(`[Enhanced AI Scheduler] ✓ ${user.username}: ${result.message || 'Trading completed'}`);
                     if (result.tradesExecuted > 0) {
-                        console.log(`  - Trades executed: ${result.tradesExecuted}`);
-                        console.log(`  - Capital deployed: $${result.capitalDeployed.toFixed(2)}`);
-                        console.log(`  - Opportunities found: ${result.opportunitiesFound}`);
-                        
-                        // Log trade details
-                        result.trades.forEach((trade, index) => {
-                            console.log(`  ${index + 1}. ${trade.action} ${trade.shares} ${trade.symbol} @ $${trade.price.toFixed(2)} (Score: ${trade.aiScore}, Sector: ${trade.sector})`);
-                        });
+                        console.log(`  trades=${result.tradesExecuted} deployed=$${result.capitalDeployed?.toFixed(2)} opps=${result.opportunitiesFound}`);
+                        result.trades.forEach((t, i) =>
+                            console.log(`  ${i + 1}. ${t.action} ${t.shares} ${t.symbol} @ $${t.price?.toFixed(2)} (score=${t.aiScore})`)
+                        );
                     }
                 } else {
-                    console.log(`[Enhanced AI Scheduler] ⚠ User ${user.username}: ${result.message || result.error}`);
+                    console.log(`[Enhanced AI Scheduler] ⚠ ${user.username}: ${result.message || result.error}`);
                 }
-                
-                // Save trading log to user profile
+
                 await logTradingActivity(user.id, result);
 
-                // Redis: update open positions list for this user (multi-process coordination)
                 try {
                     const holdingsDb = require('./holdingsDatabaseService');
                     const holdings   = await holdingsDb.getUserHoldings(user.id);
@@ -129,14 +147,13 @@ async function runScheduledTrading() {
                     await redisState.setOpenPositions(user.id, symbols);
                     await redisState.pingAgentHealth('ARROW');
                 } catch { /* non-blocking */ }
-                
+
             } catch (error) {
                 console.error(`[Enhanced AI Scheduler] Error processing user ${user.username}:`, error.message);
             }
-            
-            // Small delay between users
-            await new Promise(resolve => setTimeout(resolve, 2000));
         }
+
+        await Promise.all(activeUsers.map(processUser));
         
         console.log(`\n${'='.repeat(80)}`);
         console.log('[Enhanced AI Scheduler] Trading cycle completed');
@@ -146,6 +163,7 @@ async function runScheduledTrading() {
         console.error('[Enhanced AI Scheduler] Error in trading cycle:', error);
     } finally {
         isRunning = false;
+        isRunningAt = null;
     }
 }
 
@@ -1312,6 +1330,27 @@ async function runWeeklyParameterHealthCheck() {
             }
         } catch (btErr) {
             console.warn('[Weekly Health] Backtest skipped:', btErr.message);
+        }
+
+        // ── Weekly Performance Report (per-user, stored in DB for Performance page) ─
+        try {
+            const weeklyReportSvc = require('./weeklyTradingReportService');
+            const { weekStart, weekEnd } = weeklyReportSvc.currentWeekRange();
+            console.log(`[Weekly Health] Generating trading performance reports for week ${weekStart}–${weekEnd}...`);
+            const reportResult = await weeklyReportSvc.generateFridayReportsForAllUsers();
+            console.log(`[Weekly Health] Reports generated: ${reportResult.generated} users, ${reportResult.failed} failed`);
+            if (reportResult.generated > 0) {
+                for (const user of activeUsers) {
+                    try {
+                        await alertService.sendMessage(user.id,
+                            `📋 *Weekly Trading Report Ready* — ${weekStart} to ${weekEnd}\n` +
+                            `Your report is available on the Performance page under "Weekly Report".`
+                        );
+                    } catch (_) {}
+                }
+            }
+        } catch (rptErr) {
+            console.warn('[Weekly Health] Weekly report generation skipped:', rptErr.message);
         }
 
     } catch (err) {

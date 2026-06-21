@@ -347,14 +347,74 @@ async function getSectorThresholds(userId) {
     return results.sort((a, b) => b.total - a.total);
 }
 
+// ── Confidence bucket analysis ────────────────────────────────────────────────
+// Answers: "does a higher predicted confidence actually correlate with better outcomes?"
+// Helps detect whether the confidence signal is well-calibrated or consistently mis-estimated.
+
+async function getConfidenceBuckets(userId) {
+    const res = await query(`
+        SELECT
+            confidence,
+            pnl_percent
+        FROM trade_decision_journal
+        WHERE user_id        = $1
+          AND decision_phase  = 'CLOSED'
+          AND confidence      IS NOT NULL
+          AND pnl_percent     IS NOT NULL
+          AND closed_at       >= NOW() - ($2 * INTERVAL '1 day')
+    `, [userId, LOOKBACK_DAYS]);
+
+    const buckets = {
+        '<60':   { label: '<60%',   trades: [] },
+        '60-69': { label: '60–69%', trades: [] },
+        '70-79': { label: '70–79%', trades: [] },
+        '80-89': { label: '80–89%', trades: [] },
+        '90+':   { label: '90%+',   trades: [] },
+    };
+
+    for (const r of res.rows) {
+        const conf = parseFloat(r.confidence);
+        const pnl  = parseFloat(r.pnl_percent);
+        const key  = conf >= 90 ? '90+'
+                   : conf >= 80 ? '80-89'
+                   : conf >= 70 ? '70-79'
+                   : conf >= 60 ? '60-69'
+                   : '<60';
+        buckets[key].trades.push(pnl);
+    }
+
+    return Object.entries(buckets).map(([key, data]) => {
+        const trades  = data.trades;
+        const total   = trades.length;
+        const wins    = trades.filter(p => p > 0);
+        const losses  = trades.filter(p => p <= 0);
+        const winRate   = total > 0 ? parseFloat(((wins.length / total) * 100).toFixed(1)) : 0;
+        const avgReturn = total > 0 ? parseFloat((trades.reduce((s, v) => s + v, 0) / total).toFixed(2)) : 0;
+        const pf        = profitFactor(wins, losses);
+        const exp       = expectancy(wins, losses);
+        return {
+            bucket:       data.label,
+            total,
+            wins:         wins.length,
+            losses:       losses.length,
+            winRate,
+            avgReturn,
+            profitFactor: pf,
+            expectancy:   exp,
+            valid:        total >= 10,
+        };
+    }).filter(b => b.total > 0); // omit empty buckets
+}
+
 // ── Build suggestion report ───────────────────────────────────────────────────
 
 async function buildCalibrationReport(userId) {
-    const [buckets, sectors, scoreRatioCross, exitAttribution] = await Promise.all([
+    const [buckets, sectors, scoreRatioCross, exitAttribution, confidenceBuckets] = await Promise.all([
         getScoreBuckets(userId),
         getSectorThresholds(userId),
         getScoreRatioCross(userId),
         getExitReasonAttribution(userId),
+        getConfidenceBuckets(userId),
     ]);
 
     const totalTrades   = buckets.reduce((s, b) => s + b.total, 0);
@@ -403,6 +463,8 @@ async function buildCalibrationReport(userId) {
         confidence:     confidenceLabel(totalTrades),
         buckets,
         sectorInsights,
+        // confidence calibration — does higher predicted confidence → better outcomes?
+        confidenceBuckets: confidenceBuckets.length > 0 ? confidenceBuckets : null,
         // null until trades with bullBearRatio metadata accumulate (≥15 per cell)
         scoreRatioCross,
         // exit reason breakdown — shows which exit type earns the best PF/expectancy
@@ -660,4 +722,4 @@ async function runDailySuggestion(userId, currentMinBuyScore = null) {
 
 // ── API export (for /api/performance/calibration endpoint) ────────────────────
 
-module.exports = { runDailySuggestion, buildCalibrationReport, getScoreBuckets, getScoreRatioCross, getExitReasonAttribution };
+module.exports = { runDailySuggestion, buildCalibrationReport, getScoreBuckets, getConfidenceBuckets, getScoreRatioCross, getExitReasonAttribution };

@@ -40,33 +40,37 @@ const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', 
         const totalCost = currentPrice * quantity;
         const commission = totalCost * 0.001; // 0.1% commission
         const totalWithCommission = totalCost + commission;
-        
+
+        // When fillPrice is supplied the broker already executed the trade — skip the internal
+        // balance check (Alpaca enforced funds at submission) and just record the fill.
+        const brokerConfirmed = fillPrice != null;
+
         // Execute in transaction
         return await transaction(async (client) => {
-            // Get account balance
-            const accountResult = await client.query(
-                'SELECT balance FROM trading_accounts WHERE user_id = $1',
-                [userId]
-            );
-            
-            if (!accountResult.rows[0]) {
-                throw new Error('Trading account not found');
-            }
-            
-            const balance = parseFloat(accountResult.rows[0].balance);
-            
-            // Check sufficient funds
-            if (balance < totalWithCommission) {
-                throw new Error(
-                    `Insufficient funds. Need $${totalWithCommission.toFixed(2)}, have $${balance.toFixed(2)}`
+            if (!brokerConfirmed) {
+                // Paper / manual orders: enforce internal virtual balance
+                const accountResult = await client.query(
+                    'SELECT balance FROM trading_accounts WHERE user_id = $1',
+                    [userId]
+                );
+
+                if (!accountResult.rows[0]) {
+                    throw new Error('Trading account not found');
+                }
+
+                const balance = parseFloat(accountResult.rows[0].balance);
+
+                if (balance < totalWithCommission) {
+                    throw new Error(
+                        `Insufficient funds. Need $${totalWithCommission.toFixed(2)}, have $${balance.toFixed(2)}`
+                    );
+                }
+
+                await client.query(
+                    'UPDATE trading_accounts SET balance = balance - $1 WHERE user_id = $2',
+                    [totalWithCommission, userId]
                 );
             }
-            
-            // Deduct funds
-            await client.query(
-                'UPDATE trading_accounts SET balance = balance - $1 WHERE user_id = $2',
-                [totalWithCommission, userId]
-            );
             
             // Get existing holding
             const holdingResult = await client.query(

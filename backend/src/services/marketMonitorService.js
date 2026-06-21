@@ -126,6 +126,37 @@ function analyseErrorLog() {
 
 // ─── Daily summary ────────────────────────────────────────────────────────────
 
+/**
+ * Compute realized P/L for a sell.
+ * Priority: (1) intraday buy of same symbol, (2) most recent prior-day buy.
+ * Returns null if no cost basis is found.
+ */
+async function _realizedPnl(userId, sell, todayBuys, today) {
+    const sellTotal = parseFloat(sell.total || 0);
+    const qty       = parseFloat(sell.quantity || 1);
+
+    // Intraday round-trip
+    const intradayBuy = todayBuys.find(b => b.symbol === sell.symbol);
+    if (intradayBuy) {
+        return sellTotal - parseFloat(intradayBuy.total || 0);
+    }
+
+    // Prior-day cost basis — use most recent BUY for that symbol
+    const res = await query(
+        `SELECT price FROM trades
+         WHERE user_id = $1 AND symbol = $2 AND action = 'BUY'
+           AND trade_date::date < $3::date
+         ORDER BY trade_date DESC LIMIT 1`,
+        [userId, sell.symbol, today]
+    );
+    if (res.rows.length > 0) {
+        const costBasis = parseFloat(res.rows[0].price) * qty;
+        return sellTotal - costBasis;
+    }
+
+    return null;   // no cost basis available — don't show a misleading number
+}
+
 async function buildDailySummary() {
     const today   = etNow().toISOString().slice(0, 10);
     const users   = await getActiveUsers();
@@ -141,16 +172,46 @@ async function buildDailySummary() {
         );
         const buys  = trades.rows.filter(t => t.action === 'BUY');
         const sells = trades.rows.filter(t => t.action === 'SELL');
-        const pnl   = sells.reduce((s, t) => s + parseFloat(t.total || 0), 0)
-                    - buys.reduce((s, t) => s + parseFloat(t.total || 0), 0);
 
         lines.push(`👤 *${u.username}*`);
+
         if (buys.length === 0 && sells.length === 0) {
             lines.push('  No trades today');
         } else {
-            if (buys.length)  lines.push(`  🟢 Bought: ${buys.map(t => `${t.symbol}×${t.quantity}`).join(', ')}`);
-            if (sells.length) lines.push(`  🔴 Sold:   ${sells.map(t => `${t.symbol}×${t.quantity}`).join(', ')}`);
-            lines.push(`  P/L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}`);
+            // Buys = capital deployed into new positions — NOT a loss
+            if (buys.length) {
+                const deployed = buys.reduce((s, t) => s + parseFloat(t.total || 0), 0);
+                lines.push(
+                    `  🟢 Opened: ${buys.map(t => `${t.symbol}×${t.quantity}`).join(', ')}` +
+                    ` (deployed $${deployed.toFixed(0)})`
+                );
+            }
+
+            // Sells = compute realized P/L vs actual cost basis
+            if (sells.length) {
+                let totalRealized = 0;
+                let missingBasis  = 0;
+                const sellParts   = [];
+
+                for (const sell of sells) {
+                    const pnl = await _realizedPnl(u.id, sell, buys, today);
+                    if (pnl !== null) {
+                        totalRealized += pnl;
+                        sellParts.push(`${sell.symbol}×${sell.quantity} (${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)})`);
+                    } else {
+                        missingBasis++;
+                        sellParts.push(`${sell.symbol}×${sell.quantity}`);
+                    }
+                }
+
+                lines.push(`  🔴 Closed: ${sellParts.join(', ')}`);
+
+                if (missingBasis < sells.length) {
+                    // At least one sell has a known cost basis
+                    const sign = totalRealized >= 0 ? '+' : '';
+                    lines.push(`  💰 Realized P/L: ${sign}$${totalRealized.toFixed(2)}`);
+                }
+            }
         }
         lines.push('');
     }

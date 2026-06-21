@@ -27,11 +27,14 @@ router.get('/settings', async (req, res) => {
  */
 router.post('/settings', async (req, res) => {
     try {
-        const { stopLoss, takeProfit, minCashReserve } = req.body;
+        const { stopLoss, takeProfit, minCashReserve, maxPositionSize, maxOpenPositions, maxOrderNotional } = req.body;
         const aiTradingSettings = await userProfileService.updateAITradingSettings(req.userId, {
             stopLoss,
             takeProfit,
-            minCashReserve
+            minCashReserve,
+            maxPositionSize,
+            maxOpenPositions,
+            maxOrderNotional
         });
         res.json({ success: true, aiTradingSettings });
     } catch (error) {

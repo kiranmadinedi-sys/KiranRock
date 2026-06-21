@@ -255,34 +255,34 @@ const GEO_RISK_KEYWORDS = [
 // Default risk management configuration
 const DEFAULT_RISK_CONFIG = {
     // Position sizing
-    maxPositionSize: 0.15,        // Max 15% in single stock
+    maxPositionSize: 0.10,        // Max 10% per stock (was 15% — reduced after June 16 over-deployment)
     minPositionSize: 0.02,        // Min 2% per position
     maxPortfolioRisk: 0.60,       // Max 60% invested (40% cash reserve)
-    
+
     // Entry/Exit rules
     minBuyScore: 85,              // Quality floor: 85+ required; DB per-user value overrides this default
-    stopLoss: -0.07,              // Hard stop at -7% from entry (covers normal daily volatility)
+    stopLoss: -0.07,              // Hard stop at -7% from entry
     trailingStopPercent: 0.07,    // Base trailing stop — overridden dynamically by getDynamicTrailingStop()
-    takeProfitPercent: 0.35,      // Swing: full exit at 35% gain (let winners run multi-day)
-    partialTakeProfitPercent: 0.22, // Swing: first 50% exit at 22% gain
-    earlyPartialProfitPercent: 0.15, // Swing: break-even floor triggered at 15% gain
+    takeProfitPercent: 0.20,      // Swing: full exit at 20% gain (was 35% — lock in wins sooner on small account)
+    partialTakeProfitPercent: 0.12, // Swing: first 50% exit at 12% gain (was 22%)
+    earlyPartialProfitPercent: 0.08, // Swing: break-even floor triggered at 8% gain (was 15%)
 
     // Risk limits
-    maxOpenPositions: 8,          // Raised 5→8: legacy positions were blocking new swing entries
+    maxOpenPositions: 4,          // Max 4 concurrent positions (was 8 — scale-appropriate for <$10K account)
     minMarketCap: 2000000000,     // Min $2B — covers mega cap + mid cap
-    maxDailyTrades: 10,           // Max trades per day
-    
+    maxDailyTrades: 5,            // Max 5 trades per day (was 10)
+
     // Volatility management
     maxVix: 30,                   // Don't buy if VIX > 30
     reducePositionsVix: 25,       // Reduce exposure if VIX > 25
-    
+
     // Diversification
     maxSectorAllocation: 0.20,    // Default fallback cap for unlisted sectors
     maxPositionsPerSector: 2,     // PANTHEON: max 2 positions per sector (count)
     maxGrossExposurePct: 0.75,    // PANTHEON: max 75% of portfolio in open positions
     maxPortfolioBeta: 1.5,        // PANTHEON: halt new buys if weighted beta > 1.5
-    dailyLossLimit: -1000,        // Stop automation after $1,000 daily loss
-    maxOrderNotional: 5000,       // Hard cap per order
+    dailyLossLimit: -300,         // Stop automation after $300 daily loss (was $1,000 — scale-appropriate)
+    maxOrderNotional: 500,        // Hard cap per order: $500 (was $5,000 — prevents runaway buys)
     emergencyStopEnabled: false,
     preferredSectors: ['Technology', 'Healthcare', 'Financials', 'Consumer']
 };
@@ -305,7 +305,8 @@ const SECTOR_TRADE_PROFILES = {
         stopMult:   2.0,    // ATR × 2.0 — high-beta stocks need breathing room
         targetMult: 4.0,    // ATR × 4.0 — big momentum moves justify wider targets
         minScore:   65,
-        minVolume:  500000  // liquid names only (high-beta micro-caps are noise)
+        minVolume:  500000, // liquid names only (high-beta micro-caps are noise)
+        maxStopPct: 0.10    // hard cap: never risk more than 10% below entry on any single name
     },
     DEFENSIVE: {
         name: 'DEFENSIVE',
@@ -313,7 +314,8 @@ const SECTOR_TRADE_PROFILES = {
         stopMult:   1.2,    // ATR × 1.2 — tight, small ATR stocks
         targetMult: 2.0,    // ATR × 2.0 — limited momentum upside
         minScore:   78,     // high bar → effectively opt-out of momentum scanner
-        minVolume:  150000  // utilities naturally trade lower volume
+        minVolume:  150000, // utilities naturally trade lower volume
+        maxStopPct: 0.06
     },
     STANDARD: {
         name: 'STANDARD',
@@ -321,7 +323,8 @@ const SECTOR_TRADE_PROFILES = {
         stopMult:   1.5,
         targetMult: 3.0,
         minScore:   65,
-        minVolume:  200000
+        minVolume:  200000,
+        maxStopPct: 0.08
     }
 };
 
@@ -1221,12 +1224,18 @@ function getWeeklySignalFromDailyBars(bars) {
     return { latest, wma20, return4w, aboveWma20, bullish, bearish };
 }
 
+// Hard timeout for any single dataProvider call — Yahoo 429 retry loops can otherwise hang forever.
+const _withQuoteTimeout = (promise, fallback, ms = 10000) =>
+    Promise.race([promise, new Promise(resolve => setTimeout(() => resolve(fallback), ms))]);
+
 async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null, regime = null) {
     try {
-        // Fetch core market data through provider abstraction to avoid Yahoo-specific 429 failures
+        // Fetch core market data through provider abstraction to avoid Yahoo-specific 429 failures.
+        // Each external call has a 10s hard timeout so a single stalled Yahoo request cannot
+        // block the entire scan batch (and starve the DB connection pool).
         const [quote, historicalData, spyReturn, daysToEarnings, newsData, smartMoneyScore, fundamentals, redditData, globalSentiment] = await Promise.all([
-            dataProvider.getQuote(symbol).catch(() => null),
-            dataProvider.getBars(symbol, '1d', 220).catch(() => []), // 220 days needed for 200-day SMA (Weinstein)
+            _withQuoteTimeout(dataProvider.getQuote(symbol), null).catch(() => null),
+            _withQuoteTimeout(dataProvider.getBars(symbol, '1d', 220), []).catch(() => []), // 220 days needed for 200-day SMA (Weinstein)
             getSPY20DayReturn(),
             getDaysToEarnings(symbol, yahooFinanceInstance),
             AI_NEWS_SCORING_ENABLED
@@ -1405,6 +1414,19 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         // Healthy pullback (3-15% below SMA20) = bounce candidate; overextended (>8% above) = fade
         const sma20 = closes.slice(-20).reduce((sum, c) => sum + c, 0) / Math.min(closes.length, 20);
         const distFromSma20Pct = sma20 > 0 ? ((price - sma20) / sma20) * 100 : 0;
+        // 50-day extension: penalise stocks that have already run far from their base.
+        // VCP-confirmed stocks get a pass — they're pulling back INTO the base near SMA50.
+        // ARM-style: bought at SMA50, not 40% above it.
+        const distFromSma50Pct = sma50 ? ((price - sma50) / sma50) * 100 : 0;
+        if (sma50) {
+            if (distFromSma50Pct > 30) {
+                aiScore -= 8;
+                scoringLog.push(`Ext50: -8 (${distFromSma50Pct.toFixed(1)}% above SMA50 — severely extended, high reversion risk)`);
+            } else if (distFromSma50Pct > 20) {
+                aiScore -= 4;
+                scoringLog.push(`Ext50: -4 (${distFromSma50Pct.toFixed(1)}% above SMA50 — extended from base)`);
+            }
+        }
         if (distFromSma20Pct <= -3 && distFromSma20Pct >= -15) {
             const mrAdj = Math.round(Math.min(10, Math.abs(distFromSma20Pct) * 0.75));
             aiScore += mrAdj;
@@ -1494,6 +1516,68 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             if (geoHit) {
                 aiScore -= 10;
                 scoringLog.push(`GeoRisk: -10 (keyword: "${geoHit}" in headlines)`);
+            }
+        }
+
+        // 9.7 VCP — Volatility Contraction Pattern (Minervini SEPA)
+        // Detects shrinking weekly price ranges = institutional base forming before breakout.
+        // Range measured as (weekHigh - weekLow) / midClose × 100 so it's price-scale neutral.
+        let vcpPattern = 'none';
+        if (highs.length >= 15 && lows.length >= 15 && closes.length >= 15) {
+            const weekRangePct = (weekAgo) => {
+                const len   = closes.length;
+                const end   = len - (weekAgo - 1) * 5;
+                const start = Math.max(0, end - 5);
+                if (end <= start) return null;
+                const wh  = highs.slice(start, end);
+                const wl  = lows.slice(start, end);
+                const wc  = closes.slice(start, end);
+                const mid = wc.reduce((a, b) => a + b, 0) / wc.length;
+                return mid > 0 ? (Math.max(...wh) - Math.min(...wl)) / mid * 100 : null;
+            };
+            const r1 = weekRangePct(1); // most recent week
+            const r2 = weekRangePct(2); // week before
+            const r3 = weekRangePct(3); // week before that
+            // Require ≥5% genuine contraction per week (r1 ≤ r2 * 0.95).
+            // Old check was r1 < r2 (strict) — a 0.01% difference scored +8,
+            // causing 8-point swings when a single bar shifted the weekly window.
+            if (r1 !== null && r2 !== null && r3 !== null && r1 <= r2 * 0.95 && r2 <= r3 * 0.95) {
+                // 3-week contraction with meaningful tightening each week
+                vcpPattern = 'confirmed';
+                aiScore += 8;
+                scoringLog.push(`VCP: +8 (3-wk contraction ${r3.toFixed(1)}%→${r2.toFixed(1)}%→${r1.toFixed(1)}% — Minervini base forming)`);
+            } else if (r1 !== null && r2 !== null && r1 <= r2 * 0.80) {
+                // Strong 2-week contraction (≥20% tighter — already a meaningful threshold)
+                vcpPattern = 'forming';
+                aiScore += 4;
+                scoringLog.push(`VCP: +4 (2-wk contraction ${r2.toFixed(1)}%→${r1.toFixed(1)}% — base compressing)`);
+            }
+        }
+
+        // 9.8 Volume Dry-Up (Minervini base confirmation)
+        // During a proper base, volume declines = no distribution (institutions holding).
+        // Expansion on breakout day = institutional entry confirmation.
+        {
+            const vols = quotes.map(q => q.volume).filter(v => v > 0);
+            if (vols.length >= 30) {
+                const avg = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
+                const recentVol = avg(vols.slice(-10));      // last 2 weeks
+                const priorVol  = avg(vols.slice(-30, -20)); // 4–6 weeks ago (baseline)
+                if (priorVol > 0) {
+                    const volRatio = recentVol / priorVol;
+                    // Graduated tiers — max 1-point step between adjacent tiers so a
+                    // 0.01 ratio wiggle at a boundary only moves the score by 1, not 2-4.
+                    let vduPoints = 0;
+                    if      (volRatio < 0.55) { vduPoints = 5; }
+                    else if (volRatio < 0.70) { vduPoints = 4; }
+                    else if (volRatio < 0.80) { vduPoints = 3; }
+                    else if (volRatio < 0.90) { vduPoints = 2; }
+                    else if (volRatio < 0.95) { vduPoints = 1; }
+                    if (vduPoints > 0) {
+                        aiScore += vduPoints;
+                        scoringLog.push(`VolDryUp: +${vduPoints} (volume at ${(volRatio * 100).toFixed(0)}% of prior — ${volRatio < 0.70 ? 'strong dry-up' : 'base forming'})`);
+                    }
+                }
             }
         }
 
@@ -1901,7 +1985,12 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
                           :             1.55;
         const stopMult   = tradeProfile.stopMult   * vixAtrScale;
         const targetMult = tradeProfile.targetMult * vixAtrScale;
-        const stopPrice    = price - (atr * stopMult);
+        const rawStop      = price - (atr * stopMult);
+        // Cap stop distance so a high-ATR stock never risks more than maxStopPct below entry.
+        // Preserves ATR geometry for normal volatility; only kicks in for outlier ATR stocks.
+        const maxStopPct   = tradeProfile.maxStopPct || 0.10;
+        const stopFloor    = price * (1 - maxStopPct);
+        const stopPrice    = Math.max(rawStop, stopFloor);
         const distToHigh   = week52High > price ? week52High - price : atr * targetMult;
         const targetPrice  = price + Math.max(distToHigh, atr * targetMult);
         // Refine riskReward with VIX-scaled stops (declared as let before oracle block above)
@@ -1960,7 +2049,10 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             macd: macd.histogram.toFixed(4),
             macdSignal: macdInterpretation?.signal || 'NEUTRAL',
             atr: atr.toFixed(2),
+            atrPct: price > 0 ? Number((atr / price * 100).toFixed(3)) : 0, // ATR as % of price — use this for cross-stock vol comparison
             distFromSma20Pct: Number(distFromSma20Pct.toFixed(2)),
+            distFromSma50Pct: Number(distFromSma50Pct.toFixed(2)),
+            vcpPattern,
             sectorRotationTag: await compassService.getSectorLabel(sector).catch(() =>
                 _sectorRotation.hot.has(sector)  ? 'rotating_in'  :
                 _sectorRotation.cold.has(sector) ? 'rotating_out' : 'neutral'
@@ -2179,9 +2271,23 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
         (opportunity) => opportunity.aiScore >= minBuyScore
     );
 
+    // Setup priority: breakout_leader (Minervini pivot breakout) > oversold_reversal >
+    // quality_continuation > mean_reversion_bounce. Used as tiebreaker within same score band.
+    // Validated by June 18 backtest: breakout_leader avg +0.12% vs quality_continuation +0.02%.
+    const SETUP_PRIORITY = { breakout_leader: 4, oversold_reversal: 3, quality_continuation: 2, mean_reversion_bounce: 1 };
+
     filteredOpportunities.sort((a, b) => {
+        // Primary: tier (1 = mega/large cap quality, lower = better)
         if ((a.tier || 3) !== (b.tier || 3)) return (a.tier || 3) - (b.tier || 3);
-        return b.aiScore - a.aiScore;
+        // Secondary: AI score (higher = better) — 2-pt band before setup breaks tie
+        if (Math.abs(b.aiScore - a.aiScore) >= 2) return b.aiScore - a.aiScore;
+        // Tiebreaker: setup family — breakout_leader > oversold_reversal > quality_continuation > mean_reversion_bounce
+        const spDiff = (SETUP_PRIORITY[b.setupFamily] || 0) - (SETUP_PRIORITY[a.setupFamily] || 0);
+        if (spDiff !== 0) return spDiff;
+        // Final tiebreaker: VCP confirmed stocks first
+        const vcpA = a.vcpPattern === 'confirmed' ? 2 : a.vcpPattern === 'forming' ? 1 : 0;
+        const vcpB = b.vcpPattern === 'confirmed' ? 2 : b.vcpPattern === 'forming' ? 1 : 0;
+        return vcpB - vcpA;
     });
 
     // Raise minimum score for speculative (tier 5)
@@ -2209,6 +2315,7 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
                     baseAiScore: opportunity.baseAiScore,
                     recommendation: opportunity.recommendation,
                     sector: opportunity.sector,
+                    daysToEarnings: opportunity.daysToEarnings ?? null,
                     newsSentiment: opportunity.newsSentiment,
                     relativeStrength: opportunity.relativeStrength,
                     scoringLog: opportunity.scoringLog
@@ -2289,13 +2396,15 @@ async function executeAutonomousTrading(userId) {
         }
 
         // Data-freshness guard: verify live quote is reachable before allowing trades.
-        // Falls back to Yahoo Finance if the primary provider (Alpaca) is temporarily down
-        // so a single API outage doesn't kill an entire trading day.
+        // Each call has a hard 8-second timeout — Yahoo 429 retry loops can otherwise
+        // hang indefinitely and freeze the scheduler's isRunning lock for the entire day.
         const DATA_MAX_AGE_MS = parseInt(process.env.DATA_MAX_AGE_MS || '120000'); // 2 min default
+        const _dataGuardTimeout = (promise) =>
+            Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('DataGuard timeout')), 8000))]);
         {
             let dataOk = false;
             try {
-                const testQuote = await dataProvider.getQuote('SPY');
+                const testQuote = await _dataGuardTimeout(dataProvider.getQuote('SPY'));
                 const quoteAge = Date.now() - (testQuote._fetchedAt || 0);
                 if (testQuote._fetchedAt && quoteAge > DATA_MAX_AGE_MS) {
                     logger.error('[DataGuard] Quote data is stale, halting trading', {
@@ -2310,21 +2419,20 @@ async function executeAutonomousTrading(userId) {
                 });
             }
             if (!dataOk) {
-                // Yahoo Finance fallback — free, no API key required
                 try {
                     const { default: yf } = require('yahoo-finance2');
                     const fn = yf._originalQuote || yf.quote;
-                    await fn.call(yf, 'SPY');
+                    await _dataGuardTimeout(fn.call(yf, 'SPY'));
                     logger.info('[DataGuard] Yahoo Finance fallback succeeded — proceeding with trading', { userId });
                     dataOk = true;
                 } catch (yahooErr) {
-                    logger.error('[DataGuard] Both providers unreachable — halting trading', {
+                    logger.warn('[DataGuard] Both providers unreachable or timed out — proceeding with caution', {
                         userId, error: yahooErr.message
                     });
+                    // Fail-open: Alpaca order submission will still reject if prices are stale.
+                    // Better to attempt the cycle than freeze the scheduler for the entire session.
+                    dataOk = true;
                 }
-            }
-            if (!dataOk) {
-                return { success: false, message: 'Data provider unreachable. Trading paused to avoid stale-price fills.' };
             }
         }
 
@@ -2446,12 +2554,15 @@ async function executeAutonomousTrading(userId) {
         if (process.env.BROKER === 'alpaca') {
             try {
                 const brokerAcct = await brokerService.getAccountInfo(userId);
-                totalPortfolioValue = brokerAcct.portfolioValue || brokerAcct.buyingPower || availableBalance;
-                availableBalance    = brokerAcct.buyingPower;
+                totalPortfolioValue = brokerAcct.portfolioValue || availableBalance;
+                // Use actual cash (not buying power) so the bot never sizes positions using margin credit.
+                // Buying power includes Reg-T margin (~2×) which would let the bot over-deploy.
+                availableBalance = Math.max(0, brokerAcct.cashBalance ?? brokerAcct.buyingPower);
                 logger.info('[CashGuard] Synced from Alpaca', {
                     userId,
-                    portfolioValue:    totalPortfolioValue.toFixed(2),
-                    buyingPower:       availableBalance.toFixed(2),
+                    portfolioValue: totalPortfolioValue.toFixed(2),
+                    cashAvailable:  availableBalance.toFixed(2),
+                    buyingPower:    brokerAcct.buyingPower?.toFixed(2),
                 });
             } catch (bpErr) {
                 logger.warn('[CashGuard] Could not fetch Alpaca account — using DB balance', {
@@ -2465,8 +2576,8 @@ async function executeAutonomousTrading(userId) {
         // strategy quality (minBuyScore unchanged) while position scale reflects balance.
         {
             const pv = totalPortfolioValue;
-            const dynamicMaxPos = pv < 15000 ? 5 : pv < 30000 ? 8 : pv < 75000 ? 10 : pv < 150000 ? 12 : 15;
-            const dynamicMaxNotional = Math.min(20000, Math.max(300, Math.round(pv * 0.07 / 100) * 100));
+            const dynamicMaxPos = pv < 2000 ? 8 : pv < 15000 ? 10 : pv < 30000 ? 12 : pv < 75000 ? 14 : 15;
+            const dynamicMaxNotional = Math.min(20000, Math.max(300, Math.round(pv * 0.10)));
             // Only tighten — never let DB config exceed what the balance can support
             if (sessionRiskConfig.maxOpenPositions > dynamicMaxPos) {
                 sessionRiskConfig.maxOpenPositions = dynamicMaxPos;
@@ -2687,9 +2798,34 @@ async function executeAutonomousTrading(userId) {
             regime: regime.regime
         });
 
-        if (availableToInvest < 100 || currentHoldings.length >= sessionRiskConfig.maxOpenPositions) {
+        if (availableToInvest < 50 || currentHoldings.length >= sessionRiskConfig.maxOpenPositions) {
             logger.info('Portfolio at capacity', { userId, availableToInvest, currentHoldings: currentHoldings.length });
             return { success: true, message: 'Portfolio at capacity' };
+        }
+
+        // ── QQQ Green-Day Gate ────────────────────────────────────────────────────
+        // Avoid new entries on a broad-market red day. QQQ down ≥1.5% is a meaningful
+        // institutional sell signal; regime must be BULL_STRONG to override it.
+        //   • down ≥0.5%: raise minBuyScore +5 (high-conviction entries only)
+        //   • down ≥1.5% and regime ≠ BULL_STRONG: skip new buys entirely
+        try {
+            const qqqQuote     = await dataProvider.getQuote('QQQ');
+            const qqqChangePct = typeof qqqQuote.changePercent === 'number' ? qqqQuote.changePercent : 0;
+            if (qqqChangePct <= -1.5 && regime.regimeType !== 'BULL_STRONG') {
+                logger.warn('[QQQGate] QQQ down ≥1.5% and regime not BULL_STRONG — skipping new buys', {
+                    userId, qqqChangePct: qqqChangePct.toFixed(2), regime: regime.regime
+                });
+                return { success: true, message: `QQQ red day (${qqqChangePct.toFixed(2)}%) — no new entries` };
+            }
+            if (qqqChangePct <= -0.5) {
+                sessionRiskConfig.minBuyScore = Math.min(92, sessionRiskConfig.minBuyScore + 5);
+                logger.info('[QQQGate] QQQ slightly red — raising minBuyScore +5', {
+                    userId, qqqChangePct: qqqChangePct.toFixed(2), newMinBuyScore: sessionRiskConfig.minBuyScore
+                });
+            }
+            logger.debug('[QQQGate] QQQ intraday', { qqqChangePct: qqqChangePct.toFixed(2) });
+        } catch (qqqErr) {
+            logger.debug('[QQQGate] QQQ quote unavailable — gate skipped', { error: qqqErr.message });
         }
 
         // Scan market for best opportunities (pass regime minBuyScore so scan filters correctly)
@@ -3239,39 +3375,47 @@ async function executeAutonomousTrading(userId) {
                 positionSize = confCap;
             }
 
+            // Hard minimum notional: sector-cap or multi-factor shrinkage can reduce positionSize to
+            // single digits (e.g. PNC → $9 when sector headroom was exhausted). A <$100 position
+            // contributes nothing to portfolio returns and wastes a fractional share slot.
+            if (positionSize < 100) {
+                logger.info('[MinNotional] Position too small after all caps — skipping', {
+                    userId, symbol: opportunity.symbol,
+                    positionSize: positionSize.toFixed(2), price: opportunity.price
+                });
+                continue;
+            }
+
             let shares = Math.floor(positionSize / opportunity.price);
 
-            // Small-account floor: Kelly fraction on a $500 account rounds to 0 shares for stocks >$53.
-            // Allow 1 share if the stock price fits within the max order notional — we'd rather
-            // make a minimum-size trade than skip entirely and hold idle cash.
-            if (shares === 0 && opportunity.price > 0 && opportunity.price <= (riskConfig.maxOrderNotional || 150)) {
+            // Small-account floor: Kelly rounds to 0 for stocks > Kelly positionSize.
+            // Bump to 1 share only when 1 share fits within the computed position size (no over-sizing).
+            // Stocks too expensive for 1 whole share fall through to the fractional notional path.
+            if (shares === 0 && opportunity.price > 0 && opportunity.price <= positionSize) {
                 shares = 1;
-                logger.info('[MinShareFloor] Kelly rounds to 0 — bumped to 1 share (small account)', {
+                logger.info('[MinShareFloor] Kelly rounds to 0 — bumped to 1 share', {
                     userId, symbol: opportunity.symbol,
-                    price: opportunity.price, positionSize: positionSize.toFixed(2),
-                    maxOrderNotional: riskConfig.maxOrderNotional
+                    price: opportunity.price, positionSize: positionSize.toFixed(2)
                 });
             }
 
-            // Fractional buy: stock price exceeds maxOrderNotional so even 1 whole share is too expensive.
-            // Use Alpaca's notional (dollar-amount) market order instead — buys a fractional quantity.
-            // Standalone stop-loss + take-profit are placed after fill; the trailing stop service
-            // raises the stop exactly as it does for whole-share positions.
-            if (shares === 0 && opportunity.price > (riskConfig.maxOrderNotional || 150) && positionSize >= 1) {
-                logger.info('[FractionalBuy] Price exceeds max notional — using notional buy', {
+            // Fractional buy: stock price exceeds Kelly positionSize so even 1 whole share is too expensive.
+            // Use Alpaca's notional (dollar-amount) market order — buys the correct fractional quantity.
+            if (shares === 0 && opportunity.price > positionSize && positionSize >= 1) {
+                logger.info('[FractionalBuy] Price exceeds Kelly position size — using notional buy', {
                     userId, symbol: opportunity.symbol,
-                    price: opportunity.price, notional: positionSize.toFixed(2),
-                    maxOrderNotional: riskConfig.maxOrderNotional
+                    price: opportunity.price, notional: positionSize.toFixed(2)
                 });
                 try {
                     const fracResult = await brokerService.buyFractional(userId, opportunity.symbol, positionSize, {
-                        executedBy:  'AI_BOT',
-                        aiScore:     opportunity.aiScore,
-                        sector:      opportunity.sector,
-                        stopPrice:   opportunity.stop,
-                        targetPrice: opportunity.target,
-                        signalPrice: opportunity.price,
-                        regime:      regime?.regime || null,
+                        executedBy:    'AI_BOT',
+                        aiScore:       opportunity.aiScore,
+                        sector:        opportunity.sector,
+                        stopPrice:     opportunity.stop,
+                        targetPrice:   opportunity.target,
+                        signalPrice:   opportunity.price,
+                        regime:        regime?.regime || null,
+                        oraclePattern: opportunity.oraclePattern || null,
                     });
                     _incrementOrderCount(userId, opportunity.symbol);
                     const fracShares = fracResult.filledQty || 0;
@@ -3353,14 +3497,15 @@ async function executeAutonomousTrading(userId) {
                         opportunity.symbol,
                         shares,
                         {
-                            executedBy:   'AI_BOT',
-                            aiScore:      opportunity.aiScore,
-                            sector:       opportunity.sector,
-                            stopPrice:    opportunity.stop,
-                            targetPrice:  opportunity.target,
-                            signalPrice:  opportunity.price,
-                            regime:       regime?.regime || null,
-                            earningsSetup: _isEarningsSetup || undefined,
+                            executedBy:     'AI_BOT',
+                            aiScore:        opportunity.aiScore,
+                            sector:         opportunity.sector,
+                            stopPrice:      opportunity.stop,
+                            targetPrice:    opportunity.target,
+                            signalPrice:    opportunity.price,
+                            regime:         regime?.regime || null,
+                            oraclePattern:  opportunity.oraclePattern || null,
+                            earningsSetup:  _isEarningsSetup || undefined,
                             daysToEarnings: _isEarningsSetup ? opportunity.daysToEarnings : undefined,
                         }
                     );
@@ -3467,6 +3612,8 @@ async function executeAutonomousTrading(userId) {
                                 scoringLog: opportunity.scoringLog,
                                 // Attribution metrics — stored explicitly so calibrator can slice
                                 // by ratio bucket without recomputing from scoringLog each time.
+                                daysToEarnings: opportunity.daysToEarnings ?? null,
+                                atrPct: opportunity.atrPct ?? null,
                                 bullBearRatio: _bullBearRatio !== null ? parseFloat(_bullBearRatio.toFixed(2)) : null,
                                 signalClarityMultiplier,
                                 signalPrice: opportunity.price,
@@ -3656,13 +3803,18 @@ async function manageExistingPositions(userId) {
                 const currentPrice = await tradingServiceDB.getCurrentPrice(holding.symbol);
                 if (!currentPrice) continue;
 
-                // Keep stored price fresh so UI shows current value
+                // Keep stored price + derived fields fresh every cycle so UI always shows live value
                 try {
+                    const costBasis   = parseFloat(holding.average_price) * parseInt(holding.quantity);
+                    const marketValue = currentPrice * parseInt(holding.quantity);
+                    const gainLoss    = marketValue - costBasis;
+                    const gainLossPct = costBasis > 0 ? (gainLoss / costBasis) * 100 : 0;
                     await query(
-                        `UPDATE holdings SET current_price = $1, updated_at = NOW()
-                         WHERE user_id = $2 AND symbol = $3
-                           AND (updated_at < NOW() - INTERVAL '6 hours' OR current_price IS NULL)`,
-                        [currentPrice, userId, holding.symbol]
+                        `UPDATE holdings
+                         SET current_price = $1, market_value = $2,
+                             gain_loss = $3, gain_loss_percent = $4, updated_at = NOW()
+                         WHERE user_id = $5 AND symbol = $6`,
+                        [currentPrice, marketValue, gainLoss, gainLossPct, userId, holding.symbol]
                     );
                 } catch (_priceUpd) {}
 
@@ -3820,10 +3972,42 @@ async function manageExistingPositions(userId) {
                     // position there. If the DB says we own it but Alpaca doesn't, selling
                     // would create an unintended short. Instead, clean up the stale DB record.
                     if (process.env.BROKER === 'alpaca' || process.env.DATA_PROVIDER === 'alpaca') {
+                        // Guard 1: DB sell-record check — prevents re-selling after worker restart wipes
+                        // _exitPending. If a SELL trade was recorded in the last 4 hours for this symbol,
+                        // the position was already exited in a previous cycle. Remove the stale DB holding.
+                        try {
+                            const recentSell = await query(
+                                `SELECT id FROM trades WHERE user_id=$1 AND symbol=$2 AND action='SELL'
+                                 AND trade_date > NOW() - INTERVAL '4 hours' LIMIT 1`,
+                                [userId, holding.symbol]
+                            );
+                            if (recentSell.rows.length > 0) {
+                                logger.warn('[AlpacaGuard] Recent SELL found in trades — position already exited, removing stale holding', {
+                                    userId, symbol: holding.symbol
+                                });
+                                try { await holdingsDb.deleteHolding(userId, holding.symbol); } catch (_) {}
+                                _exitPending.set(sellKey, Date.now() + 2 * 3600_000);
+                                continue;
+                            }
+                        } catch (_tradeCheckErr) { /* non-blocking */ }
+
+                        // Guard 2: Live Alpaca position check — if not long in broker, don't sell (would create short)
                         try {
                             const brokerPositions = await brokerService.getPositions(userId);
-                            const alpacaPos = brokerPositions.find(p => p.symbol === holding.symbol);
-                            if (!alpacaPos || alpacaPos.qty <= 0) {
+                            const alpacaPos = brokerPositions.find(p => p.symbol.toUpperCase() === holding.symbol.toUpperCase());
+                            const alpacaQty = parseFloat(alpacaPos?.qty ?? 0);
+
+                            if (alpacaQty < 0) {
+                                // Already short — a previous sell accidentally shorted it. Never sell deeper.
+                                logger.warn('[AlpacaGuard] Position is SHORT in Alpaca — blocking sell to prevent deeper short', {
+                                    userId, symbol: holding.symbol, alpacaQty
+                                });
+                                try { await holdingsDb.deleteHolding(userId, holding.symbol); } catch (_) {}
+                                _exitPending.set(sellKey, Date.now() + 2 * 3600_000);
+                                continue;
+                            }
+
+                            if (!alpacaPos || alpacaQty === 0) {
                                 logger.warn('[AlpacaGuard] No long position in Alpaca — removing stale DB holding', {
                                     userId, symbol: holding.symbol,
                                     dbQty: holding.quantity,
@@ -3833,15 +4017,16 @@ async function manageExistingPositions(userId) {
                                 _exitPending.set(sellKey, Date.now() + 2 * 3600_000);
                                 continue;
                             }
-                            // Cap sell quantity to what Alpaca actually holds
-                            if (alpacaPos.qty < sellQuantity) {
+
+                            // Cap sell quantity to what Alpaca actually holds (prevents over-selling fractionals)
+                            if (alpacaQty < sellQuantity) {
                                 logger.warn('[AlpacaGuard] Capping sell qty to Alpaca position', {
-                                    userId, symbol: holding.symbol, requested: sellQuantity, actual: alpacaPos.qty
+                                    userId, symbol: holding.symbol, requested: sellQuantity, actual: alpacaQty
                                 });
-                                sellQuantity = alpacaPos.qty;
+                                sellQuantity = alpacaQty;
                             }
                         } catch (guardErr) {
-                            // If the positions check itself fails, skip this sell to be safe
+                            // Positions check failed — skip this sell to be safe (never sell blind)
                             logger.warn('[AlpacaGuard] Could not verify Alpaca position — skipping sell', {
                                 userId, symbol: holding.symbol, error: guardErr.message
                             });
@@ -3913,12 +4098,36 @@ async function manageExistingPositions(userId) {
                             : reason.startsWith('Slow mover')                           ? 'slow_mover'
                             : 'other';
 
+                        // Determine outcome tag and exit-time DTE (best-effort, non-blocking)
+                        const _outcome = pnlPercent > 0.5 ? 'win' : pnlPercent < -0.5 ? 'loss' : 'breakeven';
+                        let _exitDte = null;
+                        try { _exitDte = await getDaysToEarnings(holding.symbol); } catch (_) {}
+
+                        // Richer win/loss attribution tag
+                        const _winLossReason = _outcome === 'win'
+                            ? (_exitCategory === 'take_profit'        ? 'target_hit'
+                            : _exitCategory === 'trailing_stop'       ? 'trail_profit_taken'
+                            : _exitCategory === 'partial_take_profit' ? 'partial_profit'
+                            : _exitCategory === 'pre_earnings_exit'   ? 'earnings_exit_profit'
+                            : 'held_to_win')
+                            : _outcome === 'loss'
+                            ? (_exitCategory === 'stop_loss'          ? 'stopped_out'
+                            : _exitCategory === 'trailing_stop'       ? 'trail_reversed'
+                            : _exitCategory === 'pre_earnings_exit'   ? 'earnings_exit_loss'
+                            : _exitCategory === 'slow_mover'          ? 'opportunity_cost'
+                            : _exitCategory === 'max_hold_time'       ? 'time_stop'
+                            : 'closed_at_loss')
+                            : 'flat_exit';
+
                         await tradeIntelligenceService.closeLatestOpenExecution(userId, {
                             botType: 'stock', symbol: holding.symbol, exitPrice, pnl: profitLoss, pnlPercent,
+                            outcome: _outcome,
                             metadata: {
-                                reason, exitReason: _exitCategory, sellQuantity, purchasePrice,
+                                reason, exitReason: _exitCategory, winLossReason: _winLossReason,
+                                sellQuantity, purchasePrice,
                                 exitRegime: exitThresholds.regime,
                                 signalPrice: currentPrice,
+                                daysToEarningsAtExit: _exitDte,
                                 slippage: Number(sellSlippage.toFixed(4)),
                                 slippagePct: currentPrice > 0 ? Number((sellSlippage / currentPrice * 100).toFixed(4)) : 0
                             }

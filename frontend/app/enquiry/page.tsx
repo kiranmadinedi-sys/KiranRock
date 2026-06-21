@@ -265,16 +265,16 @@ function BriefingPanel({ briefing }: { briefing: Briefing }) {
     );
 }
 
-const WELCOME = `Hello! I'm your KiranRock AI assistant — powered by your own PANTHEON scan data.
+const WELCOME = `Hello! I'm KiranRock AI — your personal trading assistant powered by Claude.
 
-I can answer questions like:
-• "What are today's top picks?"
-• "How should I invest $500?"
-• "Which stocks are best for swing vs intra?"
-• "Explain why CEVA scored 95"
-• "What is the current market regime?"
+I have live access to:
+• Your portfolio & P&L (Alpaca positions, stop status)
+• Today's PANTHEON signals (entry / stop / target)
+• System health (worker, bot cycles)
+• Recent trade history
+• Full analysis for any stock
 
-The briefing panel above already shows today's snapshot — ask me anything to go deeper!`;
+Tap a suggestion below or ask anything in plain English.`;
 
 export default function EnquiryPage() {
     const base  = getApiBaseUrl();
@@ -301,10 +301,64 @@ export default function EnquiryPage() {
             .catch(() => setBriefingError(true));
     }, [token]);
 
-    const send = async (e: React.FormEvent) => {
+    const send = (e: React.FormEvent) => {
         e.preventDefault();
         if (!input.trim() || loading) return;
-        const userMsg: Message = { id: Date.now().toString(), type: 'user', content: input.trim(), timestamp: new Date() };
+        sendQuestion(input.trim());
+    };
+
+    const SUGGESTIONS = [
+        {
+            label: 'Portfolio',
+            color: 'emerald',
+            items: [
+                "What's my portfolio right now?",
+                "Which positions are losing today?",
+                "Do I have stops on all positions?",
+                "Show my last 10 trades",
+            ]
+        },
+        {
+            label: 'Signals',
+            color: 'indigo',
+            items: [
+                "What are today's top PANTHEON picks?",
+                "Show only STRONG BUY signals",
+                "How should I invest $500 today?",
+                "Best swing stocks today?",
+            ]
+        },
+        {
+            label: 'Analysis',
+            color: 'violet',
+            items: [
+                "Analyse NVDA for me",
+                "Analyse AAPL for me",
+                "What is the current market regime?",
+                "Sector split for swing vs intra?",
+            ]
+        },
+        {
+            label: 'System',
+            color: 'rose',
+            items: [
+                "Is the bot running?",
+                "How did today's bot cycles go?",
+                "What was my last sell?",
+            ]
+        },
+    ];
+
+    const chipColors: Record<string, string> = {
+        emerald: 'bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/40',
+        indigo:  'bg-indigo-50 dark:bg-indigo-900/20 border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/40',
+        violet:  'bg-violet-50 dark:bg-violet-900/20 border-violet-200 dark:border-violet-800 text-violet-700 dark:text-violet-300 hover:bg-violet-100 dark:hover:bg-violet-900/40',
+        rose:    'bg-rose-50 dark:bg-rose-900/20 border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 hover:bg-rose-100 dark:hover:bg-rose-900/40',
+    };
+
+    const sendQuestion = async (question: string) => {
+        if (loading) return;
+        const userMsg: Message = { id: Date.now().toString(), type: 'user', content: question, timestamp: new Date() };
         setMessages(prev => [...prev, userMsg]);
         setInput('');
         setLoading(true);
@@ -312,36 +366,27 @@ export default function EnquiryPage() {
             const r = await fetch(`${base}/api/enquiry`, {
                 method: 'POST',
                 headers: hdrs,
-                body: JSON.stringify({ question: userMsg.content })
+                body: JSON.stringify({ question })
             });
             if (r.status === 401) { handleAuthError(401); return; }
             const data = r.ok ? await r.json() : null;
             setMessages(prev => [...prev, {
                 id: (Date.now() + 1).toString(),
                 type: 'assistant',
-                content: data?.answer || 'Sorry, could not process that. Is Ollama running?',
+                content: data?.answer || 'Sorry, could not process that.',
                 timestamp: new Date()
             }]);
         } catch {
             setMessages(prev => [...prev, {
                 id: (Date.now() + 1).toString(),
                 type: 'assistant',
-                content: 'Connection error. Please ensure the backend and Ollama are running.',
+                content: 'Connection error. Please ensure the backend is running.',
                 timestamp: new Date()
             }]);
         } finally {
             setLoading(false);
         }
     };
-
-    const quickQuestions = [
-        "What are today's top 5 picks?",
-        "How to invest $500 today?",
-        "Best swing stocks today?",
-        "Sector split for swing vs intra?",
-        "What is the current market regime?",
-        "Explain QCOM sticker"
-    ];
 
     return (
         <div className="min-h-screen bg-gray-50 dark:bg-gray-950 pt-16 sm:pt-20">
@@ -373,13 +418,25 @@ export default function EnquiryPage() {
                               </div>
                 )}
 
-                {/* Quick questions */}
-                <div className="flex flex-wrap gap-2">
-                    {quickQuestions.map((q, i) => (
-                        <button key={i} onClick={() => setInput(q)}
-                            className="text-xs px-3 py-1.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-full text-gray-600 dark:text-gray-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 hover:border-indigo-300 dark:hover:border-indigo-600 hover:text-indigo-700 dark:hover:text-indigo-300 transition-colors">
-                            {q}
-                        </button>
+                {/* Suggested prompts — grouped by category */}
+                <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-700 p-4 space-y-3">
+                    <div className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide">Quick questions — tap to ask</div>
+                    {SUGGESTIONS.map(group => (
+                        <div key={group.label} className="flex items-start gap-2 flex-wrap">
+                            <span className="text-[10px] font-bold uppercase tracking-wide text-gray-400 dark:text-gray-500 w-14 shrink-0 pt-1.5">{group.label}</span>
+                            <div className="flex flex-wrap gap-1.5 flex-1">
+                                {group.items.map((q, i) => (
+                                    <button
+                                        key={i}
+                                        disabled={loading}
+                                        onClick={() => sendQuestion(q)}
+                                        className={`text-xs px-3 py-1.5 border rounded-full transition-colors disabled:opacity-40 ${chipColors[group.color]}`}
+                                    >
+                                        {q}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
                     ))}
                 </div>
 
@@ -428,7 +485,7 @@ export default function EnquiryPage() {
                                 Send
                             </button>
                         </form>
-                        <p className="text-[10px] text-gray-400 mt-1.5">Powered by Ollama (local AI) · All data from your own PANTHEON scan</p>
+                        <p className="text-[10px] text-gray-400 mt-1.5">Powered by Claude AI · Live portfolio, signals &amp; system data from KiranRock</p>
                     </div>
                 </div>
             </div>

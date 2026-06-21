@@ -29,6 +29,59 @@ const { logger }             = require('../utils/logger');
 const CACHE_KEY = 'atlas_global_sentiment';
 const CACHE_TTL = 15 * 60 * 1000;  // mirrors connector cache
 
+// ── DB persistence helpers ────────────────────────────────────────────────────
+// Saves sentiment to global_sentiment_cache so the value survives worker restarts.
+// On startup, getGlobalSentiment() reads this before hitting Yahoo — no 90-second wait
+// on the first nightly scan stock after an overnight restart.
+
+async function _persistToDb(result) {
+    try {
+        const { query } = require('../config/database');
+        await query(
+            `INSERT INTO global_sentiment_cache
+                (id, sentiment_label, global_score, base_adj, breakdown, raw_data, updated_at)
+             VALUES (1, $1, $2, $3, $4, $5, NOW())
+             ON CONFLICT (id) DO UPDATE SET
+                sentiment_label = EXCLUDED.sentiment_label,
+                global_score    = EXCLUDED.global_score,
+                base_adj        = EXCLUDED.base_adj,
+                breakdown       = EXCLUDED.breakdown,
+                raw_data        = EXCLUDED.raw_data,
+                updated_at      = NOW()`,
+            [
+                result.label,
+                result.globalScore,
+                result.baseAdj,
+                JSON.stringify(result.breakdown || {}),
+                JSON.stringify(result.rawData   || {}),
+            ]
+        );
+    } catch { /* non-fatal — DB write failure must never block the caller */ }
+}
+
+async function _loadFromDb() {
+    try {
+        const { query } = require('../config/database');
+        const res = await query(
+            `SELECT sentiment_label, global_score, base_adj, breakdown, raw_data, updated_at
+             FROM global_sentiment_cache WHERE id = 1`
+        );
+        if (!res.rows.length) return null;
+        const row = res.rows[0];
+        // Only use DB row if it's fresher than the in-memory TTL
+        if (Date.now() - new Date(row.updated_at).getTime() > CACHE_TTL) return null;
+        return {
+            globalScore: parseFloat(row.global_score),
+            label:       row.sentiment_label,
+            baseAdj:     parseInt(row.base_adj, 10),
+            breakdown:   row.breakdown   || {},
+            rawData:     row.raw_data    || {},
+        };
+    } catch {
+        return null;
+    }
+}
+
 // Sector multipliers for DXY / Oil / Gold overlays
 // Values > 1 = more sensitive to that macro factor
 const SECTOR_OVERLAY = {
@@ -71,8 +124,17 @@ function _avg(vals) {
 // ── Core calculation ──────────────────────────────────────────────────────────
 
 async function getGlobalSentiment() {
+    // 1. In-memory (fastest — within same process lifetime)
     const cached = cacheService.get(CACHE_KEY);
     if (cached !== null) return cached;
+
+    // 2. DB fallback — survives worker restarts, avoids 90s Yahoo wait on first call
+    const dbCached = await _loadFromDb();
+    if (dbCached !== null) {
+        cacheService.set(CACHE_KEY, dbCached, CACHE_TTL);
+        logger.debug('[ATLAS] Sentiment loaded from DB cache');
+        return dbCached;
+    }
 
     try {
         const d = await globalMarketConnector.fetchGlobalQuotes();
@@ -191,6 +253,8 @@ async function getGlobalSentiment() {
         };
 
         cacheService.set(CACHE_KEY, result, CACHE_TTL);
+        // Persist to DB so next restart skips the 90s Yahoo fetch
+        _persistToDb(result);
 
         logger.info(
             `[ATLAS] Global: ${label} score=${globalScore.toFixed(2)} adj=${baseAdj >= 0 ? '+' : ''}${baseAdj}`,

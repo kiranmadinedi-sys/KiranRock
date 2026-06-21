@@ -159,6 +159,50 @@ router.get('/history', async (req, res) => {
     try {
         const limit = parseInt(req.query.limit) || 100;
         const trades = await tradingService.getTradeHistory(req.userId, limit);
+
+        // Enrich open BUY trades with unrealized P/L using Alpaca live positions
+        // (authoritative real-time prices) with Yahoo Finance as fallback.
+        try {
+            const holdings = await tradingService.getHoldings(req.userId);
+            const holdingMap = {};
+            for (const h of holdings) holdingMap[h.symbol] = h;
+
+            // Try Alpaca live positions first — returns current_price + unrealizedPL direct from broker
+            const priceMap = {};
+            try {
+                const livePositions = await brokerService.getPositions(req.userId);
+                for (const p of livePositions) {
+                    if (p.currentPrice) priceMap[p.symbol] = p.currentPrice;
+                }
+            } catch { /* fall through to Yahoo */ }
+
+            // Fallback: Yahoo Finance for any symbol not covered by Alpaca
+            const symbols = [...new Set(holdings.map(h => h.symbol))].filter(s => !priceMap[s]);
+            await Promise.all(symbols.map(async sym => {
+                try {
+                    const p = await marketQuoteService.getCurrentPrice(sym);
+                    if (p != null) priceMap[sym] = p;
+                } catch { /* use stale holdingMap fallback below */ }
+            }));
+
+            for (const trade of trades) {
+                if (trade.pnl != null) continue;          // already has realized P/L
+                if (trade.type !== 'BUY') continue;       // only enrich open buy legs
+                const h = holdingMap[trade.symbol];
+                if (!h) continue;                          // position already closed
+                const currentPrice = priceMap[trade.symbol] ?? h.currentPrice ?? h.averagePrice;
+                if (!currentPrice) continue;
+                const qty = trade.quantity || 0;
+                const cost = (trade.price || 0) * qty;
+                const value = currentPrice * qty;
+                trade.unrealizedPL        = parseFloat((value - cost).toFixed(2));
+                trade.unrealizedPLPercent = cost > 0
+                    ? parseFloat(((value - cost) / cost * 100).toFixed(2))
+                    : 0;
+                trade.currentPrice = parseFloat(currentPrice.toFixed(2));
+            }
+        } catch { /* enrichment is best-effort — never break history */ }
+
         res.json({ trades });
     } catch (error) {
         res.status(500).json({ error: error.message });

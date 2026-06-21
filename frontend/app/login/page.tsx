@@ -29,7 +29,7 @@ function LoginPageContent() {
             })
             .then(res => {
                 if (res.ok) {
-                    const redirect = searchParams.get('redirect') || '/dashboard';
+                    const redirect = searchParams.get('redirect') || '/portfolio';
                     window.location.replace(redirect);
                 } else {
                     clearAuthToken();
@@ -68,7 +68,7 @@ function LoginPageContent() {
                 const { token, user } = await response.json();
                 setAuthToken(token);
                 if (user) localStorage.setItem('user', JSON.stringify(user));
-                const redirect = searchParams.get('redirect') || '/dashboard';
+                const redirect = searchParams.get('redirect') || '/portfolio';
                 window.location.href = redirect;
             } else {
                 let message = 'Invalid credentials. Please try again.';
@@ -142,7 +142,7 @@ function LoginPageContent() {
                 setAuthToken(data.token);
                 if (data.user) localStorage.setItem('user', JSON.stringify(data.user));
                 setSuccess('Account verified! Redirecting...');
-                setTimeout(() => router.push('/dashboard'), 1500);
+                setTimeout(() => router.push('/portfolio'), 1500);
             } else {
                 setError(data.error || 'Invalid verification code');
             }

@@ -7,6 +7,9 @@
  *        2. SEC EDGAR (free, official, fallback when Finnhub fails)
  *   B. Institutional ownership (weight 0.3) — Finnhub (paid plan)
  *        Falls back to neutral 0.5 when unavailable.
+ *   C. Form 8-K material events — SEC EDGAR (free, official)
+ *        Applied as a post-score modifier: [-0.20, +0.15]
+ *        Catastrophic items (bankruptcy 1.03, restatement 4.02) floor the score.
  *
  * Enhanced scoring beyond raw net-buy/sell:
  *   - CEO / CFO purchases carry 2× weight (highest conviction)
@@ -32,30 +35,53 @@ const BUY_CODES  = new Set(['P']);           // open-market purchase
 const SELL_CODES = new Set(['S']);           // open-market sale
 const SKIP_CODES = new Set(['M', 'G', 'W', 'A', 'F', 'U', 'J', 'C']);  // options/gifts/etc
 
+// Form 8-K item signals — only items with clear directional meaning are mapped.
+// Ambiguous items (2.01 acquisitions, 5.02 officer changes, 8.01 catch-all) are omitted
+// to avoid false signals.
+const ITEM_8K_SIGNALS = {
+    // ── Bearish ───────────────────────────────────────────────────────────────
+    '1.02': -0.25,   // Termination of material definitive agreement
+    '1.03': -1.00,   // Bankruptcy or receivership — catastrophic floor trigger
+    '2.05': -0.35,   // Costs associated with exit activities (layoffs, restructuring)
+    '2.06': -0.35,   // Material impairments / write-downs
+    '4.01': -0.20,   // Changes in registrant's certifying accountant (auditor swap)
+    '4.02': -0.80,   // Non-reliance on previously issued financial statements (restatement)
+    // ── Bullish ───────────────────────────────────────────────────────────────
+    '1.01': +0.20,   // Entry into a material definitive agreement (new deal / partnership)
+    '7.01': +0.10,   // Regulation FD disclosure (guidance updates, investor-day signals)
+};
+
 class SonarService {
 
     async getSmartMoneyScore(symbol) {
-        const cacheKey = `sonar_v2_${symbol}`;
+        const cacheKey = `sonar_v3_${symbol}`;
         const cached = cacheService.get(cacheKey);
         if (cached !== null) return cached;
 
         try {
-            const [ownershipData, insiderData] = await Promise.all([
+            const [ownershipData, insiderData, form8kData] = await Promise.all([
                 finnhubConnector.getInstitutionalOwnership(symbol).catch(() => null),
-                this._fetchInsiderTransactions(symbol)
+                this._fetchInsiderTransactions(symbol),
+                secEdgarConnector.getRecentForm8K(symbol).catch(() => [])
             ]);
 
             const ownershipScore   = this.calculateOwnershipScore(ownershipData);
             const transactionScore = this.calculateTransactionScore(insiderData, symbol);
 
-            const finalScore = (ownershipScore   * INSTITUTIONAL_WEIGHT) +
-                               (transactionScore * INSIDER_WEIGHT);
+            const baseScore = (ownershipScore   * INSTITUTIONAL_WEIGHT) +
+                              (transactionScore * INSIDER_WEIGHT);
 
-            const safeScore = isNaN(finalScore) ? 0.5 : Math.max(0, Math.min(1, finalScore));
+            const safeBase  = isNaN(baseScore) ? 0.5 : Math.max(0, Math.min(1, baseScore));
+            const modifier  = this.calculate8KModifier(form8kData, symbol);
+            const finalScore = Math.max(0.05, Math.min(0.95, safeBase + modifier));
 
-            cacheService.set(cacheKey, safeScore, SONAR_CACHE_TTL);
-            logger.info(`[SONAR] ${symbol}: ${safeScore.toFixed(2)} (ownership ${ownershipScore.toFixed(2)}, insider ${transactionScore.toFixed(2)})`);
-            return safeScore;
+            cacheService.set(cacheKey, finalScore, SONAR_CACHE_TTL);
+            logger.info(
+                `[SONAR] ${symbol}: ${finalScore.toFixed(2)} ` +
+                `(ownership ${ownershipScore.toFixed(2)}, insider ${transactionScore.toFixed(2)}, ` +
+                `8K modifier ${modifier >= 0 ? '+' : ''}${modifier.toFixed(2)})`
+            );
+            return finalScore;
 
         } catch (err) {
             logger.error(`[SONAR] Error for ${symbol}: ${err.message}`);
@@ -180,6 +206,73 @@ class SonarService {
         }
 
         return isNaN(score) ? 0.5 : Math.max(0, Math.min(1, score));
+    }
+
+    // ── Form 8-K material event modifier ─────────────────────────────────────
+
+    /**
+     * Returns a score adjustment in [-0.20, +0.15] based on recent 8-K filings.
+     * Catastrophic items (bankruptcy 1.03, restatement 4.02) return extreme
+     * negatives that floor the final score to 0.05 regardless of other signals.
+     *
+     * @param {Array<{filingDate: string, items: string[]}>} form8kData
+     * @param {string} symbol
+     * @returns {number}
+     */
+    calculate8KModifier(form8kData, symbol = '') {
+        if (!form8kData || form8kData.length === 0) return 0;
+
+        const now    = Date.now();
+        const MS_30D = 30 * 24 * 60 * 60 * 1000;
+        const MS_90D = 90 * 24 * 60 * 60 * 1000;
+
+        let rawSignal          = 0;
+        let hasSignal          = false;
+        let bankruptcyDetected = false;
+        let restatementDetected = false;
+
+        for (const filing of form8kData) {
+            const ageMs = now - new Date(filing.filingDate || 0).getTime();
+            if (ageMs > MS_90D || ageMs < 0) continue;
+
+            // Recency weight: last 30d carries full weight, 30-90d carries half
+            const recency = ageMs <= MS_30D ? 1.0 : 0.5;
+
+            for (const item of (filing.items || [])) {
+                const signal = ITEM_8K_SIGNALS[item];
+                if (signal === undefined) continue;
+
+                hasSignal   = true;
+                rawSignal  += signal * recency;
+
+                if (item === '1.03') bankruptcyDetected   = true;
+                if (item === '4.02') restatementDetected  = true;
+            }
+        }
+
+        if (!hasSignal) return 0;
+
+        // Catastrophic events override everything else
+        if (bankruptcyDetected) {
+            logger.warn(`[SONAR] ${symbol}: 8-K Item 1.03 (bankruptcy) — forcing score floor`);
+            return -0.90;   // drives final score to ≤ 0.05
+        }
+        if (restatementDetected) {
+            logger.warn(`[SONAR] ${symbol}: 8-K Item 4.02 (restatement) — large negative modifier`);
+            return Math.min(-0.35, rawSignal);
+        }
+
+        // Normal case: clamp to [-0.20, +0.15] — bad news hurts more than good news helps
+        const modifier = Math.max(-0.20, Math.min(0.15, rawSignal));
+
+        if (modifier !== 0) {
+            logger.info(
+                `[SONAR] ${symbol}: 8-K modifier ${modifier >= 0 ? '+' : ''}${modifier.toFixed(2)} ` +
+                `from ${form8kData.length} recent filing(s)`
+            );
+        }
+
+        return modifier;
     }
 }
 

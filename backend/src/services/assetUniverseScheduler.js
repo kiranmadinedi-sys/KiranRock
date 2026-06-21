@@ -24,6 +24,7 @@ const dynamicUniverseService = require('./dynamicUniverseService');
 let schedulerActive         = false;
 let afterCloseJob           = null;
 let eveningJob              = null;
+let nightlyScanJob          = null;
 let morningCatchupJob       = null;
 let premarketJob            = null;
 let dynamicUniverseJob      = null;
@@ -33,6 +34,7 @@ let intradayMoverJob        = null;
 // ── Cron schedules (all ET via CRON_TZ) ──────────────────────────────────────
 const AFTERCLOSE_CRON        = '30 17 * * 1-5'; // 5:30 PM — after NYSE close + 30 min data settle
 const EVENING_CRON           = '0 20 * * 1-5';
+const NIGHTLY_SCAN_CRON      = '30 16 * * 1-5'; // 4:30 PM — dedicated nightly AI scan, runs ~75 min
 const MORNING_CATCHUP_CRON   = '0 8 * * 1-5';  // 8:00 AM — catch-up if prior-night scan was incomplete
 const PREMARKET_CRON         = '30 7 * * 1-5';
 const DYNAMIC_UNIVERSE_CRON  = '45 8 * * 1-5'; // 8:45 AM — build scan universe before 9:30 open
@@ -174,42 +176,62 @@ async function runIntradayMoversRefresh() {
     }
 }
 
+// ── Nightly universe scan (4:30 PM ET Mon–Fri) ───────────────────────────────
+// Dedicated reliable trigger — runs 30 min after NYSE close so data is settled.
+// Scores all 455 symbols and writes to daily_universe_analysis for today's date.
+// Takes ~75-90 min; completes well before next morning's open.
+
+async function runNightlyUniverseScanJob() {
+    const nightlyScanSvc = require('./nightlyUniverseScanService');
+    if (nightlyScanSvc.isScanRunning()) {
+        logger.info('[AssetUniverseScheduler] Nightly scan: already running, skipping duplicate');
+        return;
+    }
+    logger.info('[AssetUniverseScheduler] Nightly scan: launching post-close universe scan');
+    nightlyScanSvc.runNightlyUniverseScan({ missingOnly: false })
+        .then(r => r && logger.info('[AssetUniverseScheduler] Nightly scan done', {
+            analyzed: r.analyzed, passed: r.passed, failed: r.failed, elapsedMin: r.elapsedMin
+        }))
+        .catch(err => logger.error('[AssetUniverseScheduler] Nightly scan error', { error: err.message }));
+}
+
 // ── Morning catch-up scan (8:00 AM ET Mon–Fri) ───────────────────────────────
-// If last night's AI scan was incomplete (partial crash / server restart),
-// this fills the gap using prior-day close data so the bot has a full
-// scored universe before the 9:30 AM market open.
-const CATCHUP_THRESHOLD = 420; // same as enhancedAIScheduler — ~92% of 455
+// Safety net: if the 4:30 PM nightly scan was incomplete or missed (server
+// restart, crash), this fills the gap before the 9:30 AM market open.
+// Checks TODAY's date specifically — does NOT count yesterday's data as "done".
+const CATCHUP_THRESHOLD = 420; // ~92% of 455 symbols
 
 async function runMorningCatchupScan() {
     const { query } = require('../config/database');
     try {
-        // Use the most recent scan date within 4 days — NOT CURRENT_DATE.
-        // The nightly scan stores rows with the date it ran (e.g. Jun 11 evening → analysis_date=Jun 11).
-        // On Jun 12 morning, CURRENT_DATE=Jun 12 would always find 0 rows and re-run needlessly.
+        const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+        // Check how many symbols have been scored for TODAY specifically.
+        // Using today's date (not the most recent scan date) ensures yesterday's
+        // complete data does not mask a missing today scan.
         const { rows } = await query(
             `SELECT COUNT(*) AS cnt
              FROM daily_universe_analysis
-             WHERE analysis_date = (
-                 SELECT MAX(analysis_date)
-                 FROM daily_universe_analysis
-                 WHERE analysis_date >= CURRENT_DATE - INTERVAL '4 days'
-                   AND analysis_date <= CURRENT_DATE
-             )
-             AND ai_score IS NOT NULL`
+             WHERE analysis_date = $1::date AND ai_score IS NOT NULL`,
+            [todayET]
         );
         const todayCount = parseInt(rows[0]?.cnt ?? 0);
+
         if (todayCount >= CATCHUP_THRESHOLD) {
-            logger.info('[AssetUniverseScheduler] Morning catch-up: scan already complete', { count: todayCount });
+            logger.info('[AssetUniverseScheduler] Morning catch-up: today scan already complete', { count: todayCount, date: todayET });
             return;
         }
-        logger.info('[AssetUniverseScheduler] Morning catch-up: nightly scan incomplete, resuming', {
-            done: todayCount, remaining: CATCHUP_THRESHOLD - todayCount
+
+        logger.info('[AssetUniverseScheduler] Morning catch-up: today scan incomplete — resuming', {
+            done: todayCount, remaining: CATCHUP_THRESHOLD - todayCount, date: todayET
         });
+
         const nightlyScanSvc = require('./nightlyUniverseScanService');
         if (nightlyScanSvc.isScanRunning()) {
             logger.info('[AssetUniverseScheduler] Morning catch-up: scan already running, skipping');
             return;
         }
+        // missingOnly=true if partial data exists for today, full scan if starting fresh
         nightlyScanSvc.runNightlyUniverseScan({ missingOnly: todayCount > 0 })
             .then(r => r && logger.info('[AssetUniverseScheduler] Morning catch-up done', {
                 analyzed: r.analyzed, passed: r.passed, failed: r.failed, elapsedMin: r.elapsedMin
@@ -229,15 +251,17 @@ function startAssetUniverseScheduler() {
     }
     schedulerActive = true;
 
-    afterCloseJob      = cron.schedule(AFTERCLOSE_CRON,        runAfterCloseOhlcvRefresh,  CRON_TZ);
-    eveningJob         = cron.schedule(EVENING_CRON,           runEveningRefresh,          CRON_TZ);
-    morningCatchupJob  = cron.schedule(MORNING_CATCHUP_CRON,   runMorningCatchupScan,      CRON_TZ);
-    premarketJob       = cron.schedule(PREMARKET_CRON,         runPremarketRefresh,        CRON_TZ);
-    dynamicUniverseJob = cron.schedule(DYNAMIC_UNIVERSE_CRON,  runDynamicUniverseBuild,    CRON_TZ);
-    intradayJob        = cron.schedule(INTRADAY_CRON,          runIntradayDiscovery,       CRON_TZ);
-    intradayMoverJob   = cron.schedule(INTRADAY_MOVER_CRON,    runIntradayMoversRefresh,   CRON_TZ);
+    afterCloseJob      = cron.schedule(AFTERCLOSE_CRON,        runAfterCloseOhlcvRefresh,    CRON_TZ);
+    eveningJob         = cron.schedule(EVENING_CRON,           runEveningRefresh,            CRON_TZ);
+    nightlyScanJob     = cron.schedule(NIGHTLY_SCAN_CRON,      runNightlyUniverseScanJob,    CRON_TZ);
+    morningCatchupJob  = cron.schedule(MORNING_CATCHUP_CRON,   runMorningCatchupScan,        CRON_TZ);
+    premarketJob       = cron.schedule(PREMARKET_CRON,         runPremarketRefresh,          CRON_TZ);
+    dynamicUniverseJob = cron.schedule(DYNAMIC_UNIVERSE_CRON,  runDynamicUniverseBuild,      CRON_TZ);
+    intradayJob        = cron.schedule(INTRADAY_CRON,          runIntradayDiscovery,         CRON_TZ);
+    intradayMoverJob   = cron.schedule(INTRADAY_MOVER_CRON,    runIntradayMoversRefresh,     CRON_TZ);
 
     logger.info('[AssetUniverseScheduler] Started', {
+        nightlyScan:      NIGHTLY_SCAN_CRON,
         afterClose:       AFTERCLOSE_CRON,
         evening:          EVENING_CRON,
         morningCatchup:   MORNING_CATCHUP_CRON,
@@ -267,9 +291,9 @@ function startAssetUniverseScheduler() {
 
 function stopAssetUniverseScheduler() {
     schedulerActive = false;
-    [afterCloseJob, eveningJob, morningCatchupJob, premarketJob, dynamicUniverseJob, intradayJob, intradayMoverJob]
+    [afterCloseJob, eveningJob, nightlyScanJob, morningCatchupJob, premarketJob, dynamicUniverseJob, intradayJob, intradayMoverJob]
         .forEach(j => j?.stop());
-    afterCloseJob = eveningJob = morningCatchupJob = premarketJob = intradayJob = intradayMoverJob = null;
+    afterCloseJob = eveningJob = nightlyScanJob = morningCatchupJob = premarketJob = intradayJob = intradayMoverJob = null;
     logger.info('[AssetUniverseScheduler] Stopped');
 }
 
@@ -297,6 +321,7 @@ module.exports = {
     getSchedulerStatus,
     runAfterCloseOhlcvRefresh,
     runEveningRefresh,
+    runNightlyUniverseScanJob,
     runPremarketRefresh,
     runDynamicUniverseBuild,
     runIntradayDiscovery,

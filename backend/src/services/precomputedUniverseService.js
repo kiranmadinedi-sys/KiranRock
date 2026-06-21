@@ -65,10 +65,10 @@ async function isAvailable(minCount = 10) {
  * Full overnight analysis is in the `_precomputed` key for optional downstream use.
  *
  * @param {object} opts
- * @param {number} opts.minScore  — minimum ai_score to include (default 65)
+ * @param {number} opts.minScore  — minimum ai_score to include (default 85, matches bot minBuyScore)
  * @param {number} opts.limit     — max records to return (default 120)
  */
-async function loadCandidates({ minScore = 65, limit = 120 } = {}) {
+async function loadCandidates({ minScore = 85, limit = 120 } = {}) {
     const res = await query(
         `SELECT symbol, ai_score, recommendation, setup_family, sector, market_cap, metadata
          FROM daily_universe_analysis

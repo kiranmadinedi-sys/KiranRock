@@ -51,22 +51,22 @@ function getStatusBadgeClasses(active, activeClasses, inactiveClasses) {
 }
 
 const DEFAULT_ENHANCED_SETTINGS = {
-    maxPositionSize: 0.15,
+    maxPositionSize: 0.10,
     minPositionSize: 0.02,
     maxPortfolioRisk: 0.6,
-    minBuyScore: 65,
-    stopLoss: -0.12,
-    trailingStopPercent: 0.08,
-    takeProfitPercent: 0.25,
-    partialTakeProfitPercent: 0.15,
-    maxOpenPositions: 25,
-    minMarketCap: 5000000000,
-    maxDailyTrades: 10,
+    minBuyScore: 85,
+    stopLoss: -0.07,
+    trailingStopPercent: 0.07,
+    takeProfitPercent: 0.20,
+    partialTakeProfitPercent: 0.12,
+    maxOpenPositions: 4,
+    minMarketCap: 2000000000,
+    maxDailyTrades: 5,
     maxVix: 30,
     reducePositionsVix: 25,
-    maxSectorAllocation: 0.35,
-    dailyLossLimit: -1000,
-    maxOrderNotional: 5000,
+    maxSectorAllocation: 0.20,
+    dailyLossLimit: -300,
+    maxOrderNotional: 500,
     emergencyStopEnabled: false
 };
 
@@ -506,49 +506,75 @@ export default function AITradingPage() {
                             </button>
                         </div>
 
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-800/60 p-5">
-                                <div className="text-sm font-medium text-slate-500 dark:text-slate-400">Legacy Strategy Snapshot</div>
-                                <div className="mt-4 grid grid-cols-2 gap-4">
-                                    <div>
-                                        <div className="text-xs uppercase tracking-wide text-slate-400">Cash Reserve</div>
-                                        <div className="mt-1 text-lg font-semibold text-slate-900 dark:text-white">{aiStatus?.strategy?.minCashReserve || '0%'}</div>
+                        {/* Live Active Strategy Card — sourced from enhanced bot config (source of truth) */}
+                        <div className="rounded-2xl border border-blue-200 dark:border-blue-800 bg-blue-50/60 dark:bg-blue-950/30 p-5">
+                            <div className="flex items-center gap-2 mb-4">
+                                <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                                <span className="text-sm font-semibold text-blue-700 dark:text-blue-300 uppercase tracking-wide">Live Active Strategy</span>
+                                <span className="ml-auto text-xs text-slate-400">(Enhanced Automation Config)</span>
+                            </div>
+                            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                                <div className="bg-white/70 dark:bg-slate-800/60 rounded-xl p-3">
+                                    <div className="text-xs text-slate-500 dark:text-slate-400 mb-1">Stop Loss</div>
+                                    <div className="text-xl font-bold text-red-600 dark:text-red-400">
+                                        -{Math.abs((riskConfig.stopLoss ?? -0.07) * 100).toFixed(0)}%
                                     </div>
-                                    <div>
-                                        <div className="text-xs uppercase tracking-wide text-slate-400">Max Position</div>
-                                        <div className="mt-1 text-lg font-semibold text-slate-900 dark:text-white">{aiStatus?.strategy?.maxPositionSize || 'N/A'}</div>
+                                    <div className="text-xs text-slate-400 mt-0.5">Hard exit trigger</div>
+                                </div>
+                                <div className="bg-white/70 dark:bg-slate-800/60 rounded-xl p-3">
+                                    <div className="text-xs text-slate-500 dark:text-slate-400 mb-1">Take Profit</div>
+                                    <div className="text-xl font-bold text-emerald-600 dark:text-emerald-400">
+                                        +{((riskConfig.takeProfitPercent ?? 0.20) * 100).toFixed(0)}%
                                     </div>
-                                    <div>
-                                        <div className="text-xs uppercase tracking-wide text-slate-400">Stop Loss</div>
-                                        <div className="mt-1 text-lg font-semibold text-red-600 dark:text-red-400">{aiStatus?.strategy?.stopLoss || 'N/A'}</div>
+                                    <div className="text-xs text-slate-400 mt-0.5">Full exit target</div>
+                                </div>
+                                <div className="bg-white/70 dark:bg-slate-800/60 rounded-xl p-3">
+                                    <div className="text-xs text-slate-500 dark:text-slate-400 mb-1">Trailing Stop</div>
+                                    <div className="text-xl font-bold text-amber-600 dark:text-amber-400">
+                                        {((riskConfig.trailingStopPercent ?? 0.07) * 100).toFixed(0)}%
                                     </div>
-                                    <div>
-                                        <div className="text-xs uppercase tracking-wide text-slate-400">Take Profit</div>
-                                        <div className="mt-1 text-lg font-semibold text-emerald-600 dark:text-emerald-400">{aiStatus?.strategy?.takeProfit || 'N/A'}</div>
+                                    <div className="text-xs text-slate-400 mt-0.5">From peak price</div>
+                                </div>
+                                <div className="bg-white/70 dark:bg-slate-800/60 rounded-xl p-3">
+                                    <div className="text-xs text-slate-500 dark:text-slate-400 mb-1">Max Position Size</div>
+                                    <div className="text-xl font-bold text-slate-900 dark:text-white">
+                                        {((riskConfig.maxPositionSize ?? 0.10) * 100).toFixed(0)}%
                                     </div>
+                                    <div className="text-xs text-slate-400 mt-0.5">Per single stock</div>
+                                </div>
+                                <div className="bg-white/70 dark:bg-slate-800/60 rounded-xl p-3">
+                                    <div className="text-xs text-slate-500 dark:text-slate-400 mb-1">Max Open Positions</div>
+                                    <div className="text-xl font-bold text-slate-900 dark:text-white">
+                                        {riskConfig.maxOpenPositions ?? 4}
+                                    </div>
+                                    <div className="text-xs text-slate-400 mt-0.5">Concurrent trades</div>
+                                </div>
+                                <div className="bg-white/70 dark:bg-slate-800/60 rounded-xl p-3">
+                                    <div className="text-xs text-slate-500 dark:text-slate-400 mb-1">Max Order Size</div>
+                                    <div className="text-xl font-bold text-slate-900 dark:text-white">
+                                        ${(riskConfig.maxOrderNotional ?? 500).toLocaleString()}
+                                    </div>
+                                    <div className="text-xs text-slate-400 mt-0.5">Per trade cap</div>
                                 </div>
                             </div>
-
-                            <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-800/60 p-5">
-                                <div className="text-sm font-medium text-slate-500 dark:text-slate-400">Enhanced Automation Snapshot</div>
-                                <div className="mt-4 space-y-3 text-sm text-slate-600 dark:text-slate-300">
-                                    <div className="flex items-center justify-between">
-                                        <span>Trailing stop</span>
-                                        <span className="font-semibold text-slate-900 dark:text-white">{formatRiskPercent(riskConfig.trailingStopPercent || 0.08)}</span>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                        <span>Partial take-profit</span>
-                                        <span className="font-semibold text-slate-900 dark:text-white">{formatRiskPercent(riskConfig.partialTakeProfitPercent || 0.15)}</span>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                        <span>Full take-profit</span>
-                                        <span className="font-semibold text-slate-900 dark:text-white">{formatRiskPercent(riskConfig.takeProfitPercent || 0.25)}</span>
-                                    </div>
-                                    <div className="flex items-center justify-between">
-                                        <span>Daily max trades</span>
-                                        <span className="font-semibold text-slate-900 dark:text-white">{riskConfig.maxDailyTrades || 'N/A'}</span>
-                                    </div>
-                                </div>
+                            <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
+                                <span>Partial exit at +{((riskConfig.partialTakeProfitPercent ?? 0.12) * 100).toFixed(0)}%</span>
+                                <span>•</span>
+                                <span>Daily loss limit: ${Math.abs(riskConfig.dailyLossLimit ?? 300)}</span>
+                                <span>•</span>
+                                <span>Min score: {riskConfig.minBuyScore ?? 85}/100</span>
+                                <span>•</span>
+                                <span>Max VIX: {riskConfig.maxVix ?? 30}</span>
+                                <button
+                                    className="ml-auto text-xs font-medium px-3 py-1 rounded-lg bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-800/60 transition-colors"
+                                    onClick={() => {
+                                        setEnhancedSettings(buildEnhancedSettings(DEFAULT_ENHANCED_SETTINGS));
+                                        setEnhancedSettingsChanged(true);
+                                    }}
+                                    title="Load safe recommended values into the form below, then click Save Enhanced Settings to apply"
+                                >
+                                    Reset to Recommended Defaults
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -672,9 +698,9 @@ export default function AITradingPage() {
                     <div className="rounded-3xl border border-slate-200/70 dark:border-slate-700/70 bg-white/85 dark:bg-slate-900/75 p-6 shadow-lg shadow-slate-200/30 dark:shadow-black/20">
                         <div className="flex items-center justify-between gap-4 mb-6">
                             <div>
-                                <h2 className="text-xl font-semibold text-slate-900 dark:text-white">Legacy Settings Surface</h2>
+                                <h2 className="text-xl font-semibold text-slate-900 dark:text-white">Quick Settings Override</h2>
                                 <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
-                                    These user-configurable fields are saved through the legacy AI settings API and still affect legacy initialize/rebalance behavior.
+                                    Override core risk parameters here. For full control, use Enhanced Risk Controls on the right.
                                 </p>
                             </div>
                         </div>
@@ -732,11 +758,11 @@ export default function AITradingPage() {
                             disabled={settingsLoading || !settingsChanged}
                             className="mt-6 px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed font-medium"
                         >
-                            {settingsLoading ? 'Saving...' : 'Save Legacy Settings'}
+                            {settingsLoading ? 'Saving...' : 'Save Settings'}
                         </button>
 
                         <div className="mt-4 rounded-2xl bg-sky-50 text-sky-900 dark:bg-sky-900/20 dark:text-sky-200 px-4 py-3 text-sm">
-                            Legacy settings still control the original manual AI route. The enhanced controls panel on the right now saves directly to the worker-backed automation config.
+                            For full parameter control (trailing stop, partial profit, VIX limits, sector caps) use Enhanced Risk Controls on the right.
                         </div>
                     </div>
 

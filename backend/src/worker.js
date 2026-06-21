@@ -10,9 +10,11 @@ const newsMonitoringService = require('./services/newsMonitoringService');
 const stockSignalSnapshotScheduler = require('./services/stockSignalSnapshotScheduler');
 const stockSignalTelegramScheduler = require('./services/stockSignalTelegramScheduler');
 const assetUniverseScheduler       = require('./services/assetUniverseScheduler');
+const eodIngestionService          = require('./services/eodIngestionService');
 const newsRescanService            = require('./services/newsRescanService');
 const trailingStopService          = require('./services/trailingStopService');
 const marketMonitorService         = require('./services/marketMonitorService');
+const systemHealthMonitor          = require('./services/systemHealthMonitorService');
 const {
     acquireLeadership,
     releaseLeadership,
@@ -21,7 +23,7 @@ const {
 const { pool } = require('./config/database');
 
 const WORKER_NAME = process.env.WORKER_NAME || 'primary-worker';
-const WORKER_SERVICES = ['enhanced-ai', 'options-scanner', 'options-bot', 'news-monitor', 'telegram-reports', 'stock-signal-snapshots', 'stock-signal-telegram', 'asset-universe', 'news-rescan', 'trailing-stops', 'market-monitor'];
+const WORKER_SERVICES = ['enhanced-ai', 'options-scanner', 'options-bot', 'news-monitor', 'telegram-reports', 'stock-signal-snapshots', 'stock-signal-telegram', 'asset-universe', 'eod-ingestion', 'news-rescan', 'trailing-stops', 'market-monitor', 'system-health-monitor'];
 const workerInstanceId = `${os.hostname()}-${process.pid}-${Date.now()}`;
 let shuttingDown = false;
 
@@ -63,9 +65,11 @@ async function shutdownWorker(signal, options = {}) {
         stockSignalSnapshotScheduler.stopStockSignalSnapshotScheduler();
         stockSignalTelegramScheduler.stopStockSignalScheduler();
         assetUniverseScheduler.stopAssetUniverseScheduler();
+        eodIngestionService.stopEodScheduler();
         newsRescanService.stopNewsRescanService();
         trailingStopService.stopTrailingStopService();
         marketMonitorService.stopMarketMonitor();
+        systemHealthMonitor.stopSystemHealthMonitor();
     } catch (error) {
         console.error('[Worker] Error while stopping services:', error.message);
     }
@@ -131,6 +135,9 @@ async function startWorker(options = {}) {
     console.log('\n🌐 Starting Asset Universe Scheduler (evening + premarket + intraday)...');
     assetUniverseScheduler.startAssetUniverseScheduler();
 
+    console.log('\n📦 Starting EOD Bar Ingestion Scheduler (6:30 PM ET, Mon-Fri)...');
+    eodIngestionService.startEodScheduler();
+
     console.log('\n📰 Starting News-Triggered Signal Rescan Service...');
     newsRescanService.startNewsRescanService();
 
@@ -139,6 +146,9 @@ async function startWorker(options = {}) {
 
     console.log('\n👁️  Starting Market Monitor Service...');
     marketMonitorService.startMarketMonitor();
+
+    console.log('\n🏥 Starting System Health Monitor (5-min checks + Telegram alerts)...');
+    systemHealthMonitor.startSystemHealthMonitor();
 
     // Load Telegram schedules only after leadership is acquired.
     loadTelegramSchedules();

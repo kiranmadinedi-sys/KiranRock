@@ -1,0 +1,7 @@
+
+My Recommendation
+Don't do it all at once. The sensible path:
+
+Phase 1 (minimal change): Add international symbols to the scan only using Yahoo Finance suffixes — no trading, just signals. This works today without any broker change.
+Phase 2: Wire IBKR for order execution alongside Alpaca, with a per-user preferred_exchange setting.
+Phase 3: Add the FX layer and multi-market hours scheduler.

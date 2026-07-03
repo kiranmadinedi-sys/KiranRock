@@ -214,7 +214,7 @@ export default function AnalyticsPage() {
             const res = await fetch(`${getApiBaseUrl()}/api/performance/trade-attribution?${params}`, {
                 headers: { Authorization: `Bearer ${token}` }
             });
-            if (!res.ok) { handleAuthError(res.status, router); return; }
+            if (!res.ok) { handleAuthError(res.status); return; }
             const data = await res.json();
             setTrades(data.trades || []);
             setAggByScore(data.byScore || []);
@@ -226,7 +226,7 @@ export default function AnalyticsPage() {
         } finally {
             setLoading(false);
         }
-    }, [days, router]);
+    }, [days]);
 
     const fetchBuckets = useCallback(async (token: string) => {
         setLoadingBuckets(true);

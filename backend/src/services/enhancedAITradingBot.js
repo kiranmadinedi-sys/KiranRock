@@ -193,6 +193,40 @@ const NFP_RELEASE_DATES = new Set([
     '2026-09-04', '2026-10-02', '2026-11-06', '2026-12-04',
 ]);
 
+// ─── US MARKET HOLIDAY CALENDAR ───────────────────────────────────────────────
+// Days when NYSE is fully closed. First trading day AFTER a holiday has lower
+// liquidity, wider spreads, and gap-fill volatility — raise minBuyScore by +5.
+// Update each January. Source: https://www.nyse.com/markets/hours-calendars
+const NYSE_HOLIDAYS = new Set([
+    // 2025
+    '2025-01-01', '2025-01-20', '2025-02-17', '2025-04-18',
+    '2025-05-26', '2025-06-19', '2025-07-04', '2025-09-01',
+    '2025-11-27', '2025-12-25',
+    // 2026
+    '2026-01-01', '2026-01-19', '2026-02-16', '2026-04-03',
+    '2026-05-25', '2026-06-19', '2026-07-04', '2026-09-07',
+    '2026-11-26', '2026-12-25',
+]);
+
+/**
+ * Returns true if today is the first trading day back after a market holiday.
+ * Checks the 4 previous calendar days for a holiday (covers Fri holiday → Mon return).
+ */
+function isPostHolidayReturnDay() {
+    const toKey = (d) => d.toISOString().slice(0, 10);
+    const today = new Date();
+    const dayOfWeek = today.getDay(); // 0=Sun, 1=Mon ... 6=Sat
+    // Only relevant on Monday (return from Fri holiday + weekend) or Tuesday (Mon holiday)
+    if (dayOfWeek !== 1 && dayOfWeek !== 2) return false;
+    // Check the 4 preceding calendar days for a holiday
+    for (let i = 1; i <= 4; i++) {
+        const d = new Date(today);
+        d.setDate(today.getDate() - i);
+        if (NYSE_HOLIDAYS.has(toKey(d))) return true;
+    }
+    return false;
+}
+
 /** Returns the macro release event for today/tomorrow, or null. */
 function checkMacroReleaseWindow() {
     const toKey = (d) => d.toISOString().slice(0, 10);
@@ -308,7 +342,7 @@ const SECTOR_TRADE_PROFILES = {
         targetMult: 4.0,    // ATR × 4.0 — big momentum moves justify wider targets
         minScore:   65,
         minVolume:  500000, // liquid names only (high-beta micro-caps are noise)
-        maxStopPct: 0.05    // hard cap: stop never more than 5% below entry; was 0.07 (7%) → reduced after data showed even 7% produced large losses when stocks gap through stops
+        maxStopPct: 0.075   // cap: 7.5% max stop — ATR×2.0 on a 3.5% ATR stock = 7%, must allow this room
     },
     DEFENSIVE: {
         name: 'DEFENSIVE',
@@ -317,7 +351,7 @@ const SECTOR_TRADE_PROFILES = {
         targetMult: 2.0,    // ATR × 2.0 — limited momentum upside
         minScore:   78,     // high bar → effectively opt-out of momentum scanner
         minVolume:  150000, // utilities naturally trade lower volume
-        maxStopPct: 0.05    // hard cap: 5% max stop; was 0.055
+        maxStopPct: 0.04    // 4% max — low-vol defensive; more than enough for ATR×1.2
     },
     STANDARD: {
         name: 'STANDARD',
@@ -326,7 +360,7 @@ const SECTOR_TRADE_PROFILES = {
         targetMult: 3.0,
         minScore:   65,
         minVolume:  200000,
-        maxStopPct: 0.05    // hard cap: 5% max stop; was 0.07
+        maxStopPct: 0.06    // 6% max — ATR×1.5 on a 3.5% ATR stock = 5.25%, need some headroom
     }
 };
 
@@ -2847,6 +2881,21 @@ async function executeAutonomousTrading(userId) {
             }
         }
 
+        // ── Post-Holiday Return Day Gate ─────────────────────────────────────────
+        // First trading day back from a holiday (e.g. Monday July 7 after July 4):
+        // lower liquidity, wider spreads, gap fills, and position squaring by desks.
+        // Raise minBuyScore +5 and cap new entries to 2 max for the day.
+        if (isPostHolidayReturnDay()) {
+            const prevScore = sessionRiskConfig.minBuyScore;
+            sessionRiskConfig.minBuyScore = Math.min(93, sessionRiskConfig.minBuyScore + 5);
+            logger.warn('[HolidayReturn] First trading day back — minBuyScore raised, entries limited', {
+                userId,
+                before: prevScore,
+                after: sessionRiskConfig.minBuyScore,
+                note: 'Post-holiday liquidity lower; widened spreads increase stop-hunt risk'
+            });
+        }
+
         // ── OPEX Gate (3rd Friday gamma unwind) ──────────────────────────────────
         const opexWindow = checkOpexWindow();
         if (opexWindow.isOpex) {
@@ -3639,20 +3688,30 @@ async function executeAutonomousTrading(userId) {
             }
 
             // Risk-based position cap: ensure no single trade risks more than maxRiskPerTrade dollars.
-            // Formula: maxPositionSize = maxRiskPerTrade / stopLossPct
-            // E.g. $15 risk ÷ 5% stop = $300 max position → worst case -$15 per trade.
-            // This prevents a low-price stock (many shares) from risking far more than a high-price stock.
+            // Auto-scale with account: configured value OR 0.3% of equity, whichever is LARGER
+            // (previous Math.min meant the $15 default always won even on $20K+ accounts).
+            // Hard ceiling: 1% of equity so a single bad trade can't wipe more than 1%.
             const _riskPerTrade = Math.min(
-                riskConfig.maxRiskPerTrade || 15,
-                accountTotalValue * 0.003  // floor: 0.3% of portfolio
+                Math.max(
+                    riskConfig.maxRiskPerTrade || 15,
+                    accountTotalValue * 0.003    // 0.3% of equity — scales with account growth
+                ),
+                accountTotalValue * 0.01         // hard ceiling: never risk more than 1% per trade
             );
-            const _stopDist = Math.abs(riskConfig.stopLoss || 0.05);
+            // Use the actual stop distance for this specific opportunity rather than the global config.
+            // Opportunity.stop comes from ATR-based calc; using config default (5%) would undersize
+            // positions for AGGRESSIVE stocks where actual stop might be 6-7%.
+            const _actualStopDist = (opportunity.stop && opportunity.price && opportunity.price > opportunity.stop)
+                ? (opportunity.price - opportunity.stop) / opportunity.price
+                : Math.abs(riskConfig.stopLoss || 0.05);
+            const _stopDist = Math.max(0.02, _actualStopDist); // guard: never divide by <2%
             const _riskBasedCap = _riskPerTrade / _stopDist;
             if (positionSize > _riskBasedCap) {
                 logger.info('[RiskCap] Position size capped by max-risk-per-trade', {
                     userId, symbol: opportunity.symbol,
                     before: positionSize.toFixed(2), after: _riskBasedCap.toFixed(2),
-                    riskPerTrade: _riskPerTrade.toFixed(2), stopDist: (_stopDist * 100).toFixed(1) + '%'
+                    riskPerTrade: _riskPerTrade.toFixed(2), stopDist: (_stopDist * 100).toFixed(1) + '%',
+                    accountEquity: accountTotalValue.toFixed(0)
                 });
                 positionSize = _riskBasedCap;
             }

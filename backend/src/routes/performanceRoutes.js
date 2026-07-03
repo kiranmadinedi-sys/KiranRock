@@ -1270,4 +1270,180 @@ router.get('/trade-log', protect, async (req, res) => {
     }
 });
 
+/**
+ * POST /api/performance/plain-summary
+ * Body: { days: 30|90|180|365 }
+ *
+ * Collects all trading stats for the period, then asks Claude to write
+ * a plain-English summary a non-trader can fully understand.
+ * Uses the same Anthropic SDK already wired up for ORACLE/assistant.
+ */
+router.post('/plain-summary', protect, async (req, res) => {
+    try {
+        const { query } = require('../config/database');
+        const Anthropic = require('@anthropic-ai/sdk');
+        const userId = req.userId;
+        const days   = Math.max(7, Math.min(parseInt(req.body?.days) || 90, 365));
+
+        // ── 1. Gather all stats from the trades table ──────────────────────
+        const statsRes = await query(`
+            WITH sells AS (
+                SELECT
+                    s.symbol,
+                    s.pnl,
+                    s.pnl_percent,
+                    s.hold_hours,
+                    s.trade_date                                      AS closed_at,
+                    COALESCE(s.ai_score,     b.ai_score)             AS ai_score,
+                    COALESCE(s.sector,       b.sector)               AS sector,
+                    COALESCE(s.entry_regime, b.entry_regime)         AS regime,
+                    s.notes,
+                    s.executed_by
+                FROM trades s
+                LEFT JOIN LATERAL (
+                    SELECT ai_score, sector, entry_regime
+                    FROM   trades
+                    WHERE  user_id = s.user_id AND symbol = s.symbol AND action = 'BUY'
+                      AND  trade_date <= s.trade_date
+                    ORDER BY trade_date DESC LIMIT 1
+                ) b ON true
+                WHERE s.user_id = $1
+                  AND s.action  = 'SELL'
+                  AND s.pnl     IS NOT NULL
+                  AND s.trade_date >= NOW() - ($2 * INTERVAL '1 day')
+            )
+            SELECT
+                COUNT(*)                                                          AS total_trades,
+                COUNT(*) FILTER (WHERE pnl > 0)                                  AS winners,
+                COUNT(*) FILTER (WHERE pnl < 0)                                  AS losers,
+                ROUND(COUNT(*) FILTER (WHERE pnl > 0)::numeric / NULLIF(COUNT(*),0) * 100, 1) AS win_rate,
+                ROUND(SUM(pnl)::numeric, 2)                                      AS net_pnl,
+                ROUND(AVG(pnl)::numeric, 2)                                      AS avg_pnl,
+                ROUND(AVG(pnl_percent)::numeric, 2)                              AS avg_return_pct,
+                ROUND(MAX(pnl)::numeric, 2)                                      AS best_trade_pnl,
+                ROUND(MIN(pnl)::numeric, 2)                                      AS worst_trade_pnl,
+                (SELECT symbol FROM sells ORDER BY pnl DESC  LIMIT 1)           AS best_symbol,
+                (SELECT symbol FROM sells ORDER BY pnl ASC   LIMIT 1)           AS worst_symbol,
+                ROUND(AVG(hold_hours)::numeric, 1)                               AS avg_hold_hours,
+                -- Best and worst sector
+                (SELECT sector FROM sells WHERE sector IS NOT NULL
+                 GROUP BY sector ORDER BY SUM(pnl) DESC  LIMIT 1)               AS best_sector,
+                (SELECT sector FROM sells WHERE sector IS NOT NULL
+                 GROUP BY sector ORDER BY SUM(pnl) ASC   LIMIT 1)               AS worst_sector,
+                -- Most common exit
+                (SELECT CASE
+                    WHEN notes ILIKE '%trailing%' THEN 'trailing stop'
+                    WHEN notes ILIKE '%partial%'  THEN 'partial profit'
+                    WHEN notes ILIKE '%stop%'     THEN 'stop loss'
+                    WHEN notes ILIKE '%target%'   THEN 'profit target'
+                    ELSE 'bot decision'
+                 END
+                 FROM sells
+                 GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1)                     AS most_common_exit,
+                -- Market regime during trades
+                (SELECT regime FROM sells WHERE regime IS NOT NULL
+                 GROUP BY regime ORDER BY COUNT(*) DESC LIMIT 1)                AS dominant_regime,
+                -- Score stats
+                ROUND(AVG(ai_score)::numeric, 1)                                AS avg_ai_score,
+                ROUND(MIN(ai_score)::numeric, 0)                                AS min_ai_score,
+                ROUND(MAX(ai_score)::numeric, 0)                                AS max_ai_score,
+                -- Gross wins / losses for profit factor
+                ROUND(SUM(pnl) FILTER (WHERE pnl > 0)::numeric, 2)             AS gross_wins,
+                ROUND(ABS(SUM(pnl) FILTER (WHERE pnl < 0))::numeric, 2)        AS gross_losses
+            FROM sells
+        `, [userId, days]);
+
+        const s = statsRes.rows[0];
+        const total = parseInt(s.total_trades || 0);
+
+        if (total === 0) {
+            return res.json({
+                summary: `No closed trades found in the last ${days} days. The bot may still be building positions, or no trades were completed in this period. Check the AI Bot page to see if the bot is active and scanning for opportunities.`,
+                stats: { totalTrades: 0, days }
+            });
+        }
+
+        const profitFactor = s.gross_losses > 0
+            ? (parseFloat(s.gross_wins || 0) / parseFloat(s.gross_losses)).toFixed(2)
+            : s.gross_wins > 0 ? '∞' : '0';
+
+        // ── 2. Build the data blob for Claude ─────────────────────────────
+        const statsBlob = {
+            period:          `last ${days} days`,
+            totalTrades:     total,
+            winners:         parseInt(s.winners || 0),
+            losers:          parseInt(s.losers  || 0),
+            winRatePct:      parseFloat(s.win_rate || 0),
+            netPnlUsd:       parseFloat(s.net_pnl || 0),
+            avgPnlUsd:       parseFloat(s.avg_pnl || 0),
+            avgReturnPct:    parseFloat(s.avg_return_pct || 0),
+            bestTradePnl:    parseFloat(s.best_trade_pnl || 0),
+            worstTradePnl:   parseFloat(s.worst_trade_pnl || 0),
+            bestSymbol:      s.best_symbol,
+            worstSymbol:     s.worst_symbol,
+            avgHoldHours:    parseFloat(s.avg_hold_hours || 0),
+            bestSector:      s.best_sector,
+            worstSector:     s.worst_sector,
+            mostCommonExit:  s.most_common_exit,
+            dominantRegime:  s.dominant_regime,
+            avgAiScore:      parseFloat(s.avg_ai_score || 0),
+            profitFactor,
+        };
+
+        // ── 3. Ask Claude for the plain-English summary ────────────────────
+        const apiKey = process.env.ANTHROPIC_API_KEY;
+        if (!apiKey) {
+            // Fallback: build a template summary without Claude
+            const direction = statsBlob.netPnlUsd >= 0 ? 'made money' : 'lost money';
+            const summary = [
+                `Over the ${statsBlob.period}, the bot completed ${statsBlob.totalTrades} trades — ` +
+                `${statsBlob.winners} winners and ${statsBlob.losers} losers (${statsBlob.winRatePct}% win rate).`,
+                `Overall the account ${direction}: net profit/loss was $${Math.abs(statsBlob.netPnlUsd).toFixed(2)} ` +
+                `(${statsBlob.avgReturnPct >= 0 ? '+' : ''}${statsBlob.avgReturnPct.toFixed(2)}% average per trade).`,
+                statsBlob.bestSymbol ? `Best trade: ${statsBlob.bestSymbol} (+$${statsBlob.bestTradePnl.toFixed(2)}). ` +
+                `Worst trade: ${statsBlob.worstSymbol} ($${statsBlob.worstTradePnl.toFixed(2)}).` : '',
+                statsBlob.avgHoldHours > 0
+                    ? `Stocks were held for ${statsBlob.avgHoldHours.toFixed(0)} hours on average (about ${(statsBlob.avgHoldHours / 24).toFixed(1)} days).` : '',
+                statsBlob.bestSector ? `Best performing sector: ${statsBlob.bestSector}. Worst: ${statsBlob.worstSector}.` : '',
+            ].filter(Boolean).join(' ');
+            return res.json({ summary, stats: statsBlob });
+        }
+
+        const client = new Anthropic({ apiKey });
+        const prompt = `You are a friendly assistant explaining a stock trading bot's performance to someone with zero trading knowledge. Use simple everyday language — no jargon.
+
+Here are the trading results for the ${statsBlob.period}:
+${JSON.stringify(statsBlob, null, 2)}
+
+Write a clear, friendly performance summary covering:
+1. Overall result — did the account make or lose money, and by how much?
+2. How often did trades work out vs. not work out?
+3. Which stocks or sectors did well, which did poorly?
+4. How long were stocks typically held?
+5. How the bot decided to exit trades (stop loss, profit target, etc.)
+6. One honest strength and one honest area to watch
+7. A single plain sentence verdict at the end
+
+Rules:
+- Write in plain English a family member could understand
+- Use dollars and percentages with context ("winning $14 on a $300 trade")
+- Keep it under 250 words
+- Use short paragraphs, not bullet points
+- Do NOT start with "Overall" — vary the opening`;
+
+        const message = await client.messages.create({
+            model:      'claude-haiku-4-5-20251001',
+            max_tokens: 512,
+            messages:   [{ role: 'user', content: prompt }]
+        });
+
+        const summary = message.content?.[0]?.text?.trim() || 'Summary unavailable.';
+        res.json({ summary, stats: statsBlob });
+
+    } catch (err) {
+        logger.error('Plain summary endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = router;

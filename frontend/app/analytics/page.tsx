@@ -169,6 +169,12 @@ export default function AnalyticsPage() {
     const [tab, setTab] = useState<Tab>('trades');
     const [days, setDays] = useState(90);
 
+    // Plain-English summary state
+    const [summary, setSummary]           = useState<string>('');
+    const [summaryLoading, setSummaryLoading] = useState(false);
+    const [summaryStats, setSummaryStats] = useState<Record<string, any> | null>(null);
+    const [summaryDays, setSummaryDays]   = useState<number | null>(null); // which period the summary was generated for
+
     // Trade log state
     const [trades, setTrades]     = useState<Trade[]>([]);
     const [aggByExit, setAggByExit]     = useState<AggRow[]>([]);
@@ -232,6 +238,37 @@ export default function AnalyticsPage() {
             setLoadingBuckets(false);
         }
     }, [days]);
+
+    const fetchSummary = useCallback(async () => {
+        const token = getAuthToken();
+        if (!token) return;
+        setSummaryLoading(true);
+        setSummary('');
+        setSummaryStats(null);
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/performance/plain-summary`, {
+                method:  'POST',
+                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ days }),
+            });
+            if (!res.ok) return;
+            const data = await res.json();
+            setSummary(data.summary || '');
+            setSummaryStats(data.stats || null);
+            setSummaryDays(days);
+        } finally {
+            setSummaryLoading(false);
+        }
+    }, [days]);
+
+    // Clear stale summary when period changes
+    useEffect(() => {
+        if (summaryDays !== null && summaryDays !== days) {
+            setSummary('');
+            setSummaryStats(null);
+            setSummaryDays(null);
+        }
+    }, [days, summaryDays]);
 
     useEffect(() => {
         const token = getAuthToken();
@@ -321,6 +358,95 @@ export default function AnalyticsPage() {
                     color={winRate >= 55 ? 'text-green-400' : winRate >= 45 ? 'text-yellow-400' : 'text-red-400'} />
                 <StatCard label="Net P&L" value={fmtUsd(netPnl)} color={pnlColor(netPnl)} />
                 <StatCard label="Avg Return" value={fmtPct(avgRet)} color={pnlColor(avgRet)} />
+            </div>
+
+            {/* ── Plain-English Summary Panel ────────────────────────────── */}
+            <div className="mb-6">
+                {/* Button row */}
+                <div className="flex items-center gap-3 mb-3">
+                    <button
+                        onClick={fetchSummary}
+                        disabled={summaryLoading}
+                        className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all shadow-lg ${
+                            summaryLoading
+                                ? 'bg-purple-800 text-purple-300 cursor-not-allowed'
+                                : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white'
+                        }`}
+                    >
+                        <span className="text-base">{summaryLoading ? '⏳' : '✨'}</span>
+                        {summaryLoading
+                            ? 'Generating summary…'
+                            : summary
+                                ? `Refresh summary (${days}d)`
+                                : `Explain my ${days}-day performance in plain English`}
+                    </button>
+                    {summary && !summaryLoading && (
+                        <span className="text-xs text-gray-500">
+                            Generated for last {summaryDays} days
+                            {summaryDays !== days && <span className="text-yellow-400 ml-1">— period changed, click to refresh</span>}
+                        </span>
+                    )}
+                </div>
+
+                {/* Summary card */}
+                {(summary || summaryLoading) && (
+                    <div className="bg-gradient-to-br from-gray-800 to-gray-800/80 border border-purple-700/50 rounded-2xl p-5 relative overflow-hidden">
+                        {/* decorative glow */}
+                        <div className="absolute top-0 left-0 w-40 h-40 bg-purple-600/10 rounded-full -translate-x-10 -translate-y-10 pointer-events-none" />
+
+                        <div className="flex items-start gap-3 mb-3">
+                            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-indigo-500 flex items-center justify-center text-white text-sm flex-shrink-0 mt-0.5">
+                                ✨
+                            </div>
+                            <div>
+                                <p className="text-sm font-semibold text-purple-300">Plain-English Summary</p>
+                                <p className="text-xs text-gray-500">
+                                    {summaryStats ? `${summaryStats.totalTrades} closed trades · last ${summaryDays ?? days} days` : 'Analysing…'}
+                                </p>
+                            </div>
+                        </div>
+
+                        {summaryLoading ? (
+                            <div className="space-y-2.5 pl-11">
+                                {[80,95,70,85,60].map((w,i) => (
+                                    <div key={i} className={`h-3.5 bg-gray-700 rounded animate-pulse`} style={{ width: `${w}%` }} />
+                                ))}
+                            </div>
+                        ) : (
+                            <div className="pl-11">
+                                <p className="text-gray-200 text-sm leading-relaxed whitespace-pre-wrap">{summary}</p>
+
+                                {/* Stat pills */}
+                                {summaryStats && summaryStats.totalTrades > 0 && (
+                                    <div className="flex flex-wrap gap-2 mt-4 pt-3 border-t border-gray-700/50">
+                                        <span className="px-2.5 py-1 rounded-full bg-gray-700 text-xs text-gray-300">
+                                            {summaryStats.winners}W / {summaryStats.losers}L
+                                        </span>
+                                        <span className={`px-2.5 py-1 rounded-full bg-gray-700 text-xs font-medium ${summaryStats.winRatePct >= 55 ? 'text-green-400' : summaryStats.winRatePct >= 45 ? 'text-yellow-400' : 'text-red-400'}`}>
+                                            {summaryStats.winRatePct}% win rate
+                                        </span>
+                                        <span className={`px-2.5 py-1 rounded-full bg-gray-700 text-xs font-medium ${summaryStats.netPnlUsd >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                            {summaryStats.netPnlUsd >= 0 ? '+' : ''}{summaryStats.netPnlUsd?.toFixed(2)} net P&L
+                                        </span>
+                                        <span className="px-2.5 py-1 rounded-full bg-gray-700 text-xs text-gray-300">
+                                            Profit factor {summaryStats.profitFactor}
+                                        </span>
+                                        {summaryStats.bestSymbol && (
+                                            <span className="px-2.5 py-1 rounded-full bg-green-900/60 text-xs text-green-300">
+                                                Best: {summaryStats.bestSymbol} (+${summaryStats.bestTradePnl?.toFixed(2)})
+                                            </span>
+                                        )}
+                                        {summaryStats.worstSymbol && (
+                                            <span className="px-2.5 py-1 rounded-full bg-red-900/60 text-xs text-red-300">
+                                                Worst: {summaryStats.worstSymbol} (${summaryStats.worstTradePnl?.toFixed(2)})
+                                            </span>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                )}
             </div>
 
             {/* Tabs */}

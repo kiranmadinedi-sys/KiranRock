@@ -5,10 +5,37 @@ const tradesDb = require('./tradesDatabaseService');
 const { savePortfolioSnapshot } = require('./portfolioSnapshotService');
 const { buildPortfolioHistory } = require('./portfolioHistoryService');
 const brokerService = require('./brokerService');
+const { getLedgerSummary } = require('./ledgerService');
 
 // Per-user Alpaca data cache — avoids hammering Alpaca on every 30-second frontend poll.
 // TTL: 20s during market hours (fresh enough for live display), 5 min outside.
 const _alpacaCache = new Map(); // userId -> { positions, equity, cash, fetchedAt }
+
+// Deposit history cache — Alpaca ledger activities rarely change (new deposit = rare event).
+// TTL: 24h. Automatically refreshed on the next portfolio fetch after expiry.
+const _depositsCache = new Map(); // userId -> { totalDeposited, totalWithdrawn, fetchedAt }
+const DEPOSITS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
+
+async function _getAlpacaNetDeposits(userId) {
+    const cached = _depositsCache.get(userId);
+    if (cached && Date.now() - cached.fetchedAt < DEPOSITS_CACHE_TTL) return cached;
+
+    try {
+        // getLedgerSummary already uses the proven REST path (axios to /v2/account/activities)
+        // that the Full Ledger section uses — guaranteed to return the correct deposit figure.
+        const ledger = await getLedgerSummary(userId);
+        if (ledger && ledger.totalDeposits > 0) {
+            const entry = {
+                totalDeposited: ledger.totalDeposits,
+                totalWithdrawn: ledger.totalWithdrawals || 0,
+                fetchedAt: Date.now()
+            };
+            _depositsCache.set(userId, entry);
+            return entry;
+        }
+    } catch (_) { /* Alpaca unreachable or simulated broker — fall through to DB */ }
+    return null; // signals caller to fall back to DB-tracked deposits
+}
 
 function _isMarketHours() {
     const parts = new Intl.DateTimeFormat('en-US', {
@@ -195,8 +222,13 @@ const getPortfolioSummary = async (userId) => {
         const cashBalance = alpacaCash ?? account.balance;
         const totalPortfolioValue = alpacaEquity ?? (cashBalance + totalCurrentValue);
 
-        // Total invested (deposits - withdrawals)
-        const totalInvested = account.totalDeposited - account.totalWithdrawn;
+        // Net deposits — prefer Alpaca activities (source of truth for real/paper accounts).
+        // Falls back to KiranRock's own DEPOSIT/WITHDRAWAL rows in the trades table when
+        // Alpaca is not configured (simulated broker) or the activities call fails.
+        const alpacaDeposits = await _getAlpacaNetDeposits(userId);
+        const totalDeposited = alpacaDeposits?.totalDeposited ?? account.totalDeposited;
+        const totalWithdrawn = alpacaDeposits?.totalWithdrawn ?? account.totalWithdrawn;
+        const totalInvested  = totalDeposited - totalWithdrawn;
 
         // Overall return
         const overallPL = totalPortfolioValue - totalInvested;
@@ -205,8 +237,9 @@ const getPortfolioSummary = async (userId) => {
         const portfolioSummary = {
             account: {
                 cashBalance,
-                totalDeposited: account.totalDeposited,
-                totalWithdrawn: account.totalWithdrawn
+                totalDeposited,
+                totalWithdrawn,
+                depositsSource: alpacaDeposits ? 'alpaca' : 'db'
             },
             holdings: holdingsWithCurrentPrice,
             summary: {
@@ -220,7 +253,8 @@ const getPortfolioSummary = async (userId) => {
                 overallPL,
                 overallReturn,
                 numberOfPositions: holdings.length,
-                cashBalance
+                cashBalance,
+                depositsSource: alpacaDeposits ? 'alpaca' : 'db'
             }
         };
 

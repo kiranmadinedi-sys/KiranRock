@@ -277,3 +277,45 @@ app.listen(PORT, HOST, () => {
   console.log(`Server is running on ${HOST}:${PORT}`);
   console.log('✓ PostgreSQL database connected');
 });
+
+// ── Worker watchdog ───────────────────────────────────────────────────────────
+// Runs in the backend (PM2-managed) so it keeps firing even when the worker
+// process dies.  Sends a Telegram alert when the worker heartbeat goes stale
+// and a recovery alert when it comes back.
+{
+  const { query: _wdQuery } = require('./config/database');
+  const { sendTelegramMessage } = require('./services/telegramAlertService');
+  const { logger: _wdLog } = require('./utils/logger');
+  const CHAT_ID      = process.env.TELEGRAM_CHAT_ID || '';
+  const STALE_MS     = 10 * 60 * 1000; // 10 min
+  const CHECK_MS     = 5  * 60 * 1000; // check every 5 min
+  let _workerDownAlerted = false;
+
+  setInterval(async () => {
+    if (!CHAT_ID) return;
+    try {
+      const r = await _wdQuery(
+        `SELECT heartbeat_at FROM worker_runtime_status ORDER BY heartbeat_at DESC LIMIT 1`
+      );
+      const hb = r.rows[0]?.heartbeat_at;
+      const ageMs = hb ? Date.now() - new Date(hb).getTime() : Infinity;
+
+      if (ageMs > STALE_MS && !_workerDownAlerted) {
+        _workerDownAlerted = true;
+        const ageMin = Math.round(ageMs / 60000);
+        _wdLog.warn('[Watchdog] Worker heartbeat stale — sending Telegram alert', { ageMin });
+        await sendTelegramMessage(CHAT_ID,
+          `⚠️ *Worker DOWN*\nHeartbeat is ${ageMin} min old — trading bot, schedulers, and alerts are paused.\n\nRestart: run \`start.ps1\` as Administrator.`
+        );
+      } else if (ageMs <= STALE_MS && _workerDownAlerted) {
+        _workerDownAlerted = false;
+        _wdLog.info('[Watchdog] Worker heartbeat recovered');
+        await sendTelegramMessage(CHAT_ID,
+          `✅ *Worker RECOVERED*\nHeartbeat is fresh — trading bot and schedulers are running again.`
+        );
+      }
+    } catch (err) {
+      _wdLog.warn('[Watchdog] Could not check worker heartbeat', { err: err.message });
+    }
+  }, CHECK_MS);
+}

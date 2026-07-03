@@ -2,7 +2,7 @@ const cacheService = require('./cacheService');
 const dataProvider = require('./dataProvider');
 const { logger } = require('../utils/logger');
 
-const CACHE_TTL = 60 * 60 * 1000;        // 60 minutes
+const CACHE_TTL = 10 * 60 * 1000;        // 10 minutes (was 60 — faster VIX-spike response)
 const STALE_CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours (stale fallback)
 const STALE_CACHE_KEY = 'market_regime:last_known';
 
@@ -324,4 +324,9 @@ function getDefaultRegime() {
     };
 }
 
-module.exports = { getMarketRegime, getDefaultRegime };
+function invalidateCache() {
+    cacheService.delete('market_regime');
+    logger.info('[MarketRegime] Cache invalidated by VIX spike monitor');
+}
+
+module.exports = { getMarketRegime, getDefaultRegime, invalidateCache };

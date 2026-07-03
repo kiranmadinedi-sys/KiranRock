@@ -333,4 +333,9 @@ function _neutral() {
     return { globalScore: 0.5, label: 'NEUTRAL', baseAdj: 0, breakdown: {}, rawData: {} };
 }
 
-module.exports = { getGlobalSentiment, getScoreAdjustment };
+function invalidateCache() {
+    cacheService.delete(CACHE_KEY);
+    logger.info('[ATLAS] Cache invalidated by VIX spike monitor');
+}
+
+module.exports = { getGlobalSentiment, getScoreAdjustment, invalidateCache };

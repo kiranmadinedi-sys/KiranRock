@@ -71,6 +71,9 @@ router.get('/', protect, async (req, res) => {
                     (d.metadata->>'riskReward')     AS "riskReward",
                     d.metadata->>'oracleVerdict'    AS "oracleVerdict",
                     (d.metadata->>'smartMoneyScore')::numeric AS "smartMoneyScore",
+                    (d.metadata->>'atrPct')::numeric          AS "atrPct",
+                    (d.metadata->>'daysToEarnings')::integer  AS "daysToEarnings",
+                    (d.metadata->>'distFromSma20Pct')::numeric AS "distFromSma20Pct",
                     l.live_scored_at AS "liveScoredAt"
                  FROM daily_universe_analysis d
                  LEFT JOIN live_score_cache l
@@ -166,7 +169,10 @@ router.get('/', protect, async (req, res) => {
                 target:          r.target != null ? parseFloat(r.target) : null,
                 riskReward:      r.riskReward || null,
                 oracleVerdict:   r.oracleVerdict || null,
-                smartMoneyScore: r.smartMoneyScore != null ? parseFloat(r.smartMoneyScore) : null
+                smartMoneyScore:   r.smartMoneyScore   != null ? parseFloat(r.smartMoneyScore)   : null,
+                atrPct:            r.atrPct            != null ? parseFloat(r.atrPct)            : null,
+                daysToEarnings:    r.daysToEarnings    != null ? parseInt(r.daysToEarnings)      : null,
+                distFromSma20Pct:  r.distFromSma20Pct  != null ? parseFloat(r.distFromSma20Pct)  : null,
             }))
         };
 

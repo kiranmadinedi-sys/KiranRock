@@ -935,4 +935,176 @@ router.post('/trading-report/generate', protect, async (req, res) => {
     }
 });
 
+/**
+ * GET /api/performance/score-analysis?days=90
+ * AI score calibration from the trades table (ai_score on SELL records).
+ * Buckets are tuned to this bot's threshold range (base minBuyScore = 88).
+ * Returns win rate, avg return, and expectancy per bucket so you can see
+ * whether raising/lowering the score floor improves outcomes.
+ */
+router.get('/score-analysis', protect, async (req, res) => {
+    try {
+        const { query } = require('../config/database');
+        const days = Math.max(7, Math.min(parseInt(req.query.days) || 90, 365));
+        const userId = req.userId;
+
+        const result = await query(`
+            WITH sells AS (
+                SELECT
+                    ai_score,
+                    pnl,
+                    pnl_percent
+                FROM trades
+                WHERE user_id  = $1
+                  AND action   = 'SELL'
+                  AND ai_score IS NOT NULL
+                  AND pnl      IS NOT NULL
+                  AND trade_date >= NOW() - ($2 * INTERVAL '1 day')
+            )
+            SELECT
+                CASE
+                    WHEN ai_score >= 98 THEN '98-100'
+                    WHEN ai_score >= 95 THEN '95-97'
+                    WHEN ai_score >= 92 THEN '92-94'
+                    WHEN ai_score >= 88 THEN '88-91'
+                    ELSE '< 88'
+                END                                                                 AS bucket,
+                MIN(ai_score)                                                       AS sort_key,
+                COUNT(*)                                                            AS total,
+                COUNT(*) FILTER (WHERE pnl > 0)                                    AS wins,
+                COUNT(*) FILTER (WHERE pnl < 0)                                    AS losses,
+                ROUND(
+                    COUNT(*) FILTER (WHERE pnl > 0)::numeric / NULLIF(COUNT(*),0) * 100,
+                    1
+                )                                                                   AS win_rate,
+                ROUND(AVG(pnl_percent)::numeric, 2)                                AS avg_return,
+                ROUND(SUM(pnl)::numeric, 2)                                        AS total_pnl,
+                ROUND(AVG(pnl)::numeric, 2)                                        AS avg_pnl,
+                ROUND(AVG(CASE WHEN pnl > 0 THEN pnl_percent END)::numeric, 2)    AS avg_win_pct,
+                ROUND(AVG(CASE WHEN pnl < 0 THEN pnl_percent END)::numeric, 2)    AS avg_loss_pct,
+                ROUND(MIN(ai_score)::numeric, 1)                                   AS min_score,
+                ROUND(MAX(ai_score)::numeric, 1)                                   AS max_score,
+                ROUND(AVG(ai_score)::numeric, 1)                                   AS avg_score
+            FROM sells
+            GROUP BY bucket
+            ORDER BY sort_key DESC NULLS LAST
+        `, [userId, days]);
+
+        const toWR = (wins, total) => total > 0 ? Math.round((parseInt(wins) / parseInt(total)) * 100) : 0;
+
+        const buckets = result.rows.map(r => {
+            const wr  = parseFloat(r.win_rate) || 0;
+            const awp = parseFloat(r.avg_win_pct) || 0;
+            const alp = parseFloat(r.avg_loss_pct) || 0; // negative
+            const expectancy = parseFloat(((wr / 100) * awp + (1 - wr / 100) * alp).toFixed(2));
+            return {
+                bucket:       r.bucket,
+                total:        parseInt(r.total),
+                wins:         parseInt(r.wins),
+                losses:       parseInt(r.losses),
+                winRate:      wr,
+                avgReturn:    parseFloat(r.avg_return) || 0,
+                totalPnl:     parseFloat(r.total_pnl) || 0,
+                avgPnl:       parseFloat(r.avg_pnl) || 0,
+                avgWinPct:    awp,
+                avgLossPct:   alp,
+                expectancy,
+                minScore:     parseFloat(r.min_score) || 0,
+                maxScore:     parseFloat(r.max_score) || 0,
+                avgScore:     parseFloat(r.avg_score) || 0,
+            };
+        });
+
+        res.json({ days, buckets });
+    } catch (err) {
+        logger.error('Score analysis endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/performance/hold-time-analysis?days=90
+ * Hold-time performance analysis using the hold_hours column on SELL records.
+ * Buckets: ≤24h (day-trade/overnight), 25-48h, 49-72h, 73-96h, 97-120h, >120h.
+ * Helps identify whether shorter or longer holds produce better outcomes for this bot.
+ */
+router.get('/hold-time-analysis', protect, async (req, res) => {
+    try {
+        const { query } = require('../config/database');
+        const days = Math.max(7, Math.min(parseInt(req.query.days) || 90, 365));
+        const userId = req.userId;
+
+        const result = await query(`
+            WITH sells AS (
+                SELECT
+                    hold_hours,
+                    pnl,
+                    pnl_percent
+                FROM trades
+                WHERE user_id    = $1
+                  AND action     = 'SELL'
+                  AND hold_hours IS NOT NULL
+                  AND pnl        IS NOT NULL
+                  AND trade_date >= NOW() - ($2 * INTERVAL '1 day')
+            )
+            SELECT
+                CASE
+                    WHEN hold_hours <= 24  THEN '0-24h'
+                    WHEN hold_hours <= 48  THEN '25-48h'
+                    WHEN hold_hours <= 72  THEN '49-72h'
+                    WHEN hold_hours <= 96  THEN '73-96h'
+                    WHEN hold_hours <= 120 THEN '97-120h'
+                    ELSE '120h+'
+                END                                                                  AS bucket,
+                MIN(hold_hours)                                                      AS sort_key,
+                COUNT(*)                                                             AS total,
+                COUNT(*) FILTER (WHERE pnl > 0)                                     AS wins,
+                COUNT(*) FILTER (WHERE pnl < 0)                                     AS losses,
+                ROUND(
+                    COUNT(*) FILTER (WHERE pnl > 0)::numeric / NULLIF(COUNT(*),0) * 100,
+                    1
+                )                                                                    AS win_rate,
+                ROUND(AVG(pnl_percent)::numeric, 2)                                 AS avg_return,
+                ROUND(SUM(pnl)::numeric, 2)                                         AS total_pnl,
+                ROUND(AVG(pnl)::numeric, 2)                                         AS avg_pnl,
+                ROUND(AVG(CASE WHEN pnl > 0 THEN pnl_percent END)::numeric, 2)     AS avg_win_pct,
+                ROUND(AVG(CASE WHEN pnl < 0 THEN pnl_percent END)::numeric, 2)     AS avg_loss_pct,
+                ROUND(MIN(hold_hours)::numeric, 1)                                  AS min_hours,
+                ROUND(MAX(hold_hours)::numeric, 1)                                  AS max_hours,
+                ROUND(AVG(hold_hours)::numeric, 1)                                  AS avg_hours
+            FROM sells
+            GROUP BY bucket
+            ORDER BY sort_key ASC
+        `, [userId, days]);
+
+        const buckets = result.rows.map(r => {
+            const wr  = parseFloat(r.win_rate) || 0;
+            const awp = parseFloat(r.avg_win_pct) || 0;
+            const alp = parseFloat(r.avg_loss_pct) || 0;
+            const expectancy = parseFloat(((wr / 100) * awp + (1 - wr / 100) * alp).toFixed(2));
+            return {
+                bucket:     r.bucket,
+                total:      parseInt(r.total),
+                wins:       parseInt(r.wins),
+                losses:     parseInt(r.losses),
+                winRate:    wr,
+                avgReturn:  parseFloat(r.avg_return) || 0,
+                totalPnl:   parseFloat(r.total_pnl) || 0,
+                avgPnl:     parseFloat(r.avg_pnl) || 0,
+                avgWinPct:  awp,
+                avgLossPct: alp,
+                expectancy,
+                minHours:   parseFloat(r.min_hours) || 0,
+                maxHours:   parseFloat(r.max_hours) || 0,
+                avgHours:   parseFloat(r.avg_hours) || 0,
+            };
+        });
+
+        res.json({ days, buckets });
+    } catch (err) {
+        logger.error('Hold-time analysis endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = router;

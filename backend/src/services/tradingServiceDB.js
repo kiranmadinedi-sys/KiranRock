@@ -25,7 +25,7 @@ const getCurrentPrice = async (symbol) => {
 /**
  * Execute a buy order
  */
-const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', aiScore = null, sector = null, notes = null, fillPrice = null) => {
+const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', aiScore = null, sector = null, notes = null, fillPrice = null, entryRegime = null) => {
     try {
         if (quantity <= 0 || !Number.isInteger(quantity)) {
             throw new Error('Quantity must be a positive integer');
@@ -131,11 +131,24 @@ const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', 
             
             // Record trade — use fillPrice if supplied (bracket), else currentPrice (market)
             const recordedPrice = fillPrice || currentPrice;
+            // Derive entry_regime and slippage from the notes JSON if not passed directly
+            let _entryRegime = entryRegime;
+            let _slippagePct = null;
+            if (notes) {
+                try {
+                    const n = typeof notes === 'string' ? JSON.parse(notes) : notes;
+                    if (!_entryRegime && n.regime) _entryRegime = n.regime;
+                    if (n.signalPrice && recordedPrice) {
+                        _slippagePct = parseFloat(((recordedPrice - n.signalPrice) / n.signalPrice * 100).toFixed(4));
+                    }
+                } catch (_) {}
+            }
             const tradeResult = await client.query(`
                 INSERT INTO trades (
                     user_id, symbol, action, quantity, price, total,
-                    commission, executed_by, ai_score, sector, notes
-                ) VALUES ($1, $2, 'BUY', $3, $4, $5, $6, $7, $8, $9, $10)
+                    commission, executed_by, ai_score, sector, notes,
+                    entry_regime, slippage_pct
+                ) VALUES ($1, $2, 'BUY', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 RETURNING *
             `, [
                 userId,
@@ -147,7 +160,9 @@ const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', 
                 executedBy,
                 aiScore,
                 sector,
-                notes
+                notes,
+                _entryRegime,
+                _slippagePct
             ]);
 
             // Persist buy lot for FIFO accounting

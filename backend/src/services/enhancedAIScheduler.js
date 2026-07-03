@@ -4,6 +4,8 @@ const { query } = require('../config/database');
 const { getGlobalTradingControl } = require('./tradingControlService');
 const redisState = require('./redisStateService');
 const alertService = require('./telegramAlertService');
+const vixMonitor = require('./vixSpikeMonitorService');
+const premarketGapService = require('./premarketGapAlertService');
 
 /**
  * Enhanced AI Trading Scheduler - PostgreSQL Version
@@ -93,7 +95,14 @@ async function runScheduledTrading() {
             isRunning = false;
             return;
         }
-        
+
+        // VIX Spike Monitor — runs every tick during market hours.
+        // Fires Telegram alerts and invalidates regime/ATLAS caches on anomalous moves.
+        // Non-blocking: a VIX fetch failure never stops the trading cycle.
+        vixMonitor.checkVix().catch(err =>
+            console.warn('[Enhanced AI Scheduler] VIX monitor tick failed:', err.message)
+        );
+
         console.log('[Enhanced AI Scheduler] ✓ Market is OPEN - proceeding with trading');
         
         // Get users with AI trading enabled
@@ -643,6 +652,113 @@ async function runMorningReconciliationTick() {
 }
 
 /**
+ * Morning Stop Verification — fires once at 9:31 AM ET Mon-Fri (1 min after open).
+ *
+ * Problem: ARROW EOD cancels unfilled buy orders before close. Even after the fix that
+ * preserves sell-side stops, Alpaca GTC bracket legs can occasionally lapse. This function
+ * runs a safety net: for every open position, ensure at least one active stop/stop_limit
+ * order exists. If one is missing, it places a fresh GTC stop and fires a Telegram alert.
+ */
+let _morningStopVerifyRanDate = null;
+
+async function runMorningStopVerification() {
+    const et    = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const day   = et.getDay();
+    const hour  = et.getHours();
+    const min   = et.getMinutes();
+    const etDate = et.toISOString().slice(0, 10);
+
+    // Mon-Fri only, 09:31-09:44 ET window (just after market open)
+    if (day < 1 || day > 5) return;
+    if (hour !== 9 || min < 31 || min >= 45) return;
+    if (_morningStopVerifyRanDate === etDate) return;
+    _morningStopVerifyRanDate = etDate;
+
+    console.log('[StopVerify] 9:31 AM ET — verifying protective stop orders for all positions');
+    try {
+        const { Alpaca }     = require('@alpacahq/alpaca-trade-api');
+        const { query }      = require('../config/database');
+        const alertService   = require('./alertService');
+        const activeUsers    = await getActiveAIUsers();
+
+        for (const user of activeUsers) {
+            try {
+                const userRow = await query(
+                    `SELECT alpaca_key_id, alpaca_secret_key, alpaca_paper FROM users WHERE id=$1 LIMIT 1`,
+                    [user.id]
+                );
+                if (!userRow.rows[0]) continue;
+                const { alpaca_key_id: keyId, alpaca_secret_key: secretKey, alpaca_paper } = userRow.rows[0];
+                if (!keyId || !secretKey) continue;
+
+                const client = new Alpaca({
+                    keyId, secretKey,
+                    paper: alpaca_paper !== false
+                });
+
+                const [positions, openOrders] = await Promise.all([
+                    client.getPositions(),
+                    client.getOrders({ status: 'open', limit: 200 })
+                ]);
+
+                if (!positions || positions.length === 0) continue;
+
+                // Build set of symbols with active stop protection
+                const protectedSymbols = new Set(
+                    openOrders
+                        .filter(o => o.side === 'sell' &&
+                            (o.type === 'stop' || o.type === 'stop_limit' || o.type === 'trailing_stop'))
+                        .map(o => o.symbol)
+                );
+
+                const riskCfg = await query(
+                    `SELECT stop_loss FROM risk_configs WHERE user_id=$1 LIMIT 1`, [user.id]
+                );
+                const stopLossPct = riskCfg.rows[0]
+                    ? Math.abs(parseFloat(riskCfg.rows[0].stop_loss))
+                    : 0.05;
+
+                const restored = [];
+                for (const pos of positions) {
+                    if (parseFloat(pos.qty) <= 0) continue;
+                    if (protectedSymbols.has(pos.symbol)) continue;
+
+                    // No stop found — place one immediately
+                    const avgEntry = parseFloat(pos.avg_entry_price || pos.avg_cost || 0);
+                    if (avgEntry <= 0) continue;
+                    const stopPrice = parseFloat((avgEntry * (1 - stopLossPct)).toFixed(2));
+                    const qty       = pos.qty;
+
+                    try {
+                        await client.createOrder({
+                            symbol: pos.symbol, qty, side: 'sell',
+                            type: 'stop', time_in_force: 'gtc',
+                            stop_price: String(stopPrice)
+                        });
+                        restored.push(`${pos.symbol} stop@$${stopPrice}`);
+                        console.log(`[StopVerify] Restored missing stop for ${pos.symbol} @ $${stopPrice}`);
+                    } catch (placeErr) {
+                        console.warn(`[StopVerify] Could not place stop for ${pos.symbol}:`, placeErr.message);
+                    }
+                }
+
+                if (restored.length > 0) {
+                    await alertService.sendMessage(user.id,
+                        `⚠️ *Stop-loss gaps detected at open — restored automatically*\n\n` +
+                        restored.map(r => `  ✅ ${r}`).join('\n') + `\n\n` +
+                        `_These stops were missing at market open. Stops are now active._`
+                    );
+                }
+            } catch (userErr) {
+                console.warn(`[StopVerify] Error for user ${user.id}:`, userErr.message);
+            }
+        }
+    } catch (err) {
+        console.error('[StopVerify] Error:', err.message);
+    }
+}
+
+/**
  * Morning Briefing — fires once at 8:00 AM ET Mon-Fri.
  * Sends a Telegram message with all STRONG BUY tickers from the most recent
  * nightly PANTHEON scan so users know what to watch before the open.
@@ -829,6 +945,37 @@ async function runNightlyScanTrigger() {
             console.log(`[NightlyScanTrigger] Run finished: +${r.analyzed} analyzed, ${r.passed} passed, ${r.failed} failed in ${r.elapsedMin}min`);
         })
         .catch(err => console.error('[NightlyScanTrigger] Run error:', err.message));
+}
+
+/**
+ * Pre-Market Gap Briefing — fires once at 8:30 AM ET Mon-Fri.
+ * Checks each STRONG BUY setup from last night's scan against the current
+ * pre-market price. Sends a Telegram message bucketing stocks into:
+ *   CHASE   (gapped >+2% — wait for pullback, bot will skip at entry time)
+ *   VALID   (within −1% to +2% of scan entry — still tradeable)
+ *   BELOW   (gapped down >−1.5% — possible better entry than expected)
+ */
+let _premarketGapRanDate = null;
+
+async function runPremarketGapBriefing() {
+    const et     = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const day    = et.getDay();
+    const hour   = et.getHours();
+    const min    = et.getMinutes();
+    const etDate = et.toISOString().slice(0, 10);
+
+    // Mon-Fri only, 08:30-08:39 ET window
+    if (day < 1 || day > 5) return;
+    if (hour !== 8 || min < 30 || min >= 40) return;
+    if (_premarketGapRanDate === etDate) return;
+    _premarketGapRanDate = etDate;
+
+    console.log('[PremarketGap] 8:30 AM ET — running gap check on tonight setups…');
+    try {
+        await premarketGapService.runPremarketGapAlert();
+    } catch (err) {
+        console.error('[PremarketGap] Error:', err.message);
+    }
 }
 
 /**
@@ -1024,6 +1171,107 @@ async function runSundayGlobalScout() {
 }
 
 /**
+ * Morning Portfolio Digest — fires once at 9:25 AM ET Mon-Fri (5 min before open).
+ * Sends a Telegram summary: equity, cash, open positions with hold age + P/L,
+ * max-hold warnings, and SENTINEL status.  Useful when away from the desk.
+ */
+let _morningDigestRanDate = null;
+const _morningDigestSentChats = new Set();
+
+async function runMorningDigest() {
+    const et    = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const day   = et.getDay();
+    const hour  = et.getHours();
+    const min   = et.getMinutes();
+    const etDate = et.toISOString().slice(0, 10);
+
+    // Mon-Fri only, 09:25-09:34 ET window
+    if (day < 1 || day > 5) return;
+    if (hour !== 9 || min < 25 || min >= 35) return;
+
+    if (_morningDigestRanDate !== etDate) {
+        _morningDigestRanDate = etDate;
+        _morningDigestSentChats.clear();
+    }
+
+    const activeUsers = await getActiveAIUsers();
+    for (const user of activeUsers) {
+        const chatId = user.telegram_chat_id;
+        if (!chatId || _morningDigestSentChats.has(chatId)) continue;
+        _morningDigestSentChats.add(chatId);
+
+        try {
+            const { query: dbQuery } = require('../config/database');
+            const axios = require('axios');
+            const userDb = require('./userDatabaseService');
+            const { checkLiveReadiness } = require('./liveReadinessService');
+
+            // Alpaca account
+            const creds   = await userDb.getUserAlpacaCredentials(user.id);
+            const base    = creds.isPaper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets';
+            const headers = { 'APCA-API-KEY-ID': creds.keyId, 'APCA-API-SECRET-KEY': creds.secretKey };
+
+            const [acctRes, posRes] = await Promise.all([
+                axios.get(`${base}/v2/account`, { headers, timeout: 8000 }),
+                axios.get(`${base}/v2/positions`, { headers, timeout: 8000 }),
+            ]);
+            const acct      = acctRes.data;
+            const positions = posRes.data;
+            const equity    = parseFloat(acct.equity);
+            const cash      = parseFloat(acct.cash);
+            const dayPL     = parseFloat(acct.equity) - parseFloat(acct.last_equity);
+
+            // DB holdings for hold-age
+            const holdRes = await dbQuery(
+                `SELECT symbol, purchase_date, quantity FROM holdings WHERE user_id=$1 AND quantity>0`,
+                [user.id]
+            );
+            const holdMap = new Map(holdRes.rows.map(r => [r.symbol, r.purchase_date]));
+
+            // SENTINEL
+            const readiness = await checkLiveReadiness(String(user.id));
+
+            // Build position lines
+            const posLines = positions
+                .filter(p => parseFloat(p.qty) > 0.0001)
+                .map(p => {
+                    const pl     = (parseFloat(p.unrealized_plpc) * 100).toFixed(2);
+                    const plSign = parseFloat(pl) >= 0 ? '+' : '';
+                    const purchaseDate = holdMap.get(p.symbol);
+                    const holdHrs = purchaseDate
+                        ? Math.round((Date.now() - new Date(purchaseDate).getTime()) / 3600000)
+                        : null;
+                    const holdTag = holdHrs != null ? ` ${holdHrs}h` : '';
+                    const warn    = holdHrs != null && holdHrs >= 168 ? ' ⚠️ MAX-HOLD' : '';
+                    return `  ${plSign}${pl}%${holdTag}${warn} — *${p.symbol}*`;
+                });
+
+            const sentinelLine = readiness.ready
+                ? `✅ SENTINEL clear`
+                : `⛔ SENTINEL blocked: ${readiness.reason}`;
+
+            const dayPLSign = dayPL >= 0 ? '+' : '';
+            const lines = [
+                `📊 *Morning Digest — ${etDate}*`,
+                ``,
+                `💰 Equity: *$${equity.toFixed(2)}*  Cash: $${cash.toFixed(2)}`,
+                `📈 Day P/L: *${dayPLSign}$${dayPL.toFixed(2)}*`,
+                ``,
+                `🗂 Open Positions (${posLines.length}):`,
+                ...(posLines.length > 0 ? posLines : ['  — none —']),
+                ``,
+                sentinelLine,
+            ];
+
+            await alertService.sendTelegramMessage(chatId, lines.join('\n'));
+            console.log(`[MorningDigest] Sent to chat ${chatId} (${etDate})`);
+        } catch (err) {
+            console.error('[MorningDigest] Error sending digest:', err.message);
+        }
+    }
+}
+
+/**
  * Start the scheduler
  */
 function startScheduler() {
@@ -1062,7 +1310,10 @@ function startScheduler() {
         runNightlyScanTrigger();           // nightly universe scan at 16:15 ET (after close)
         runWeeklyParameterHealthCheck();   // Friday 15:45 ET: health check + backtest summary
         runMorningBriefing();              // 8:00 AM ET Mon-Fri: STRONG BUY pre-market alert
+        runPremarketGapBriefing();         // 8:30 AM ET Mon-Fri: gap check on tonight's setups
         runMorningReconciliationTick();    // 9:00 AM ET Mon-Fri: DB vs Alpaca position sync
+        runMorningStopVerification();      // 9:31 AM ET Mon-Fri: ensure every position has an active stop
+        runMorningDigest();                // 9:25 AM ET Mon-Fri: portfolio digest via Telegram
         runSundayGlobalScout();            // 8:00 PM ET Sunday: global markets + Monday preview
     }, CHECK_INTERVAL);
 

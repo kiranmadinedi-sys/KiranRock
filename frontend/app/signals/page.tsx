@@ -20,6 +20,9 @@ interface Ticker {
     riskReward: string | null;
     oracleVerdict: string | null;
     smartMoneyScore: number | null;
+    atrPct: number | null;
+    daysToEarnings: number | null;
+    distFromSma20Pct: number | null;
 }
 
 interface CalibrationBucket {
@@ -542,6 +545,14 @@ export default function SignalsPage() {
     const [viewMode, setViewMode] = useState<'cards' | 'heatmap'>('cards');
     const refreshTimerRef               = useRef<ReturnType<typeof setInterval> | null>(null);
 
+    // Monday Filter state
+    const [timingOpen, setTimingOpen]       = useState(false);
+    const [timingActive, setTimingActive]   = useState(false);
+    const [maxAtrPct, setMaxAtrPct]         = useState(5.0);
+    const [minEarningsDays, setMinEarningsDays] = useState(7);
+    const [maxExtension, setMaxExtension]   = useState(15.0);
+    const [showTop10, setShowTop10]         = useState(false);
+
     const token = typeof window !== 'undefined' ? getAuthToken() : null;
     const base  = getApiBaseUrl();
     const hdrs  = { Authorization: `Bearer ${token}` };
@@ -584,10 +595,21 @@ export default function SignalsPage() {
         return () => { if (refreshTimerRef.current) clearInterval(refreshTimerRef.current); };
     }, [load, selectedDate]);
 
+    // Second-pass timing filter (ATR%, earnings window, breakout extension)
+    const applyTimingFilters = (tickers: Ticker[]) => {
+        if (!timingActive) return tickers;
+        return tickers.filter(t => {
+            if (t.atrPct != null && t.atrPct > maxAtrPct) return false;
+            if (t.daysToEarnings != null && t.daysToEarnings < minEarningsDays) return false;
+            if (t.distFromSma20Pct != null && t.distFromSma20Pct > maxExtension) return false;
+            return true;
+        });
+    };
+
     // Copy tickers to clipboard
     const copyTickers = () => {
         if (!data) return;
-        const visible = filtered(data.tickers);
+        const visible = applyTimingFilters(filtered(data.tickers));
         const text = visible.map(t => t.symbol).join(', ');
         navigator.clipboard.writeText(text).then(() => {
             setCopied(true);
@@ -612,7 +634,7 @@ export default function SignalsPage() {
         });
     };
 
-    const visibleTickers = data ? filtered(data.tickers) : [];
+    const visibleTickers = data ? applyTimingFilters(filtered(data.tickers)) : [];
 
     // Build a lookup: symbol → rescan alert
     const rescanMap = new Map<string, RescanAlert>(
@@ -789,6 +811,102 @@ export default function SignalsPage() {
                             </div>
                         </div>
 
+                        {/* Monday Filter Panel */}
+                        <div className="bg-white dark:bg-gray-900 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
+                            <button
+                                onClick={() => setTimingOpen(o => !o)}
+                                className="w-full px-5 py-3 flex items-center justify-between text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+                            >
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-semibold text-gray-700 dark:text-gray-300">Monday Filter</span>
+                                    {timingActive && (
+                                        <span className="text-[10px] bg-indigo-600 text-white rounded-full px-2 py-0.5 font-bold">Active</span>
+                                    )}
+                                    <span className="text-xs text-gray-400">— ATR%, earnings window, breakout freshness</span>
+                                </div>
+                                <span className="text-gray-400 text-xs">{timingOpen ? '▲ hide' : '▼ show'}</span>
+                            </button>
+                            {timingOpen && (
+                                <div className="px-5 pb-5 border-t border-gray-100 dark:border-gray-800">
+                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mt-4">
+                                        {/* ATR% */}
+                                        <div>
+                                            <div className="flex items-center justify-between mb-1">
+                                                <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Max ATR%</label>
+                                                <span className="text-xs font-mono text-indigo-600 dark:text-indigo-400">{maxAtrPct.toFixed(1)}%</span>
+                                            </div>
+                                            <input type="range" min={0.5} max={8} step={0.5} value={maxAtrPct}
+                                                onChange={e => setMaxAtrPct(Number(e.target.value))}
+                                                className="w-full accent-indigo-600" />
+                                            <div className="flex justify-between text-[10px] text-gray-400 mt-0.5">
+                                                <span>0.5% calm</span><span>8% volatile</span>
+                                            </div>
+                                            <p className="text-[10px] text-gray-400 mt-1.5">Exclude noisy stocks — lower = smoother entries</p>
+                                        </div>
+                                        {/* Earnings window */}
+                                        <div>
+                                            <div className="flex items-center justify-between mb-1">
+                                                <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Min Days to Earnings</label>
+                                                <span className="text-xs font-mono text-indigo-600 dark:text-indigo-400">{minEarningsDays}d</span>
+                                            </div>
+                                            <input type="range" min={0} max={21} step={1} value={minEarningsDays}
+                                                onChange={e => setMinEarningsDays(Number(e.target.value))}
+                                                className="w-full accent-indigo-600" />
+                                            <div className="flex justify-between text-[10px] text-gray-400 mt-0.5">
+                                                <span>0d ignore</span><span>21d very safe</span>
+                                            </div>
+                                            <p className="text-[10px] text-gray-400 mt-1.5">Exclude stocks too close to earnings</p>
+                                        </div>
+                                        {/* Breakout extension */}
+                                        <div>
+                                            <div className="flex items-center justify-between mb-1">
+                                                <label className="text-xs font-semibold text-gray-600 dark:text-gray-400">Max Extension (SMA20)</label>
+                                                <span className="text-xs font-mono text-indigo-600 dark:text-indigo-400">{maxExtension.toFixed(0)}%</span>
+                                            </div>
+                                            <input type="range" min={0} max={30} step={1} value={maxExtension}
+                                                onChange={e => setMaxExtension(Number(e.target.value))}
+                                                className="w-full accent-indigo-600" />
+                                            <div className="flex justify-between text-[10px] text-gray-400 mt-0.5">
+                                                <span>0% tight</span><span>30% extended</span>
+                                            </div>
+                                            <p className="text-[10px] text-gray-400 mt-1.5">% above 20-day SMA — high means old breakout</p>
+                                        </div>
+                                    </div>
+                                    <div className="mt-4 flex items-center justify-between flex-wrap gap-3">
+                                        <label className="flex items-center gap-2 cursor-pointer select-none">
+                                            <input type="checkbox" checked={showTop10}
+                                                onChange={e => setShowTop10(e.target.checked)}
+                                                className="accent-indigo-600 w-4 h-4" />
+                                            <span className="text-sm font-semibold text-gray-700 dark:text-gray-300">Show Top 10 Shortlist</span>
+                                        </label>
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                onClick={() => { setTimingActive(false); setMaxAtrPct(5.0); setMinEarningsDays(7); setMaxExtension(15); setShowTop10(false); }}
+                                                className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+                                            >
+                                                Reset
+                                            </button>
+                                            <button
+                                                onClick={() => setTimingActive(true)}
+                                                className="text-xs px-4 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold transition-colors"
+                                            >
+                                                Apply Filter
+                                            </button>
+                                        </div>
+                                    </div>
+                                    {timingActive && (
+                                        <div className="mt-3 text-xs text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-900/20 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+                                            <span>
+                                                Filter active: ATR ≤ {maxAtrPct.toFixed(1)}% · Earnings ≥ {minEarningsDays}d · Extension ≤ {maxExtension.toFixed(0)}% from SMA20
+                                                {' '}· <span className="font-bold">{visibleTickers.length} stocks pass</span>
+                                            </span>
+                                            <button onClick={() => setTimingActive(false)} className="underline shrink-0 hover:text-indigo-900 dark:hover:text-indigo-100">Turn off</button>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
                         {/* Sector concentration warning */}
                         {topSectorPct >= 50 && topSector && (
                             <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-xl px-5 py-3 flex items-center gap-3">
@@ -807,6 +925,53 @@ export default function SignalsPage() {
                             </div>
                         )}
 
+                        {/* Earnings this week banner */}
+                        {(() => {
+                            const earningsThisWeek = (data.tickers ?? [])
+                                .filter(t => t.daysToEarnings != null && t.daysToEarnings >= 0 && t.daysToEarnings <= 5)
+                                .sort((a, b) => (a.daysToEarnings ?? 99) - (b.daysToEarnings ?? 99));
+                            if (!earningsThisWeek.length) return null;
+                            const tomorrow  = earningsThisWeek.filter(t => t.daysToEarnings === 0 || t.daysToEarnings === 1);
+                            const thisWeek  = earningsThisWeek.filter(t => (t.daysToEarnings ?? 99) >= 2);
+                            return (
+                                <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-xl px-5 py-3">
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <span className="text-base">📅</span>
+                                        <span className="text-sm font-semibold text-amber-800 dark:text-amber-300">
+                                            Earnings this week — {earningsThisWeek.length} stock{earningsThisWeek.length > 1 ? 's' : ''} reporting
+                                        </span>
+                                        <span className="text-xs text-amber-600 dark:text-amber-400">· verify before entering, IV often elevated</span>
+                                    </div>
+                                    {tomorrow.length > 0 && (
+                                        <div className="mb-1.5">
+                                            <span className="text-[10px] font-bold text-red-600 dark:text-red-400 uppercase tracking-wide mr-2">Tomorrow / Today</span>
+                                            <span className="flex flex-wrap gap-1.5 mt-1">
+                                                {tomorrow.map(t => (
+                                                    <span key={t.symbol} className="inline-flex items-center gap-1 text-xs font-mono font-bold bg-red-100 dark:bg-red-900/40 text-red-700 dark:text-red-300 rounded px-2 py-0.5">
+                                                        {t.symbol}
+                                                        <span className="font-normal text-[10px]">{t.daysToEarnings === 0 ? 'today' : '1d'}</span>
+                                                    </span>
+                                                ))}
+                                            </span>
+                                        </div>
+                                    )}
+                                    {thisWeek.length > 0 && (
+                                        <div>
+                                            <span className="text-[10px] font-bold text-amber-600 dark:text-amber-400 uppercase tracking-wide mr-2">This week</span>
+                                            <span className="flex flex-wrap gap-1.5 mt-1">
+                                                {thisWeek.map(t => (
+                                                    <span key={t.symbol} className="inline-flex items-center gap-1 text-xs font-mono font-bold bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300 rounded px-2 py-0.5">
+                                                        {t.symbol}
+                                                        <span className="font-normal text-[10px]">{t.daysToEarnings}d</span>
+                                                    </span>
+                                                ))}
+                                            </span>
+                                        </div>
+                                    )}
+                                </div>
+                            );
+                        })()}
+
                         {/* Ticker view: sector heatmap or grouped cards */}
                         {viewMode === 'heatmap' ? (
                             <SectorHeatmap
@@ -816,6 +981,61 @@ export default function SignalsPage() {
                             />
                         ) : (
                             <>
+                                {/* Top 10 Shortlist */}
+                                {showTop10 && visibleTickers.length > 0 && (
+                                    <div className="bg-gradient-to-br from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20 rounded-xl border border-indigo-200 dark:border-indigo-700 p-5">
+                                        <div className="flex items-center gap-2 mb-4">
+                                            <span className="text-base font-bold text-indigo-900 dark:text-indigo-200">Monday Shortlist</span>
+                                            <span className="text-xs bg-indigo-600 text-white rounded-full px-2 py-0.5 font-semibold">
+                                                Top {Math.min(10, visibleTickers.length)}
+                                            </span>
+                                            {timingActive && (
+                                                <span className="text-xs text-indigo-500 dark:text-indigo-400">
+                                                    — timing-filtered from {data?.tickers.length ?? 0} total
+                                                </span>
+                                            )}
+                                        </div>
+                                        <div className="space-y-2">
+                                            {visibleTickers.slice(0, 10).map((t, i) => (
+                                                <div key={t.symbol} className="flex items-center gap-3 bg-white dark:bg-gray-900 rounded-lg px-4 py-2.5 border border-indigo-100 dark:border-indigo-800">
+                                                    <span className="text-xs font-bold text-indigo-300 dark:text-indigo-600 w-5 shrink-0">{i + 1}</span>
+                                                    <span className="text-sm font-bold text-gray-900 dark:text-white w-14 shrink-0">{t.symbol}</span>
+                                                    <span className={`text-sm font-bold w-8 shrink-0 ${scoreColor(t.aiScore)}`}>{t.aiScore.toFixed(0)}</span>
+                                                    <span className="text-xs text-gray-400 truncate flex-1 hidden sm:block">{t.sector}</span>
+                                                    {t.atrPct != null && (
+                                                        <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded shrink-0 ${t.atrPct <= 2.5 ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' : t.atrPct <= 4 ? 'bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-400' : 'bg-red-50 dark:bg-red-900/20 text-red-600'}`}>
+                                                            ATR {t.atrPct.toFixed(1)}%
+                                                        </span>
+                                                    )}
+                                                    {t.daysToEarnings != null && (
+                                                        <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded shrink-0 ${t.daysToEarnings >= 14 ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' : t.daysToEarnings >= 7 ? 'bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-400' : 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400'}`}>
+                                                            {t.daysToEarnings}d earn
+                                                        </span>
+                                                    )}
+                                                    {t.distFromSma20Pct != null && (
+                                                        <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded shrink-0 hidden sm:inline ${t.distFromSma20Pct <= 5 ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400' : t.distFromSma20Pct <= 12 ? 'bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-400' : 'bg-red-50 dark:bg-red-900/20 text-red-600'}`}>
+                                                            +{t.distFromSma20Pct.toFixed(1)}% SMA20
+                                                        </span>
+                                                    )}
+                                                    {t.smartMoneyScore != null && t.smartMoneyScore > 0.65 && (
+                                                        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded shrink-0 bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400">
+                                                            Insider Buy
+                                                        </span>
+                                                    )}
+                                                    {t.smartMoneyScore != null && t.smartMoneyScore < 0.35 && (
+                                                        <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded shrink-0 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400">
+                                                            Insider Sell
+                                                        </span>
+                                                    )}
+                                                    <span className="text-[10px] bg-gray-100 dark:bg-gray-800 text-gray-500 px-1.5 py-0.5 rounded capitalize shrink-0 hidden md:inline">
+                                                        {(t.setupFamily || 'other').replace(/_/g, ' ')}
+                                                    </span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
                                 {grouped(visibleTickers).map(([setupKey, tickers]) => {
                                     const setup = SETUP_LABELS[setupKey] || { label: setupKey.replace(/_/g, ' '), emoji: '📌', order: 99 };
                                     return (
@@ -861,6 +1081,32 @@ export default function SignalsPage() {
                                                                 <div className="text-[11px] text-gray-500 dark:text-gray-400 leading-tight truncate" title={t.sector}>
                                                                     {t.sector}
                                                                 </div>
+                                                                {/* Timing + insider mini badges */}
+                                                                {(t.atrPct != null || t.daysToEarnings != null ||
+                                                                  (t.smartMoneyScore != null && (t.smartMoneyScore > 0.65 || t.smartMoneyScore < 0.35))) && (
+                                                                    <div className="flex items-center gap-1 flex-wrap mt-0.5">
+                                                                        {t.atrPct != null && (
+                                                                            <span className={`text-[9px] font-mono px-1 py-0.5 rounded leading-none ${t.atrPct <= 2.5 ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400' : t.atrPct <= 4 ? 'bg-yellow-50 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400' : 'bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400'}`}>
+                                                                                {t.atrPct.toFixed(1)}%
+                                                                            </span>
+                                                                        )}
+                                                                        {t.daysToEarnings != null && (
+                                                                            <span className={`text-[9px] font-mono px-1 py-0.5 rounded leading-none ${t.daysToEarnings >= 14 ? 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400' : t.daysToEarnings >= 7 ? 'bg-yellow-50 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400' : 'bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400'}`}>
+                                                                                {t.daysToEarnings}d
+                                                                            </span>
+                                                                        )}
+                                                                        {t.smartMoneyScore != null && t.smartMoneyScore > 0.65 && (
+                                                                            <span className="text-[9px] font-semibold px-1 py-0.5 rounded leading-none bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400">
+                                                                                Insider Buy
+                                                                            </span>
+                                                                        )}
+                                                                        {t.smartMoneyScore != null && t.smartMoneyScore < 0.35 && (
+                                                                            <span className="text-[9px] font-semibold px-1 py-0.5 rounded leading-none bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400">
+                                                                                Insider Sell
+                                                                            </span>
+                                                                        )}
+                                                                    </div>
+                                                                )}
                                                                 {/* Rescan reason snippet */}
                                                                 {rescan && (
                                                                     <div className="text-[10px] text-amber-600 dark:text-amber-400 leading-tight mt-0.5 line-clamp-2">

@@ -20,6 +20,7 @@ const historicalDataService = require('./historicalDataService');
 const { STATIC_STOCK_UNIVERSE } = require('./stockUniverseService');
 
 const dynamicUniverseService = require('./dynamicUniverseService');
+const { runPremarketGapAlert } = require('./premarketGapAlertService');
 
 let schedulerActive         = false;
 let afterCloseJob           = null;
@@ -27,6 +28,7 @@ let eveningJob              = null;
 let nightlyScanJob          = null;
 let morningCatchupJob       = null;
 let premarketJob            = null;
+let gapAlertJob             = null;
 let dynamicUniverseJob      = null;
 let intradayJob             = null;
 let intradayMoverJob        = null;
@@ -35,9 +37,10 @@ let intradayMoverJob        = null;
 const AFTERCLOSE_CRON        = '30 17 * * 1-5'; // 5:30 PM — after NYSE close + 30 min data settle
 const EVENING_CRON           = '0 20 * * 1-5';
 const NIGHTLY_SCAN_CRON      = '30 16 * * 1-5'; // 4:30 PM — dedicated nightly AI scan, runs ~75 min
-const MORNING_CATCHUP_CRON   = '0 8 * * 1-5';  // 8:00 AM — catch-up if prior-night scan was incomplete
+const MORNING_CATCHUP_CRON   = '0 8 * * 1-5';   // 8:00 AM — catch-up if prior-night scan was incomplete
 const PREMARKET_CRON         = '30 7 * * 1-5';
-const DYNAMIC_UNIVERSE_CRON  = '45 8 * * 1-5'; // 8:45 AM — build scan universe before 9:30 open
+const GAP_ALERT_CRON         = '30 8 * * 1-5';  // 8:30 AM — pre-market gap alert (~60 min before open)
+const DYNAMIC_UNIVERSE_CRON  = '45 8 * * 1-5';  // 8:45 AM — build scan universe before 9:30 open
 const INTRADAY_CRON          = '*/5 9-16 * * 1-5'; // every 5 min, 9 AM–4 PM
 // Hourly nudge — refreshIntradayMovers has its own 75-min cooldown, so this just knocks
 const INTRADAY_MOVER_CRON    = '0 10-15 * * 1-5'; // 10 AM, 11, 12, 1, 2, 3 PM ET
@@ -256,6 +259,11 @@ function startAssetUniverseScheduler() {
     nightlyScanJob     = cron.schedule(NIGHTLY_SCAN_CRON,      runNightlyUniverseScanJob,    CRON_TZ);
     morningCatchupJob  = cron.schedule(MORNING_CATCHUP_CRON,   runMorningCatchupScan,        CRON_TZ);
     premarketJob       = cron.schedule(PREMARKET_CRON,         runPremarketRefresh,          CRON_TZ);
+    gapAlertJob        = cron.schedule(GAP_ALERT_CRON,         () => {
+        runPremarketGapAlert().catch(err =>
+            logger.error('[AssetUniverseScheduler] Gap alert failed', { error: err.message })
+        );
+    }, CRON_TZ);
     dynamicUniverseJob = cron.schedule(DYNAMIC_UNIVERSE_CRON,  runDynamicUniverseBuild,      CRON_TZ);
     intradayJob        = cron.schedule(INTRADAY_CRON,          runIntradayDiscovery,         CRON_TZ);
     intradayMoverJob   = cron.schedule(INTRADAY_MOVER_CRON,    runIntradayMoversRefresh,     CRON_TZ);
@@ -266,6 +274,7 @@ function startAssetUniverseScheduler() {
         evening:          EVENING_CRON,
         morningCatchup:   MORNING_CATCHUP_CRON,
         premarket:        PREMARKET_CRON,
+        gapAlert:         GAP_ALERT_CRON,
         dynamicUniverse:  DYNAMIC_UNIVERSE_CRON,
         intraday:         INTRADAY_CRON,
         intradayMovers:   INTRADAY_MOVER_CRON,
@@ -291,9 +300,9 @@ function startAssetUniverseScheduler() {
 
 function stopAssetUniverseScheduler() {
     schedulerActive = false;
-    [afterCloseJob, eveningJob, nightlyScanJob, morningCatchupJob, premarketJob, dynamicUniverseJob, intradayJob, intradayMoverJob]
+    [afterCloseJob, eveningJob, nightlyScanJob, morningCatchupJob, premarketJob, gapAlertJob, dynamicUniverseJob, intradayJob, intradayMoverJob]
         .forEach(j => j?.stop());
-    afterCloseJob = eveningJob = nightlyScanJob = morningCatchupJob = premarketJob = intradayJob = intradayMoverJob = null;
+    afterCloseJob = eveningJob = nightlyScanJob = morningCatchupJob = premarketJob = gapAlertJob = intradayJob = intradayMoverJob = null;
     logger.info('[AssetUniverseScheduler] Stopped');
 }
 

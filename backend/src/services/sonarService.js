@@ -21,6 +21,7 @@
  * The score feeds into PANTHEON Step 12 (±8 pts on the AI score).
  */
 
+const axios            = require('axios');
 const finnhubConnector = require('../connectors/finnhubConnector');
 const secEdgarConnector = require('../connectors/secEdgarConnector');
 const cacheService = require('./cacheService');
@@ -90,17 +91,82 @@ class SonarService {
     }
 
     /**
-     * Try Finnhub first (works on free plan for insider data).
-     * Fall back to SEC EDGAR on null/error.
+     * Source chain: Finnhub (free plan) → Polygon (same SEC data, cleaner API) → SEC EDGAR direct.
+     * First non-empty result wins; every source is caught so one failure doesn't block the others.
      */
     async _fetchInsiderTransactions(symbol) {
+        // 1. Finnhub — works on free plan, fastest
         try {
             const fh = await finnhubConnector.getInsiderTransactions(symbol);
             if (fh && fh.length > 0) return fh;
         } catch { /* fall through */ }
 
-        // SEC EDGAR fallback — free, official, always available
+        // 2. Polygon — same underlying SEC Form 4 data; requires POLYGON_API_KEY
+        try {
+            const pg = await this._fetchViaPolygon(symbol);
+            if (pg && pg.length > 0) return pg;
+        } catch { /* fall through */ }
+
+        // 3. SEC EDGAR direct — free, official, always available
         return secEdgarConnector.getInsiderTransactions(symbol).catch(() => []);
+    }
+
+    /**
+     * Polygon /vX/reference/insiders — Form 4 data via Polygon's cleaned API.
+     * Returns transactions normalised to the same shape as secEdgarConnector so
+     * calculateTransactionScore can consume either source without changes.
+     * Returns null (not []) when unavailable so the chain can try the next source.
+     */
+    async _fetchViaPolygon(symbol) {
+        const key = process.env.POLYGON_API_KEY;
+        if (!key) return null;
+
+        try {
+            const resp = await axios.get('https://api.polygon.io/vX/reference/insiders', {
+                params: { ticker: symbol, limit: 50, apiKey: key },
+                timeout: 8000,
+            });
+
+            const results = resp.data?.results;
+            if (!Array.isArray(results) || results.length === 0) return null;
+
+            const txs = [];
+            for (const insider of results) {
+                const titleRaw = (insider.relationship || '').toLowerCase();
+                const name     = insider.name || '';
+                const isOfficer  = titleRaw.includes('officer');
+                const isDirector = titleRaw.includes('director');
+
+                for (const tx of (insider.transactions || [])) {
+                    const code   = (tx.type || '').toUpperCase();
+                    const shares = Math.abs(Number(tx.shares) || 0);
+                    const value  = Math.abs(Number(tx.value)  || 0);
+                    if (!code || shares === 0) continue;
+
+                    txs.push({
+                        change:          (code === 'S' || code === 'D') ? -shares : shares,
+                        price:           shares > 0 ? value / shares : 0,
+                        transactionCode: code,
+                        filingDate:      tx.filing_date || tx.date || null,
+                        insiderName:     name,
+                        insiderTitle:    insider.relationship || '',
+                        isOfficer,
+                        isDirector,
+                        dollarValue:     value,
+                    });
+                }
+            }
+
+            logger.debug(`[SONAR/Polygon] ${symbol}: ${txs.length} insider txs`);
+            return txs.length > 0 ? txs : null;
+
+        } catch (err) {
+            // 403 = not on this Polygon plan tier — silent fall-through to SEC EDGAR
+            if (err.response?.status !== 403) {
+                logger.debug(`[SONAR/Polygon] ${symbol}: ${err.message}`);
+            }
+            return null;
+        }
     }
 
     // ── Institutional ownership ───────────────────────────────────────────────

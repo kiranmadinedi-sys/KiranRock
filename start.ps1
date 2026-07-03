@@ -5,6 +5,11 @@
 #
 #  Worker process owns ALL schedulers (all auto-start, no manual steps):
 #    - Enhanced AI trading bot (IST pre-market pipeline)
+#      • Gap gate: skips entries if live price >+2% above scan entry
+#      • Extension guard: skips if stock >10% above SMA20
+#      • VIX position sizing: ELEVATED→75%, HIGH→50% of normal size
+#      • Regime exit scaling: BULL×1.25, BEAR×0.80 on profit targets
+#    - Pre-market gap briefing (8:30 AM ET Mon–Fri — Telegram alert)
 #    - Options scanner + autonomous options bot
 #    - Asset universe refresh (nightly Alpaca sync)
 #    - EOD bar ingestion (6:30 PM ET daily — Polygon grouped bars)
@@ -449,7 +454,7 @@ Write-Host "   Alpaca Paper Trading | PostgreSQL" -ForegroundColor Cyan
 Write-Host "===============================================" -ForegroundColor Cyan
 Write-Host ""
 
-# ── Kill previous PM2 logs terminal window if PID file exists ───────────────
+# ── Kill previous PM2 logs terminal windows if PID files exist ──────────────
 $backendLogsPidFile = Join-Path $env:TEMP 'kiranrock_backend_logs.pid'
 if (Test-Path $backendLogsPidFile) {
     $oldLogsPid = Get-Content $backendLogsPidFile -ErrorAction SilentlyContinue
@@ -459,18 +464,40 @@ if (Test-Path $backendLogsPidFile) {
     Remove-Item $backendLogsPidFile -Force -ErrorAction SilentlyContinue
 }
 
-# ── PM2: stop managed apps BEFORE the general kill loop ─────────────────────
-# If PM2 is running kiranrock-backend, killing its node process directly causes
-# PM2 to immediately restart it, making the 3-pass kill loop fight PM2 forever.
-# Stopping via pm2 first prevents that race.
+$workerLogsPidFile = Join-Path $env:TEMP 'kiranrock_worker_logs.pid'
+if (Test-Path $workerLogsPidFile) {
+    $oldWorkerLogsPid = Get-Content $workerLogsPidFile -ErrorAction SilentlyContinue
+    if ($oldWorkerLogsPid -match '^\d+$') {
+        Stop-Process -Id ([int]$oldWorkerLogsPid) -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item $workerLogsPidFile -Force -ErrorAction SilentlyContinue
+}
+
+# ── PM2: kill daemon + wipe stale sockets BEFORE the general kill loop ───────
+# Killing the daemon prevents PM2 from restarting kiranrock-backend the moment
+# we kill its node process, which would make the 3-pass kill loop fight PM2.
+# Removing rpc.sock / pub.sock prevents the "connect EPERM \\.\pipe\rpc.sock"
+# error that occurs when a previous daemon crashed without cleaning its handles.
 $pm2CmdEarly = Get-Command pm2 -ErrorAction SilentlyContinue
 if ($pm2CmdEarly) {
-    $pm2Apps = (& pm2 list 2>$null) -join "`n"
-    if ($pm2Apps -match 'kiranrock-backend') {
-        Write-Host "Stopping PM2 app kiranrock-backend before shutdown scan..." -ForegroundColor DarkGray
-        & pm2 stop kiranrock-backend 2>$null | Out-Null
-        Start-Sleep -Seconds 1
-    }
+    Write-Host "Killing PM2 daemon and cleaning stale sockets..." -ForegroundColor DarkGray
+    # Kill the PM2 God daemon node.exe directly first.
+    # pm2 kill uses the named pipe to send a shutdown signal — if the pipe is already
+    # in EPERM state (crashed daemon), pm2 kill itself fails and the pipe handle stays
+    # open. Killing the node.exe process directly releases the pipe handle immediately.
+    Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'God' } |
+        ForEach-Object {
+            Write-Host "      Killing PM2 God daemon (PID $($_.ProcessId))..." -ForegroundColor DarkGray
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+    Start-Sleep -Milliseconds 800
+    try { & pm2 kill 2>$null | Out-Null } catch {}
+    $pm2Home = "$env:USERPROFILE\.pm2"
+    Remove-Item "$pm2Home\rpc.sock" -Force -ErrorAction SilentlyContinue
+    Remove-Item "$pm2Home\pub.sock" -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+    Write-Host "      PM2 daemon stopped, sockets cleared." -ForegroundColor DarkGray
 }
 
 # ── Kill whatever is holding port 3001 right now ────────────────────────────
@@ -684,19 +711,13 @@ if ($null -eq $pm2Cmd) {
     $backendProcess.Id | Out-File -FilePath $backendPidFile -Encoding ascii -Force
     Write-Host "      Backend terminal PID: $($backendProcess.Id)" -ForegroundColor DarkGray
 } else {
-    # If PM2 has a saved kiranrock-backend entry, restart it; otherwise start fresh
-    $pm2ListText = (& pm2 list 2>$null) -join "`n"
-    $existingApp = $pm2ListText -match 'kiranrock-backend'
-    if ($existingApp) {
-        & pm2 restart kiranrock-backend --update-env | Out-Null
-        Write-Host "      PM2 restarted kiranrock-backend (PID managed by PM2)" -ForegroundColor Green
-    } else {
-        Push-Location $backendPath
-        & pm2 start src/app.js --name kiranrock-backend --node-args="--max-old-space-size=512" --cwd $backendPath | Out-Null
-        & pm2 save | Out-Null
-        Pop-Location
-        Write-Host "      PM2 started kiranrock-backend fresh (PID managed by PM2)" -ForegroundColor Green
-    }
+    # PM2 daemon was killed and sockets cleared in the early cleanup block above,
+    # so always do a fresh start here — no restart possible on a dead daemon.
+    Push-Location $backendPath
+    & pm2 start src/app.js --name kiranrock-backend --node-args="--max-old-space-size=512" --cwd $backendPath | Out-Null
+    & pm2 save | Out-Null
+    Pop-Location
+    Write-Host "      PM2 started kiranrock-backend fresh (PID managed by PM2)" -ForegroundColor Green
     $pm2PidText = (& pm2 pid kiranrock-backend 2>$null) -join ''
     $backendPidValue = if ($pm2PidText -match '^\d+$') { [int]$pm2PidText } else { 0 }
     $backendProcess = [pscustomobject]@{ Id = $backendPidValue }
@@ -704,11 +725,20 @@ if ($null -eq $pm2Cmd) {
     Get-Process -Name powershell -ErrorAction SilentlyContinue | Where-Object {
         try { $_.MainWindowTitle -match 'kiranrock-backend' } catch { $false }
     } | Stop-Process -Force -ErrorAction SilentlyContinue
-    # Open a visible terminal streaming PM2 backend logs
-    $pm2LogsCmd = "Write-Host '=== BACKEND LOGS (PM2: kiranrock-backend) ===' -ForegroundColor Cyan; Write-Host ''; pm2 logs kiranrock-backend --lines 50"
+    # Stream PM2 backend logs via Get-Content -Wait (tail -f equivalent).
+    # Using pm2 logs here would require IPC via the same named pipe that causes EPERM —
+    # reading the log file directly needs no IPC at all and is always reliable on Windows.
+    $pm2OutLog = "$env:USERPROFILE\.pm2\logs\kiranrock-backend-out.log"
+    $pm2ErrLog = "$env:USERPROFILE\.pm2\logs\kiranrock-backend-error.log"
+    $pm2LogsCmd  = "Write-Host '=== BACKEND LOGS (PM2: kiranrock-backend) ===' -ForegroundColor Cyan; "
+    $pm2LogsCmd += "Write-Host ''; "
+    $pm2LogsCmd += "`$out = '$pm2OutLog'; "
+    $pm2LogsCmd += "`$err = '$pm2ErrLog'; "
+    $pm2LogsCmd += "`$w = 0; while (-not (Test-Path `$out) -and `$w -lt 20) { Start-Sleep 1; `$w++ }; "
+    $pm2LogsCmd += "if (Test-Path `$out) { Get-Content `$out -Wait -Tail 80 } else { Write-Host 'Log file not yet created.' -ForegroundColor Yellow; Start-Sleep 5; Get-Content `$out -Wait -Tail 80 }"
     $pm2LogsProcess = Start-Process powershell -ArgumentList "-NoExit", "-Command", $pm2LogsCmd -PassThru
     $pm2LogsProcess.Id | Out-File -FilePath $backendLogsPidFile -Encoding ascii -Force
-    Write-Host "      Backend logs window opened (streaming via PM2, PID: $($pm2LogsProcess.Id))" -ForegroundColor DarkGray
+    Write-Host "      Backend logs window opened (streaming log file directly, PID: $($pm2LogsProcess.Id))" -ForegroundColor DarkGray
 }
 
 Write-Host "      Waiting 10s for backend to initialize..." -ForegroundColor Gray
@@ -725,7 +755,7 @@ Write-Host ""
 # ----------------------------------------------------------------
 #  Worker — schedulers, leader election, Telegram reports (own terminal)
 # ----------------------------------------------------------------
-Write-Host "[2/4] Starting Worker process (schedulers + reports)..." -ForegroundColor Cyan
+Write-Host "[2/4] Starting Worker process (schedulers + reports) via PM2..." -ForegroundColor Cyan
 Write-Host "      Enhanced AI | Options | EOD Bar Ingestion (6:30 PM ET) | Asset Universe" -ForegroundColor Gray
 Write-Host "      Telegram Reports | News Monitoring | Trailing Stops | Market Monitor" -ForegroundColor Gray
 Write-Host "      System Health Monitor (5-min checks + Telegram alerts)" -ForegroundColor Gray
@@ -737,8 +767,9 @@ foreach ($proc in $staleWorkers) {
     Write-Host "      Killing stale worker Node process (PID $($proc.ProcessId))..." -ForegroundColor DarkGray
     Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
 }
+if ($staleWorkers.Count -gt 0) { Start-Sleep -Seconds 1 }
 
-# Also close the old worker PowerShell terminal window if we saved its PID last run
+# Close the old worker PowerShell terminal window if we saved its PID last run
 $workerPidFile = Join-Path $env:TEMP 'kiranrock_worker.pid'
 if (Test-Path $workerPidFile) {
     $oldWorkerPid = Get-Content $workerPidFile -ErrorAction SilentlyContinue
@@ -748,20 +779,47 @@ if (Test-Path $workerPidFile) {
     Remove-Item $workerPidFile -Force -ErrorAction SilentlyContinue
 }
 
-$workerCommand  = "Set-Location -Path $backendPathLiteral; "
-$workerCommand += "`$env:TELEGRAM_BOT_TOKEN = $telegramBotTokenLiteral; "
-$workerCommand += "`$env:TELEGRAM_CHAT_ID   = $telegramChatIdLiteral; "
-$workerCommand += "`$env:EMAIL_USER         = $emailUserLiteral; "
-$workerCommand += "`$env:EMAIL_PASSWORD     = $emailPasswordLiteral; "
-$workerCommand += "`$env:NODE_ENV           = 'development'; "
-$workerCommand += "Write-Host ''; "
-$workerCommand += "Write-Host '=== WORKER (schedulers + reports) ===' -ForegroundColor Yellow; "
-$workerCommand += "Write-Host ''; "
-$workerCommand += "npm run start:worker"
-$workerProcess = Start-Process powershell -ArgumentList "-NoExit", "-Command", $workerCommand -PassThru
-# Save PID so next run can close this window cleanly
-$workerProcess.Id | Out-File -FilePath $workerPidFile -Encoding ascii -Force
-Write-Host "      Worker terminal PID: $($workerProcess.Id)" -ForegroundColor DarkGray
+if ($null -eq $pm2Cmd) {
+    # PM2 not available — fall back to plain PowerShell terminal (no auto-restart)
+    Write-Host "      PM2 not found — falling back to raw npm run start:worker (no auto-restart)" -ForegroundColor Yellow
+    $workerCommand  = "Set-Location -Path $backendPathLiteral; "
+    $workerCommand += "`$env:TELEGRAM_BOT_TOKEN = $telegramBotTokenLiteral; "
+    $workerCommand += "`$env:TELEGRAM_CHAT_ID   = $telegramChatIdLiteral; "
+    $workerCommand += "`$env:EMAIL_USER         = $emailUserLiteral; "
+    $workerCommand += "`$env:EMAIL_PASSWORD     = $emailPasswordLiteral; "
+    $workerCommand += "`$env:NODE_ENV           = 'development'; "
+    $workerCommand += "Write-Host ''; "
+    $workerCommand += "Write-Host '=== WORKER (schedulers + reports) ===' -ForegroundColor Yellow; "
+    $workerCommand += "Write-Host ''; "
+    $workerCommand += "npm run start:worker"
+    $workerProcess = Start-Process powershell -ArgumentList "-NoExit", "-Command", $workerCommand -PassThru
+    $workerProcess.Id | Out-File -FilePath $workerPidFile -Encoding ascii -Force
+    Write-Host "      Worker terminal PID: $($workerProcess.Id)" -ForegroundColor DarkGray
+} else {
+    # PM2: auto-restarts on crash, logs persisted to ~/.pm2/logs/
+    Push-Location $backendPath
+    & pm2 start src/worker.js --name kiranrock-worker --node-args="--max-old-space-size=512" --cwd $backendPath | Out-Null
+    & pm2 save | Out-Null
+    Pop-Location
+    Write-Host "      PM2 started kiranrock-worker (auto-restart on crash enabled)" -ForegroundColor Green
+    $pm2WorkerPidText = (& pm2 pid kiranrock-worker 2>$null) -join ''
+    $workerPidValue   = if ($pm2WorkerPidText -match '^\d+$') { [int]$pm2WorkerPidText } else { 0 }
+    $workerProcess    = [pscustomobject]@{ Id = $workerPidValue }
+    # Close any stale worker log windows from a previous run
+    Get-Process -Name powershell -ErrorAction SilentlyContinue | Where-Object {
+        try { $_.MainWindowTitle -match 'kiranrock-worker' } catch { $false }
+    } | Stop-Process -Force -ErrorAction SilentlyContinue
+    # Stream worker PM2 logs in a separate window
+    $pm2WorkerOutLog = "$env:USERPROFILE\.pm2\logs\kiranrock-worker-out.log"
+    $workerLogsCmd  = "Write-Host '=== WORKER LOGS (PM2: kiranrock-worker) ===' -ForegroundColor Yellow; "
+    $workerLogsCmd += "Write-Host ''; "
+    $workerLogsCmd += "`$out = '$pm2WorkerOutLog'; "
+    $workerLogsCmd += "`$w = 0; while (-not (Test-Path `$out) -and `$w -lt 20) { Start-Sleep 1; `$w++ }; "
+    $workerLogsCmd += "if (Test-Path `$out) { Get-Content `$out -Wait -Tail 80 } else { Write-Host 'Log file not yet created.' -ForegroundColor Yellow; Start-Sleep 5; Get-Content `$out -Wait -Tail 80 }"
+    $workerLogsProcess = Start-Process powershell -ArgumentList "-NoExit", "-Command", $workerLogsCmd -PassThru
+    $workerLogsProcess.Id | Out-File -FilePath $workerLogsPidFile -Encoding ascii -Force
+    Write-Host "      Worker logs window opened (PID: $($workerLogsProcess.Id))" -ForegroundColor DarkGray
+}
 Write-Host ""
 
 # ----------------------------------------------------------------
@@ -907,7 +965,7 @@ Write-Host "   EOD:      bars ingested nightly at 6:30 PM ET (worker cron, no ma
 Write-Host "   Signals:  one startup real-delivery pass in separate terminal" -ForegroundColor White
 Write-Host "   Health:   http://localhost:3001/health" -ForegroundColor White
 $cfPid = (Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue | Select-Object -First 1).Id
-Write-Host "   PIDs:     backend=$($backendProcess.Id) (PM2) | worker=$($workerProcess.Id) | delivery=$($signalDeliveryProcess.Id) | frontend=$($frontendProcess.Id) | tunnel=$cfPid" -ForegroundColor White
+Write-Host "   PIDs:     backend=$($backendProcess.Id) (PM2) | worker=$($workerProcess.Id) (PM2) | delivery=$($signalDeliveryProcess.Id) | frontend=$($frontendProcess.Id) | tunnel=$cfPid" -ForegroundColor White
 Write-Host "-----------------------------------------------" -ForegroundColor Green
 Write-Host "   Telegram: @KiranTradePro_bot" -ForegroundColor White
 Write-Host "   Reports:  Mon-Fri 7:00 AM (predictions) + 4:15 PM (AI bot summary) | Sun 8 AM (weekly buy list) + 9 AM (weekly recap)" -ForegroundColor White

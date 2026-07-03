@@ -52,6 +52,7 @@ const redditAltDataService      = require('./redditAltDataService');
 const prophetService            = require('./prophetService');
 const { detectOraclePatterns }  = require('./patternDetectionService');
 const sageService               = require('./sageService');
+const vixMonitor                = require('./vixSpikeMonitorService');
 const scoreCalibratorService    = require('./scoreCalibratorService');
 const oracleService             = require('./oracleService');
 const visionService             = require('./visionService');
@@ -260,12 +261,12 @@ const DEFAULT_RISK_CONFIG = {
     maxPortfolioRisk: 0.60,       // Max 60% invested (40% cash reserve)
 
     // Entry/Exit rules
-    minBuyScore: 85,              // Quality floor: 85+ required; DB per-user value overrides this default
-    stopLoss: -0.07,              // Hard stop at -7% from entry
-    trailingStopPercent: 0.07,    // Base trailing stop — overridden dynamically by getDynamicTrailingStop()
-    takeProfitPercent: 0.20,      // Swing: full exit at 20% gain (was 35% — lock in wins sooner on small account)
-    partialTakeProfitPercent: 0.12, // Swing: first 50% exit at 12% gain (was 22%)
-    earlyPartialProfitPercent: 0.08, // Swing: break-even floor triggered at 8% gain (was 15%)
+    minBuyScore: 88,              // Quality floor: 88+ required; DB per-user value overrides this default
+    stopLoss: -0.05,              // Hard stop at -5% from entry (was -7% — tightened 2026-07-02)
+    trailingStopPercent: 0.06,    // Base trailing stop — overridden dynamically by getDynamicTrailingStop()
+    takeProfitPercent: 0.20,      // Swing: full exit at 20% gain
+    partialTakeProfitPercent: 0.12, // Swing: first 50% exit at 12% gain (was 8% — raised 2026-07-02)
+    earlyPartialProfitPercent: 0.08, // Swing: break-even floor triggered at 8% gain
 
     // Risk limits
     maxOpenPositions: 4,          // Max 4 concurrent positions (was 8 — scale-appropriate for <$10K account)
@@ -278,11 +279,12 @@ const DEFAULT_RISK_CONFIG = {
 
     // Diversification
     maxSectorAllocation: 0.20,    // Default fallback cap for unlisted sectors
-    maxPositionsPerSector: 2,     // PANTHEON: max 2 positions per sector (count)
+    maxPositionsPerSector: 1,     // PANTHEON: max 1 position per sector — prevents mass stop-outs when one sector pulls back
     maxGrossExposurePct: 0.75,    // PANTHEON: max 75% of portfolio in open positions
     maxPortfolioBeta: 1.5,        // PANTHEON: halt new buys if weighted beta > 1.5
     dailyLossLimit: -300,         // Stop automation after $300 daily loss (was $1,000 — scale-appropriate)
     maxOrderNotional: 500,        // Hard cap per order: $500 (was $5,000 — prevents runaway buys)
+    maxRiskPerTrade: 15,          // Risk-based sizing: cap so no trade risks more than $15 (0.3% of $5K)
     emergencyStopEnabled: false,
     preferredSectors: ['Technology', 'Healthcare', 'Financials', 'Consumer']
 };
@@ -306,7 +308,7 @@ const SECTOR_TRADE_PROFILES = {
         targetMult: 4.0,    // ATR × 4.0 — big momentum moves justify wider targets
         minScore:   65,
         minVolume:  500000, // liquid names only (high-beta micro-caps are noise)
-        maxStopPct: 0.10    // hard cap: never risk more than 10% below entry on any single name
+        maxStopPct: 0.05    // hard cap: stop never more than 5% below entry; was 0.07 (7%) → reduced after data showed even 7% produced large losses when stocks gap through stops
     },
     DEFENSIVE: {
         name: 'DEFENSIVE',
@@ -315,7 +317,7 @@ const SECTOR_TRADE_PROFILES = {
         targetMult: 2.0,    // ATR × 2.0 — limited momentum upside
         minScore:   78,     // high bar → effectively opt-out of momentum scanner
         minVolume:  150000, // utilities naturally trade lower volume
-        maxStopPct: 0.06
+        maxStopPct: 0.05    // hard cap: 5% max stop; was 0.055
     },
     STANDARD: {
         name: 'STANDARD',
@@ -324,7 +326,7 @@ const SECTOR_TRADE_PROFILES = {
         targetMult: 3.0,
         minScore:   65,
         minVolume:  200000,
-        maxStopPct: 0.08
+        maxStopPct: 0.05    // hard cap: 5% max stop; was 0.07
     }
 };
 
@@ -388,6 +390,7 @@ async function getUserRiskConfig(userId) {
                 maxSectorAllocation: parseFloat(dbConfig.max_sector_allocation),
                 dailyLossLimit: parseFloat(dbConfig.daily_loss_limit),
                 maxOrderNotional: parseFloat(dbConfig.max_order_notional),
+                maxRiskPerTrade: dbConfig.max_risk_per_trade != null ? parseFloat(dbConfig.max_risk_per_trade) : DEFAULT_RISK_CONFIG.maxRiskPerTrade,
                 maxGrossExposurePct: parseFloat(dbConfig.max_gross_exposure_pct ?? 0.75),
                 emergencyStopEnabled: dbConfig.emergency_stop_enabled === true
             };
@@ -1986,9 +1989,14 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         const stopMult   = tradeProfile.stopMult   * vixAtrScale;
         const targetMult = tradeProfile.targetMult * vixAtrScale;
         const rawStop      = price - (atr * stopMult);
-        // Cap stop distance so a high-ATR stock never risks more than maxStopPct below entry.
-        // Preserves ATR geometry for normal volatility; only kicks in for outlier ATR stocks.
-        const maxStopPct   = tradeProfile.maxStopPct || 0.10;
+        // ATR-adjusted stop cap: low-vol stocks (ATR% < 1%) don't need 5% breathing room —
+        // holding a financial to -5% is dead money when its daily range is only 0.5%.
+        // Cap their stop at 2×ATR% (min 2%). High-vol stocks keep the configured 5% max;
+        // their position size is already smaller via the Kelly+ATR sizing formula.
+        const _atrPct      = price > 0 ? atr / price : 0;
+        const maxStopPct   = (_atrPct > 0 && _atrPct < 0.01)
+            ? Math.max(_atrPct * 2.0, 0.02)
+            : (tradeProfile.maxStopPct || 0.05);
         const stopFloor    = price * (1 - maxStopPct);
         const stopPrice    = Math.max(rawStop, stopFloor);
         const distToHigh   = week52High > price ? week52High - price : atr * targetMult;
@@ -2488,9 +2496,21 @@ async function executeAutonomousTrading(userId) {
             });
         }
 
-        // Apply market regime overrides — regime caps risk and raises bar in bear/neutral markets
+        // Apply market regime overrides — regime caps risk and raises bar in bear/neutral markets.
+        // Adaptive score: user base (minBuyScore) adjusted by regime quality.
+        // BULL_STRONG → -3 pts (allow more trades in a rising market)
+        // BULL_MILD   → -1 pt
+        // NEUTRAL     → +2 pts (be more selective when direction is unclear)
+        // CHOPPY      → +5 pts
+        // BEAR        → +6 pts (only high-conviction trades in downtrend)
+        // PANIC       → +10 pts (near-impossible bar — exits only)
+        const REGIME_SCORE_OFFSET = {
+            'BULL_STRONG': -3, 'BULL_MILD': -1,
+            'NEUTRAL': 2, 'CHOPPY': 5, 'BEAR': 6, 'PANIC': 10
+        };
+        const _regimeOffset    = REGIME_SCORE_OFFSET[regime.regimeType || regime.regime] ?? 0;
         const effectiveMaxRisk = Math.min(riskConfig.maxPortfolioRisk, regime.maxRisk);
-        const effectiveMinScore = Math.max(riskConfig.minBuyScore, regime.minBuyScore);
+        const effectiveMinScore = Math.max(0, Math.min(100, riskConfig.minBuyScore + _regimeOffset));
         const healthMultiplier = await getSystemHealthMultiplier(userId);
         const effectiveSizeMultiplier = (regime.positionSizeMultiplier || 1.0) * healthMultiplier;
 
@@ -2606,34 +2626,6 @@ async function executeAutonomousTrading(userId) {
             return { success: false, message: 'Daily loss limit reached' };
         }
 
-        // SENTINEL live-readiness gate — blocks new buys if any critical safety metric
-        // is non-zero (duplicate orders, order storms, stop-loss failures, recon errors,
-        // pending orders > 24h).  Checked once per session using a 3-day look-back so
-        // yesterday's incidents still block today's trading until manually cleared.
-        // Fail-open: if the DB check itself errors, the gate passes and DB circuit
-        // breakers (daily loss, drawdown) still provide protection.
-        {
-            const { checkLiveReadiness } = require('./liveReadinessService');
-            const readiness = await checkLiveReadiness(String(userId));
-            if (!readiness.ready) {
-                logger.error('[SENTINEL] Live-readiness gate blocked trading session', {
-                    userId, reason: readiness.reason, blockers: readiness.blockers
-                });
-                try {
-                    await alertService.sendMessage(userId,
-                        `⛔ *SENTINEL: Trading Blocked*\n` +
-                        `_${readiness.reason}_\n\n` +
-                        Object.entries(readiness.blockers)
-                            .filter(([, v]) => v > 0)
-                            .map(([k, v]) => `  • ${k}: ${v}`)
-                            .join('\n') +
-                        `\n\n_Resolve the issue then restart the bot._`
-                    );
-                } catch (_) {}
-                return { success: false, message: `SENTINEL gate: ${readiness.reason}` };
-            }
-        }
-
         // Check consecutive loss streak circuit breaker
         const streakBreaker = await checkLossStreakBreaker(userId);
         if (streakBreaker.halt) {
@@ -2665,6 +2657,50 @@ async function executeAutonomousTrading(userId) {
         const weeklyHalt = await checkWeeklyLossLimit(userId, totalPortfolioValue, sessionRiskConfig);
         if (weeklyHalt) {
             return { success: false, message: 'Weekly loss limit reached — trading halted until Monday' };
+        }
+
+        // Daily circuit breaker: halt new entries if EITHER condition fires:
+        //   1. Stop-loss count ≥ DAILY_STOP_HALT (default 3) — signals hostile tape
+        //   2. Realized losses today ≥ DAILY_LOSS_HALT_PCT % of equity (default 2%) — protects capital
+        // Either condition alone is sufficient; whichever fires first triggers the halt.
+        try {
+            const _todayStopRes = await query(`
+                SELECT
+                    COUNT(*) FILTER (WHERE pnl < 0)  AS cnt,
+                    COALESCE(SUM(pnl) FILTER (WHERE pnl < 0), 0) AS loss_sum
+                FROM trades
+                WHERE user_id = $1
+                  AND action = 'SELL'
+                  AND trade_date >= CURRENT_DATE
+            `, [userId]);
+            const _todayStops   = parseInt(_todayStopRes.rows[0]?.cnt || 0);
+            const _todayLossUsd = Math.abs(parseFloat(_todayStopRes.rows[0]?.loss_sum || 0));
+            const _stopHaltThreshold = parseInt(process.env.DAILY_STOP_HALT || '3');
+            const _lossHaltPct  = parseFloat(process.env.DAILY_LOSS_HALT_PCT || '2.0');
+
+            // Condition 2: loss % of equity
+            let _lossHaltFired = false;
+            let _lossHaltMsg   = '';
+            if (_lossHaltPct > 0 && accountTotalValue > 0) {
+                const _todayLossPct = (_todayLossUsd / accountTotalValue) * 100;
+                if (_todayLossPct >= _lossHaltPct) {
+                    _lossHaltFired = true;
+                    _lossHaltMsg   = `Daily loss limit: -$${_todayLossUsd.toFixed(2)} (${_todayLossPct.toFixed(2)}% of equity, limit ${_lossHaltPct}%)`;
+                }
+            }
+
+            if (_todayStops >= _stopHaltThreshold || _lossHaltFired) {
+                const reason = _lossHaltFired ? _lossHaltMsg : `${_todayStops} stop-losses fired today (limit: ${_stopHaltThreshold})`;
+                logger.warn('[DailyCircuitBreaker] Halting new entries', { userId, reason });
+                await alertService.sendMessage(userId,
+                    `⚠️ *Daily Circuit Breaker Triggered*\n${reason}\n` +
+                    `_No new entries until tomorrow — managing open positions only._`
+                ).catch(() => {});
+                await manageExistingPositions(userId);
+                return { success: false, message: `Daily circuit breaker: ${reason}` };
+            }
+        } catch (_stopBreakerErr) {
+            logger.warn('[DailyCircuitBreaker] Check failed — proceeding', { err: _stopBreakerErr.message });
         }
 
         // SHIELD — FRED macro gate: raise minBuyScore or halt new buys in severe bear macro
@@ -2770,6 +2806,21 @@ async function executeAutonomousTrading(userId) {
             await alertService.alertTradingStarted(userId, availableBalance, currentHoldings.length);
         }
 
+        // VIX Spike Monitor — halt immediately on EXTREME/PANIC spike (fast moves
+        // may not yet be reflected in the polled vixLevel from this cycle)
+        const spikeState = vixMonitor.getSpikeState();
+        if (spikeState.spikeActive && (spikeState.level === 'EXTREME' || spikeState.level === 'PANIC')) {
+            logger.warn('[VIXSpike] Halting new entries — spike active', {
+                userId, level: spikeState.level,
+                vix: spikeState.vixAtSpike, pctChange: spikeState.pctChange?.toFixed(1)
+            });
+            await manageExistingPositions(userId);
+            return {
+                success: false,
+                message: `VIX spike halt (${spikeState.level} — VIX ${spikeState.vixAtSpike?.toFixed(1)}, ${spikeState.pctChange >= 0 ? '+' : ''}${spikeState.pctChange?.toFixed(1)}% move)`
+            };
+        }
+
         // Check VIX - reduce trading if too volatile
         if (vixLevel > sessionRiskConfig.maxVix) {
             logger.warn('VIX too high, skipping new purchases', { userId, vixLevel: vixLevel.toFixed(2) });
@@ -2781,6 +2832,31 @@ async function executeAutonomousTrading(userId) {
 
         // Manage existing positions (stop-loss, take-profit, trailing stops)
         await manageExistingPositions(userId);
+
+        // SENTINEL live-readiness gate — blocks new buys only; exits above have already run.
+        // Checked once per session (30-day look-back). Fail-open if DB errors so daily loss
+        // and drawdown circuit breakers still protect.
+        {
+            const { checkLiveReadiness } = require('./liveReadinessService');
+            const readiness = await checkLiveReadiness(String(userId));
+            if (!readiness.ready) {
+                logger.error('[SENTINEL] Live-readiness gate blocked new buys (exits already managed)', {
+                    userId, reason: readiness.reason, blockers: readiness.blockers
+                });
+                try {
+                    await alertService.sendMessage(userId,
+                        `⛔ *SENTINEL: New Buys Blocked*\n` +
+                        `_${readiness.reason}_\n\n` +
+                        Object.entries(readiness.blockers)
+                            .filter(([, v]) => v > 0)
+                            .map(([k, v]) => `  • ${k}: ${v}`)
+                            .join('\n') +
+                        `\n\n_Exits still managed. Resolve the issue then restart the bot._`
+                    );
+                } catch (_) {}
+                return { success: false, message: `SENTINEL gate: ${readiness.reason}` };
+            }
+        }
 
         // Calculate how much we can invest
         const maxInvestment = totalPortfolioValue * sessionRiskConfig.maxPortfolioRisk;
@@ -2855,6 +2931,37 @@ async function executeAutonomousTrading(userId) {
             return { success: true, message: 'No high-conviction opportunities — exits managed' };
         }
 
+        // SPY broad-market filter: no new longs when SPY is below its 20-day SMA.
+        // When the market is in a downtrend, even high-scoring setups fail at ~3× the normal rate
+        // (evidenced by Jun 16 mass stop-out — 6 positions stopped on the same broad-market down day).
+        try {
+            const _spyBars = await _dataGuardTimeout(dataProvider.getBars('SPY', '1d', 25));
+            if (_spyBars && _spyBars.length >= 20) {
+                const _spyCloses = _spyBars.map(b => b.close || b.c || 0).filter(c => c > 0);
+                if (_spyCloses.length >= 20) {
+                    const _spySma20 = _spyCloses.slice(-20).reduce((s, c) => s + c, 0) / 20;
+                    const _spyPrice = _spyCloses[_spyCloses.length - 1];
+                    if (_spyPrice < _spySma20) {
+                        logger.info('[SPYGate] Broad market below 20-day SMA — blocking new longs, managing exits only', {
+                            userId,
+                            spyPrice: _spyPrice.toFixed(2),
+                            spySma20: _spySma20.toFixed(2),
+                            deviation: ((_spyPrice - _spySma20) / _spySma20 * 100).toFixed(2) + '%'
+                        });
+                        _bumpGateStat(userId, 'spyGate');
+                        await manageExistingPositions(userId);
+                        return { success: true, message: 'SPY below 20-day SMA — broad market weak, exits managed only' };
+                    }
+                    logger.debug('[SPYGate] Broad market healthy', {
+                        userId, spyPrice: _spyPrice.toFixed(2), spySma20: _spySma20.toFixed(2),
+                        pctAbove: ((_spyPrice - _spySma20) / _spySma20 * 100).toFixed(2) + '%'
+                    });
+                }
+            }
+        } catch (_spyErr) {
+            logger.debug('[SPYGate] SPY check unavailable — proceeding without gate', { error: _spyErr.message });
+        }
+
         // Build sector allocations (dollar) and counts (position count) for diversification.
         // Also track industry-group counts to prevent trucking/semis/airline clusters.
         const sectorAllocations = {};
@@ -2918,12 +3025,15 @@ async function executeAutonomousTrading(userId) {
         if (_REGIME_POS_CAP[_regimeUpper] !== undefined) {
             regimeNewPosCap = _REGIME_POS_CAP[_regimeUpper];
         } else {
-            // Bull / unknown: breadth-adaptive cap — at least 2, at most maxOpenPositions
+            // Bull / unknown: breadth-adaptive cap — at least 2, hard-capped at 3 per cycle.
+            // Previously used highConvictionCount which could unlock 10+ entries on a day with
+            // many STRONG BUY signals — exactly what caused the Jun 16 mass-entry incident.
             regimeNewPosCap = Math.min(
+                3,                               // hard cap: max 3 new positions per cycle even in BULL
                 sessionRiskConfig.maxOpenPositions,
                 Math.max(2, highConvictionCount)
             );
-            logger.info('[RegimeCap] Bull regime — breadth-adaptive position cap', {
+            logger.info('[RegimeCap] Bull regime — position cap', {
                 userId, regime: regime.regime, highConvictionCount, regimeNewPosCap
             });
         }
@@ -2949,7 +3059,25 @@ async function executeAutonomousTrading(userId) {
             }
         } catch (_) {}
 
-        for (const opportunity of newOpportunities) {
+        // Late-day entry gate — no NEW positions after 2:30 PM ET.
+        // The last 90 minutes before close have elevated volatility, wider spreads, and
+        // momentum reversals that hit stops the same afternoon. Managing existing positions
+        // continues normally; only new entries are blocked.
+        const _etParts = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hour12: false
+        }).formatToParts(new Date());
+        const _etHour   = parseInt(_etParts.find(p => p.type === 'hour').value,   10);
+        const _etMinute = parseInt(_etParts.find(p => p.type === 'minute').value, 10);
+        const _etMinTotal = _etHour * 60 + _etMinute;
+        const _lateDayBlock = _etMinTotal >= (14 * 60 + 30); // 2:30 PM ET = 870 minutes
+
+        if (_lateDayBlock && newOpportunities.length > 0) {
+            logger.info('[LateDay] Blocking new entries after 2:30 PM ET — managing existing positions only', {
+                userId, etTime: `${_etHour}:${String(_etMinute).padStart(2, '0')}`
+            });
+        }
+
+        for (const opportunity of (_lateDayBlock ? [] : newOpportunities)) {
             if (trades.length >= sessionRiskConfig.maxDailyTrades) break;
             if (remainingCapital < 100) break;
             if (currentHoldings.length + trades.length >= regimeMaxPositions) break;
@@ -3156,13 +3284,44 @@ async function executeAutonomousTrading(userId) {
                 }
             }
 
-            // Jones R/R gate — PANTHEON STEP 6: minimum 2:1 reward-to-risk required.
-            // Block if riskReward is missing, 0, or below the minimum — no pass-through on undefined.
-            if (!opportunity.riskReward || opportunity.riskReward < (riskConfig.minRiskRewardRatio || 2.0)) {
+            // Jones R/R gate — PANTHEON STEP 6: minimum 2.5:1 reward-to-risk required.
+            // Raised from 2.0 → 2.5: tighter selectivity means only setups with genuine
+            // upside-to-downside room pass. Borderline 2.1:1 setups now filtered out.
+            if (!opportunity.riskReward || opportunity.riskReward < (riskConfig.minRiskRewardRatio || 2.5)) {
                 logger.info('Skipping stock — R/R below minimum', {
                     userId, symbol: opportunity.symbol,
                     riskReward: opportunity.riskReward,
-                    required:   riskConfig.minRiskRewardRatio || 2.0
+                    required:   riskConfig.minRiskRewardRatio || 2.5
+                });
+                continue;
+            }
+
+            // ── Gap gate — don't chase setups that already ran overnight / pre-market ──
+            // Compare the live price against the scan entry price. If current price
+            // is >2% above the entry level from the scan, skip — buying here means
+            // entering near the day's high with no cushion left before the target.
+            try {
+                const _liveQuote = await dataProvider.getQuote(opportunity.symbol);
+                const _livePrice = _liveQuote?.price ?? _liveQuote?.close ?? 0;
+                const _scanEntry = opportunity.entry || opportunity.price || 0;
+                if (_livePrice > 0 && _scanEntry > 0 && _livePrice > _scanEntry * 1.02) {
+                    const _gapPct = ((_livePrice / _scanEntry - 1) * 100).toFixed(1);
+                    logger.info('[GapGate] Skipping — price already +' + _gapPct + '% above scan entry', {
+                        userId, symbol: opportunity.symbol,
+                        scanEntry: _scanEntry.toFixed(2), livePrice: _livePrice.toFixed(2)
+                    });
+                    continue;
+                }
+            } catch (_gapErr) { /* quote unavailable — proceed without gate */ }
+
+            // ── Extension guard — don't enter stocks >10% above their 20-day SMA ──
+            // Stocks this extended have high mean-reversion risk: any weakness pulls them
+            // back hard. The score already penalises extension but doesn't hard-block it.
+            const _distSma20 = opportunity.distFromSma20Pct;
+            if (_distSma20 != null && _distSma20 > 10) {
+                logger.info('[ExtensionGuard] Skipping — stock overextended above SMA20', {
+                    userId, symbol: opportunity.symbol,
+                    distFromSma20Pct: _distSma20.toFixed(1) + '% (limit: 10%)'
                 });
                 continue;
             }
@@ -3183,7 +3342,7 @@ async function executeAutonomousTrading(userId) {
             const sectorPositionCount = (sectorCounts[sector] || 0) + trades.filter(t => (t.sector || 'Unknown') === sector).length;
             const sectorAllocPct     = SECTOR_MAX_ALLOCATION[sector] ?? sessionRiskConfig.maxSectorAllocation;
             const sectorLimit        = totalPortfolioValue * sectorAllocPct;
-            const maxPositionsPerSector = sessionRiskConfig.maxPositionsPerSector || 2;
+            const maxPositionsPerSector = sessionRiskConfig.maxPositionsPerSector ?? 1;
 
             if (sectorPositionCount >= maxPositionsPerSector) {
                 logger.info('Skipping stock — sector position count at limit', {
@@ -3284,6 +3443,21 @@ async function executeAutonomousTrading(userId) {
             const combinedMultiplier = effectiveSizeMultiplier * streakBreaker.multiplier * expectancySizeMultiplier * scoreTierMultiplier * signalClarityMultiplier;
             let positionFraction = kellyFraction * combinedMultiplier;
 
+            // VIX-level size reduction — EXTREME/PANIC already blocks entries upstream.
+            // ELEVATED (VIX ~20–25): trade at 75% size — fear is rising, reduce exposure.
+            // HIGH     (VIX ~25–30): trade at 50% size — meaningful fear, half position only.
+            const _spikeState = vixMonitor.getSpikeState();
+            const _vixSizeMult = (_spikeState.spikeActive && _spikeState.level === 'HIGH')     ? 0.50
+                               : (_spikeState.spikeActive && _spikeState.level === 'ELEVATED') ? 0.75
+                               : 1.0;
+            if (_vixSizeMult < 1.0) {
+                logger.info('[VIXSize] Reducing position size — VIX level ' + _spikeState.level, {
+                    userId, symbol: opportunity.symbol,
+                    vixAtSpike: _spikeState.vixAtSpike, multiplier: _vixSizeMult
+                });
+                positionFraction *= _vixSizeMult;
+            }
+
             // Calculate the dollar amount for the position.
             let positionSize = accountTotalValue * positionFraction;
 
@@ -3373,6 +3547,25 @@ async function executeAutonomousTrading(userId) {
                     before: positionSize.toFixed(2), after: confCap.toFixed(2)
                 });
                 positionSize = confCap;
+            }
+
+            // Risk-based position cap: ensure no single trade risks more than maxRiskPerTrade dollars.
+            // Formula: maxPositionSize = maxRiskPerTrade / stopLossPct
+            // E.g. $15 risk ÷ 5% stop = $300 max position → worst case -$15 per trade.
+            // This prevents a low-price stock (many shares) from risking far more than a high-price stock.
+            const _riskPerTrade = Math.min(
+                riskConfig.maxRiskPerTrade || 15,
+                accountTotalValue * 0.003  // floor: 0.3% of portfolio
+            );
+            const _stopDist = Math.abs(riskConfig.stopLoss || 0.05);
+            const _riskBasedCap = _riskPerTrade / _stopDist;
+            if (positionSize > _riskBasedCap) {
+                logger.info('[RiskCap] Position size capped by max-risk-per-trade', {
+                    userId, symbol: opportunity.symbol,
+                    before: positionSize.toFixed(2), after: _riskBasedCap.toFixed(2),
+                    riskPerTrade: _riskPerTrade.toFixed(2), stopDist: (_stopDist * 100).toFixed(1) + '%'
+                });
+                positionSize = _riskBasedCap;
             }
 
             // Hard minimum notional: sector-cap or multi-factor shrinkage can reduce positionSize to
@@ -3683,33 +3876,44 @@ async function executeAutonomousTrading(userId) {
 }
 
 /**
- * Tiered trailing stop based on how far a position has gained.
- * Higher gains → tighter trail to lock in profits.
- * If ATR is provided, ensures the trail is never narrower than 2×ATR (prevents
- * normal daily volatility from triggering the stop).
+ * Multi-stage trailing stop with breakeven floor.
+ *
+ * Stages (ChatGPT recommendation 2026-07-02):
+ *   +2%  → activate breakeven floor (stop can never fall below entry price)
+ *   +4%  → 6% trailing distance
+ *   +8%  → 7% trailing distance
+ *   +12% → 8% trailing distance
+ *   +15% → 10% trailing distance
+ *   +25% → 12% trailing distance (lock-in core profit)
+ *
+ * ATR floor: never narrower than 3×ATR to survive normal daily moves.
  *
  * @param {number} changePercent  — current gain as decimal (e.g. 0.12 = 12%)
  * @param {number|null} atr       — average true range in dollars
  * @param {number|null} peakPrice — current peak price (used to convert ATR to %)
- * @returns {number}              — trailing distance as decimal (e.g. 0.08 = 8%)
+ * @returns {{ trailPct: number, useBreakevenFloor: boolean }}
  */
 function getDynamicTrailingStop(changePercent, atr, peakPrice) {
-    // Wider trails let winners run — growth stocks (OKTA, DDOG, PANW) need room to breathe.
-    // At 5-10% gain the old 7% trail was too tight: normal intraday swings of 5-7%
-    // were stopping out positions that resumed their uptrend the same day.
-    let trailPct;
-    if      (changePercent >= 0.25) trailPct = 0.15; // ≥ 25% gain → 15% trail (lock in core)
-    else if (changePercent >= 0.15) trailPct = 0.12; // ≥ 15% gain → 12% trail
-    else if (changePercent >= 0.08) trailPct = 0.10; // ≥  8% gain → 10% trail
-    else if (changePercent >= 0.04) trailPct = 0.08; // ≥  4% gain → 8% trail
-    else                            trailPct = 0.07; // < 4% gain  → 7% trail (early position noise)
+    // Once up 2%, stop floor = entry price — position can never become a loser.
+    const useBreakevenFloor = changePercent >= 0.02;
 
-    // ATR safety floor: never tighter than 3×ATR — growth stocks regularly move 2×ATR intraday
+    // Swing-trading: stops get TIGHTER as gains grow — the more profit, the less we give back.
+    // Based on ChatGPT recommendation 2026-07-02: invert the tightening direction for swing mode.
+    let trailPct;
+    if      (changePercent >= 0.20) trailPct = 0.020; // ≥ 20% → 2.0% trail (nearly locked in)
+    else if (changePercent >= 0.15) trailPct = 0.025; // ≥ 15% → 2.5% trail
+    else if (changePercent >= 0.10) trailPct = 0.030; // ≥ 10% → 3.0% trail
+    else if (changePercent >= 0.05) trailPct = 0.040; // ≥  5% → 4.0% trail
+    else if (changePercent >= 0.02) trailPct = 0.050; // ≥  2% → 5.0% trail (breakeven stage)
+    else                            trailPct = 0.055; // < 2% → 5.5% trail (fresh position)
+
+    // ATR safety floor: never tighter than 1.5×ATR (volatility-adjusted).
+    // Prevents stopping out on normal daily moves for high-ATR stocks.
     if (atr && atr > 0 && peakPrice && peakPrice > 0) {
-        const atrFloor = (atr * 3) / peakPrice;
+        const atrFloor = (atr * 1.5) / peakPrice;
         trailPct = Math.max(trailPct, atrFloor);
     }
-    return trailPct;
+    return { trailPct, useBreakevenFloor };
 }
 
 /**
@@ -3733,12 +3937,16 @@ async function manageExistingPositions(userId) {
             const rt           = (regimeData?.regimeType || regimeData?.regime || 'NEUTRAL').toUpperCase();
             const isBearish    = rt.includes('BEAR') || rt === 'RISK_OFF' || rt === 'PANIC';
             const isBullish    = rt.includes('BULL') || rt === 'RISK_ON' || rt === 'TRENDING_UP';
-            // Swing trade exit thresholds — wider than intraday because we hold 3+ days.
-            // Bear regime tightens targets to protect capital; Bull gives maximum room.
+            // Swing trade exit thresholds — regime scales around the DB config values.
+            // Bull: +25% headroom vs neutral to let winners run slightly more.
+            // Bear: tighten to 80% of neutral to lock in gains before reversal.
+            const _ep = riskConfig.earlyPartialProfitPercent || 0.08;
+            const _mp = riskConfig.partialTakeProfitPercent  || 0.12;
+            const _fe = riskConfig.takeProfitPercent          || 0.20;
             exitThresholds = {
-                earlyPartial: isBearish ? 0.10 : isBullish ? 0.18 : (riskConfig.earlyPartialProfitPercent || 0.15),
-                mainPartial:  isBearish ? 0.18 : isBullish ? 0.28 : riskConfig.partialTakeProfitPercent,
-                fullExit:     isBearish ? 0.28 : isBullish ? 0.45 : riskConfig.takeProfitPercent,
+                earlyPartial: isBearish ? Math.max(0.05, _ep * 0.80) : isBullish ? _ep * 1.25 : _ep,
+                mainPartial:  isBearish ? Math.max(0.08, _mp * 0.80) : isBullish ? _mp * 1.25 : _mp,
+                fullExit:     isBearish ? Math.max(0.15, _fe * 0.80) : isBullish ? _fe * 1.25 : _fe,
                 regime: rt,
             };
             if (isBearish || isBullish) {
@@ -3784,6 +3992,72 @@ async function manageExistingPositions(userId) {
             try { await alertService.alertDistressModeRecovery(userId); } catch (_) {}
         }
 
+        // ── Per-cycle stop verification & stale-stop repair ──────────────────────
+        // Fetch ALL broker open orders once (one API call) then check each position.
+        // Self-healing: if stop is missing → place it. If stop price is stale (>0.2%
+        // off expected) → cancel + replace. Catches API failures, manual cancellations,
+        // partial fills, rejected orders, broker outages.
+        try {
+            const brokerOrders = await brokerService.getOpenOrders(userId).catch(() => []);
+            // Build map: symbol → active stop order(s) on the sell side
+            const stopOrderMap = new Map(); // symbol → { orderId, stopPrice }
+            for (const o of brokerOrders) {
+                if (o.side === 'sell' && (o.type === 'stop' || o.type === 'stop_limit' || o.type === 'trailing_stop')) {
+                    stopOrderMap.set(o.symbol, { orderId: o.id, stopPrice: parseFloat(o.stop_price || o.limit_price || 0) });
+                }
+            }
+
+            const stopLossPct = Math.abs(effectiveStopLoss);
+            for (const h of holdings) {
+                if (!h.average_price || parseFloat(h.quantity) <= 0) continue;
+                const sym      = h.symbol;
+                const entry    = parseFloat(h.average_price);
+                const peak     = parseFloat(h.peak_price || entry);
+                const hChange  = entry > 0 ? (peak - entry) / entry : 0;
+                const { trailPct, useBreakevenFloor } = getDynamicTrailingStop(hChange, h.atr, peak);
+                let expectedStop = peak * (1 - trailPct);
+                if (useBreakevenFloor) expectedStop = Math.max(expectedStop, entry);
+                // ATR floor: stop can never be tighter than 1.5×ATR from entry
+                if (h.atr && h.atr > 0 && entry > 0) {
+                    const atrFloor = entry - 1.5 * h.atr;
+                    expectedStop = Math.min(expectedStop, atrFloor); // don't let stop exceed entry by violating ATR floor
+                }
+                expectedStop = parseFloat(Math.max(expectedStop, entry * (1 - stopLossPct)).toFixed(2));
+
+                const existing = stopOrderMap.get(sym);
+                const qty = String(parseFloat(h.quantity));
+
+                if (!existing) {
+                    // MISSING stop — place one immediately
+                    try {
+                        await brokerService.placeStopOrder(userId, sym, qty, expectedStop);
+                        logger.warn('[StopRepair] Missing stop — placed new GTC stop', { userId, sym, expectedStop, qty });
+                        await alertService.sendMessage(userId,
+                            `🛡️ *Stop Repaired* — ${sym}\nStop was missing; placed GTC stop @ $${expectedStop.toFixed(2)}`
+                        );
+                    } catch (placeErr) {
+                        logger.error('[StopRepair] Failed to place stop', { userId, sym, err: placeErr.message });
+                    }
+                } else if (existing.stopPrice > 0) {
+                    // STALE stop — check if price diverged >0.2% from expected
+                    const drift = Math.abs(existing.stopPrice - expectedStop) / expectedStop;
+                    if (drift > 0.002) {
+                        try {
+                            await brokerService.cancelOrder(userId, existing.orderId);
+                            await brokerService.placeStopOrder(userId, sym, qty, expectedStop);
+                            logger.info('[StopRepair] Stale stop updated', {
+                                userId, sym, was: existing.stopPrice, now: expectedStop, drift: (drift * 100).toFixed(2) + '%'
+                            });
+                        } catch (updateErr) {
+                            logger.warn('[StopRepair] Stop update failed', { userId, sym, err: updateErr.message });
+                        }
+                    }
+                }
+            }
+        } catch (_stopRepairErr) {
+            logger.warn('[StopRepair] Error during stop verification — cycle will retry', { err: _stopRepairErr.message });
+        }
+
         for (const holding of holdings) {
             // Race-condition guard: skip if a sell for this holding is already in-flight
             const sellKey = `${userId}:${holding.symbol}`;
@@ -3827,9 +4101,14 @@ async function manageExistingPositions(userId) {
                     holding.peak_price = currentPrice;
                 }
 
-                // Dynamic tiered trailing stop (ATR-aware)
-                const dynamicTrailPct  = getDynamicTrailingStop(changePercent, holding.atr, holding.peak_price);
-                const trailingStopPrice = holding.peak_price * (1 - dynamicTrailPct);
+                // Multi-stage trailing stop with breakeven floor (ATR-aware).
+                // Once position is up ≥2%, the stop floor locks at entry price — no loser from a winner.
+                const { trailPct: dynamicTrailPct, useBreakevenFloor } =
+                    getDynamicTrailingStop(changePercent, holding.atr, holding.peak_price);
+                let trailingStopPrice = holding.peak_price * (1 - dynamicTrailPct);
+                if (useBreakevenFloor && purchasePrice > 0) {
+                    trailingStopPrice = Math.max(trailingStopPrice, purchasePrice);
+                }
 
                 let shouldSell = false;
                 let isHardStop = false; // used to insert stop-loss cooldown
@@ -3926,12 +4205,32 @@ async function manageExistingPositions(userId) {
                 // Tightened from 20d → 7d based on trade data: 5-day holds averaged +8-10%
                 // while 18-20 day holds averaged only +1-6%. Time-limiting frees capital
                 // for fresh high-conviction setups and improves Sharpe by cutting dead money.
+                //
+                // Partial exit rule: if the winner is >5% and not yet partially exited, sell
+                // only 50% to lock gains — the remaining half trails with getDynamicTrailingStop.
+                // Weak winners (gain 0–5%) or already-partial positions exit fully at 7 days.
                 else if (holdAgeHrs >= 168 && changePercent > 0) {
                     shouldSell = true;
                     const holdDays = Math.round(holdAgeHrs / 24);
-                    reason = `Swing max-hold: ${holdDays}d held (limit 7d) — closing to redeploy capital [gain: +${(changePercent * 100).toFixed(2)}%]`;
-                    logger.info('[SwingExit] Max-hold reached', { userId, symbol: holding.symbol, holdDays, gainPct: (changePercent * 100).toFixed(2) });
-                    pendingAlert = () => alertService.sendMessage(userId, `⏰ *Swing Max-Hold Exit*\n${holding.symbol}: held ${holdDays} days | +${(changePercent * 100).toFixed(2)}% | Releasing capital for new signals`);
+                    const halfQty  = Math.floor(holding.quantity / 2);
+                    if (changePercent > 0.05 && !holding.partial_profit_taken && halfQty >= 1) {
+                        sellQuantity = halfQty;
+                        reason = `Swing max-hold partial: ${holdDays}d — locking 50% at +${(changePercent * 100).toFixed(2)}%, trailing remainder`;
+                        await holdingsDb.markPartialProfitTaken(userId, holding.symbol, true);
+                        logger.info('[SwingExit] Max-hold partial — strong winner, trailing remaining half', {
+                            userId, symbol: holding.symbol, holdDays,
+                            gainPct: (changePercent * 100).toFixed(2), halfQty
+                        });
+                        pendingAlert = () => alertService.sendMessage(userId,
+                            `⏰ *Swing Max-Hold Partial*\n${holding.symbol}: ${holdDays}d | +${(changePercent * 100).toFixed(2)}% | Selling 50%, trailing the rest`
+                        );
+                    } else {
+                        reason = `Swing max-hold: ${holdDays}d held (limit 7d) — closing to redeploy capital [gain: +${(changePercent * 100).toFixed(2)}%]`;
+                        logger.info('[SwingExit] Max-hold full exit', { userId, symbol: holding.symbol, holdDays, gainPct: (changePercent * 100).toFixed(2) });
+                        pendingAlert = () => alertService.sendMessage(userId,
+                            `⏰ *Swing Max-Hold Exit*\n${holding.symbol}: held ${holdDays} days | +${(changePercent * 100).toFixed(2)}% | Releasing capital for new signals`
+                        );
+                    }
                 }
 
                 // ── Slow Mover Eject (5+ days, gain < 2%) ──────────────────────────────
@@ -4094,7 +4393,8 @@ async function manageExistingPositions(userId) {
                             : reason.startsWith('Take-profit')                          ? 'take_profit'
                             : reason.startsWith('Break-even')                           ? 'break_even'
                             : reason.startsWith('Pre-earnings')                         ? 'pre_earnings_exit'
-                            : reason.startsWith('Swing max-hold')                       ? 'max_hold_time'
+                            : reason.startsWith('Swing max-hold partial')               ? 'max_hold_partial'
+                    : reason.startsWith('Swing max-hold')                       ? 'max_hold_time'
                             : reason.startsWith('Slow mover')                           ? 'slow_mover'
                             : 'other';
 

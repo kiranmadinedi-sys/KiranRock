@@ -40,7 +40,7 @@ async function logOrderState(idempotencyKey, userId, symbol, state, previousStat
                 previousState || null,
                 meta.broker        || null,
                 meta.brokerOrderId || null,
-                meta.quantity      || null,
+                meta.quantity != null ? parseFloat(meta.quantity) : null,
                 meta.price         || null,
                 JSON.stringify(meta.extra || {})
             ]
@@ -194,6 +194,8 @@ const simulatedBroker = (() => {
 
     // Simulated broker has no concept of open orders — always returns empty
     async function getOpenOrders() { return []; }
+    async function placeStopOrder() { return null; }
+    async function cancelOrder() { return null; }
 
     // Simulated broker: check DB holdings as a proxy for "has position"
     async function getPosition(userId, symbol) {
@@ -206,7 +208,7 @@ const simulatedBroker = (() => {
         } catch { return null; }
     }
 
-    return { buyMarket, buyBracket, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, name: 'Simulated (Paper DB)' };
+    return { buyMarket, buyBracket, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, placeStopOrder, cancelOrder, name: 'Simulated (Paper DB)' };
 })();
 
 // ─── ALPACA BROKER ────────────────────────────────────────────────────────────
@@ -563,6 +565,31 @@ const alpacaBroker = (() => {
 
         const { client, isPaper } = await getClientForUser(userId);
 
+        // Cancel any open orders for this symbol before selling — stop-loss orders lock
+        // all shares (held_for_orders = qty) and cause Alpaca to reject new sell orders
+        // with error 40310000 ("insufficient qty available").
+        // Use raw REST API (not SDK) to avoid parameter-format differences between SDK versions.
+        try {
+            const axios = require('axios');
+            const creds = await userDb.getUserAlpacaCredentials(userId);
+            const baseUrl = creds.isPaper ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets';
+            const headers = { 'APCA-API-KEY-ID': creds.keyId, 'APCA-API-SECRET-KEY': creds.secretKey };
+            const { data: openOrders } = await axios.get(
+                `${baseUrl}/v2/orders?status=open&symbols=${encodeURIComponent(symbol)}&limit=50`,
+                { headers }
+            );
+            for (const o of openOrders) {
+                await axios.delete(`${baseUrl}/v2/orders/${o.id}`, { headers }).catch(() => {});
+                logger.info('[Broker:Alpaca] Cancelled open order before sell', { symbol, orderId: o.id, type: o.type, status: o.status });
+            }
+            if (openOrders.length > 0) {
+                // Brief pause for Alpaca to release the held shares
+                await new Promise(r => setTimeout(r, 2000));
+            }
+        } catch (cancelErr) {
+            logger.warn('[Broker:Alpaca] Could not cancel open orders before sell', { symbol, err: cancelErr.message });
+        }
+
         logger.info('[Broker:Alpaca] Submitting SELL order', { symbol, quantity, paper: isPaper });
 
         // PANTHEON: limit orders only — never market orders.
@@ -571,18 +598,28 @@ const alpacaBroker = (() => {
         const sellQuote = await dataProvider.getQuote(symbol).catch(() => null);
         const sellPrice = parseFloat(((sellQuote?.price || 0) * 0.995).toFixed(2));
 
+        let order;
+        try {
+            order = await client.createOrder({
+                symbol,
+                qty:           quantity,
+                side:          'sell',
+                type:          sellPrice > 0 ? 'limit' : 'market',
+                ...(sellPrice > 0 ? { limit_price: sellPrice } : {}),
+                time_in_force: 'day'
+            });
+        } catch (orderErr) {
+            await logOrderState(idemKey, userId, symbol, 'FAILED', 'CREATED', {
+                broker: isPaper ? 'alpaca-paper' : 'alpaca-live',
+                quantity, price: sellPrice,
+                extra: { error: orderErr.message }
+            });
+            throw orderErr;
+        }
+
         await logOrderState(idemKey, userId, symbol, 'SUBMITTED', 'CREATED', {
             broker: isPaper ? 'alpaca-paper' : 'alpaca-live',
             quantity, price: sellPrice
-        });
-
-        const order = await client.createOrder({
-            symbol,
-            qty:           quantity,
-            side:          'sell',
-            type:          sellPrice > 0 ? 'limit' : 'market',
-            ...(sellPrice > 0 ? { limit_price: sellPrice } : {}),
-            time_in_force: 'day'
         });
 
         const filled = await waitForFill(client, order.id, 15000);
@@ -680,15 +717,29 @@ const alpacaBroker = (() => {
     async function getOpenOrders(userId, symbol) {
         try {
             const { client } = await getClientForUser(userId);
-            // Fetch all open orders and filter client-side — the `symbols` parameter in the
-            // Alpaca SDK is unreliable (may return all orders regardless of the filter).
             const all = await client.getOrders({ status: 'open', limit: 200 });
-            const sym = (symbol || '').toUpperCase();
+            // When no symbol given, return ALL open orders (used by stop-repair scan).
+            if (!symbol) return all || [];
+            const sym = symbol.toUpperCase();
             return (all || []).filter(o => (o.symbol || '').toUpperCase() === sym);
         } catch (err) {
             logger.warn('[Broker:Alpaca] getOpenOrders failed', { symbol, err: err.message });
             return [];
         }
+    }
+
+    async function placeStopOrder(userId, symbol, qty, stopPrice) {
+        const { client } = await getClientForUser(userId);
+        return client.createOrder({
+            symbol, qty: String(qty), side: 'sell',
+            type: 'stop', time_in_force: 'gtc',
+            stop_price: String(parseFloat(stopPrice).toFixed(2))
+        });
+    }
+
+    async function cancelOrder(userId, orderId) {
+        const { client } = await getClientForUser(userId);
+        return client.cancelOrder(orderId);
     }
 
     // Returns the Alpaca position object for symbol, or null if none held.
@@ -709,7 +760,46 @@ const alpacaBroker = (() => {
         }
     }
 
-    return { buyMarket, buyBracket, buyFractional, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, name: 'Alpaca Markets' };
+    /**
+     * Fetch total deposits and withdrawals directly from Alpaca account activities.
+     * Activity types:
+     *   CSD  = cash deposit  (live accounts — ACH, wire)
+     *   CSW  = cash withdrawal (live accounts)
+     *   JNLC = journal credit  (paper accounts — initial seed and top-ups)
+     *   JNLS = journal debit   (paper accounts)
+     * Returns { totalDeposited, totalWithdrawn } in USD.
+     */
+    async function getNetDeposits(userId) {
+        const { client } = await getClientForUser(userId);
+        let totalDeposited = 0;
+        let totalWithdrawn = 0;
+
+        // Fetch all four types; each may return empty array if account never had that activity
+        const depositTypes    = ['CSD', 'JNLC'];
+        const withdrawalTypes = ['CSW', 'JNLS'];
+
+        for (const activityType of [...depositTypes, ...withdrawalTypes]) {
+            try {
+                const activities = await client.getAccountActivities({ activityType });
+                for (const a of (activities || [])) {
+                    const amount = Math.abs(parseFloat(a.net_amount || a.amount || 0));
+                    if (amount <= 0) continue;
+                    if (depositTypes.includes(activityType))    totalDeposited += amount;
+                    if (withdrawalTypes.includes(activityType)) totalWithdrawn += amount;
+                }
+            } catch (err) {
+                // Some activity types may not exist on this plan tier — silent skip
+                logger.debug(`[Broker:Alpaca] getNetDeposits skipping ${activityType}: ${err.message}`);
+            }
+        }
+
+        logger.info('[Broker:Alpaca] Net deposits synced from Alpaca activities', {
+            userId, totalDeposited, totalWithdrawn
+        });
+        return { totalDeposited, totalWithdrawn };
+    }
+
+    return { buyMarket, buyBracket, buyFractional, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, getNetDeposits, placeStopOrder, cancelOrder, name: 'Alpaca Markets' };
 })();
 
 // ─── ACTIVE BROKER SELECTION ─────────────────────────────────────────────────
@@ -820,10 +910,21 @@ module.exports = {
 
                 const openOrders = await alpacaClient.getOrders({ status: 'open', limit: 100 });
                 for (const order of openOrders) {
+                    // NEVER cancel protective sell-side orders (stop-loss, trailing stop, take-profit).
+                    // Canceling stops leaves positions naked overnight — a gap-down can wipe months of gains.
+                    // Only cancel unfilled BUY orders that will become stale after market close.
+                    const isSellSide = order.side === 'sell';
+                    const isStopType = order.type === 'stop' || order.type === 'stop_limit' || order.type === 'trailing_stop';
+                    if (isSellSide || isStopType) {
+                        logger.info('[ARROW-EOD] Preserving protective order — not canceling', {
+                            orderId: order.id, symbol: order.symbol, side: order.side, type: order.type
+                        });
+                        continue;
+                    }
                     try {
                         await alpacaClient.cancelOrder(order.id);
                         canceled.push(order.id);
-                        logger.info('[ARROW-EOD] Canceled open order', {
+                        logger.info('[ARROW-EOD] Canceled unfilled buy order', {
                             orderId: order.id, symbol: order.symbol, qty: order.qty
                         });
                     } catch (cancelErr) {
@@ -938,11 +1039,33 @@ module.exports = {
                             ? activeBroker.getPosition(userId, symbol)
                             : Promise.resolve(null),
 
-    /** Get pending open orders for a symbol (empty array if none / not supported) */
+    /** Get pending open orders — pass symbol to filter, omit for all orders */
     getOpenOrders:  (userId, symbol) =>
                         activeBroker.getOpenOrders
                             ? activeBroker.getOpenOrders(userId, symbol)
                             : Promise.resolve([]),
+
+    /** Place a standalone GTC stop-loss order (used by stop-repair and morning verification) */
+    placeStopOrder: (userId, symbol, qty, stopPrice) =>
+                        activeBroker.placeStopOrder
+                            ? activeBroker.placeStopOrder(userId, symbol, qty, stopPrice)
+                            : Promise.resolve(null),
+
+    /** Cancel a specific order by ID */
+    cancelOrder:    (userId, orderId) =>
+                        activeBroker.cancelOrder
+                            ? activeBroker.cancelOrder(userId, orderId)
+                            : Promise.resolve(null),
+
+    /**
+     * Fetch total deposits and withdrawals from Alpaca account activities.
+     * Returns { totalDeposited, totalWithdrawn } sourced from Alpaca — not the KiranRock DB.
+     * Falls back to { totalDeposited: null, totalWithdrawn: null } for simulated broker.
+     */
+    getNetDeposits: (userId) =>
+                        activeBroker.getNetDeposits
+                            ? activeBroker.getNetDeposits(userId)
+                            : Promise.resolve({ totalDeposited: null, totalWithdrawn: null }),
 
     brokerName:     activeBroker.name,
     brokerKey:      BROKER,

@@ -568,7 +568,7 @@ async function initializeDatabase() {
                 previous_state  TEXT,
                 broker          TEXT,
                 broker_order_id TEXT,
-                quantity        INTEGER,
+                quantity        NUMERIC(14, 8),
                 price           NUMERIC(12, 4),
                 metadata        JSONB       DEFAULT '{}'::jsonb,
                 created_at      TIMESTAMPTZ DEFAULT NOW()

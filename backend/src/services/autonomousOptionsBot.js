@@ -8,6 +8,7 @@ const tradeIntelligenceService = require('./tradeIntelligenceService');
 const dataProvider = require('./dataProvider');
 const globalSentimentService = require('./globalSentimentService');
 const { query } = require('../config/database');
+const vixMonitor = require('./vixSpikeMonitorService');
 const YahooFinance = require('yahoo-finance2').default;
 const yahooFinance = new YahooFinance();
 
@@ -1357,6 +1358,20 @@ async function executeAutonomousOptionsTrading(userId) {
             atlasScore: globalSentiment?.globalScore != null ? globalSentiment.globalScore.toFixed(2) : null
         });
         
+        // VIX Spike guard — halt new options entries on EXTREME or PANIC spikes.
+        // Options are especially sensitive to fast VIX moves: IV crush risk + wide spreads.
+        const spikeState = vixMonitor.getSpikeState();
+        if (spikeState.spikeActive && (spikeState.level === 'EXTREME' || spikeState.level === 'PANIC')) {
+            logger.warn('[Options Bot] VIX spike halt — skipping new options entries', {
+                userId, level: spikeState.level,
+                vix: spikeState.vixAtSpike, pctChange: spikeState.pctChange?.toFixed(1)
+            });
+            return {
+                success: false,
+                message: `Options halted — VIX spike (${spikeState.level}, VIX ${spikeState.vixAtSpike?.toFixed(1)})`
+            };
+        }
+
         // Build universe from nightly scan STRONG BUY signals with good options liquidity.
         // Falls back to the liquid-stock default list if the scan produced no results.
         // Option-eligible = large-cap with active options markets (price >$20, mkt cap >$2B).

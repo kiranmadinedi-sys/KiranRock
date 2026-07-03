@@ -53,19 +53,36 @@ async function getClient() {
 
     _connectAttempted = true;
     try {
-        _client = createClient({ url: REDIS_URL });
+        // Give up after 3 retries spaced 1 s apart so we don't flood logs when
+        // Redis is simply not installed on this machine.
+        let _retryCount = 0;
+        _client = createClient({
+            url: REDIS_URL,
+            socket: {
+                reconnectStrategy: (retries) => {
+                    if (retries >= 3) {
+                        // Signal the client to stop reconnecting
+                        return new Error('Redis not available — giving up after 3 retries');
+                    }
+                    return 1000; // 1 s between retries
+                }
+            }
+        });
         _client.on('error', err => {
             if (_connected) {
                 logger.warn('[Redis] Connection error — state keys will fall back to no-op', { err: err.message });
                 _connected = false;
             }
+            // Silence the flood of ECONNREFUSED / reconnect errors after initial failure
         });
         _client.on('reconnecting', () => {
-            logger.info('[Redis] Reconnecting...');
+            _retryCount++;
+            if (_retryCount <= 3) logger.info('[Redis] Reconnecting...');
         });
         _client.on('ready', () => {
             logger.info('[Redis] Connected and ready');
             _connected = true;
+            _retryCount = 0;
             _connectAttempted = false; // allow re-attempt after a successful reconnect cycle
         });
 
@@ -74,7 +91,8 @@ async function getClient() {
         logger.info('[Redis] Initial connection established', { url: REDIS_URL });
         return _client;
     } catch (err) {
-        logger.warn('[Redis] Could not connect — all state key ops will no-op', { err: err.message, url: REDIS_URL });
+        logger.warn('[Redis] Not available — state key ops will no-op (install Redis to enable)', { url: REDIS_URL });
+        try { await _client?.disconnect(); } catch {}
         _client = null;
         _connected = false;
         return null;

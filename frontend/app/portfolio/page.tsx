@@ -39,7 +39,7 @@ function signedPct(v: number) { return (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
 function PortfolioPage() {
     const router = useRouter();
     const [token, setToken] = useState<string | null>(null);
-    const [loading, setLoading] = useState(false);
+    const [_loading, setLoading] = useState(false);
     const [cashBalance, setCashBalance] = useState(0);
     const [holdings, setHoldings] = useState<any[]>([]);
     const [tradeSymbol, setTradeSymbol] = useState('');
@@ -49,7 +49,7 @@ function PortfolioPage() {
     const [loadingPrice, setLoadingPrice] = useState(false);
     const [tradeMessage, setTradeMessage] = useState<{ type: string; text: string } | null>(null);
     const [tradeHistory, setTradeHistory] = useState<any[]>([]);
-    const [performanceData, setPerformanceData] = useState<any>(null);
+    const [_performanceData, setPerformanceData] = useState<any>(null);
     const [portfolioSummary, setPortfolioSummary] = useState(DEFAULT_PORTFOLIO_SUMMARY);
     const [ledgerData, setLedgerData] = useState<any>(null);
     const [ledgerTrades, setLedgerTrades] = useState<any[]>([]);
@@ -83,15 +83,7 @@ function PortfolioPage() {
     // What the price badge shows — cycles on tap when sheet is closed
     type DisplayMode = 'price' | 'pct_change' | 'equity' | 'total_return' | 'total_pct';
     const [displayMode, setDisplayMode] = useState<DisplayMode>('price');
-    const [showDisplayPicker, setShowDisplayPicker] = useState(false);
-
-    const formatDate = (iso: string) => {
-        try {
-            const d = new Date(iso);
-            if (Number.isNaN(d.getTime())) return iso;
-            return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
-        } catch { return iso; }
-    };
+    const [_showDisplayPicker, _setShowDisplayPicker] = useState(false);
 
     const isPriceStale = (holding: any) => {
         try {
@@ -408,7 +400,7 @@ function PortfolioPage() {
     const totalUnrealizedPL   = portfolioSummary.totalUnrealizedPL   || holdings.reduce((s, h) => s + (h.unrealizedPL || 0), 0);
     const totalRealizedPL     = portfolioSummary.totalRealizedPL     || 0;
     const overallPL           = portfolioSummary.overallPL           || 0;
-    const overallReturn       = portfolioSummary.overallReturn        || 0;
+    const totalInvested       = portfolioSummary.totalInvested        || 0;
     const positionCount       = portfolioSummary.numberOfPositions    || holdings.length;
 
     const chartUp = portfolioChange.value >= 0;
@@ -494,7 +486,6 @@ function PortfolioPage() {
         const plVal  = h.unrealizedPL || 0;
         const qty    = parseFloat(h.quantity) || 0;
         const cur    = qty > 0 && h.currentValue ? h.currentValue / qty : 0;
-        const entry  = h.averagePrice || 0;
         const equity = h.currentValue || 0;
         switch (mode) {
             case 'price':      return `$${cur.toFixed(2)}`;
@@ -564,7 +555,6 @@ function PortfolioPage() {
 
         const stopVsEntry = stopPrice != null && entryPrice > 0
             ? ((stopPrice - entryPrice) / entryPrice) * 100 : null;
-        const stopTypeLabel = isFrac ? 'DAY Stop' : 'GTC Stop';
         const stopIcon = stopLocked ? '🔒' : isFrac ? '📅' : '🛑';
         const stopBadgeColor = stopVsEntry == null ? 'text-gray-400'
             : stopVsEntry > 0.5 ? 'text-emerald-400'
@@ -970,10 +960,10 @@ function PortfolioPage() {
                         },
                         {
                             label: 'Account Return',
-                            tooltip: 'Total portfolio value vs total money you deposited — your overall account gain/loss',
+                            tooltip: `Portfolio value (${usd(totalPortfolioValue)}) minus net deposits (${usd(totalInvested)}). Only accurate if all deposits were made via KiranRock — Alpaca-direct deposits are not tracked here.`,
                             value: signedUsd(overallPL),
                             valueColor: overallPL >= 0 ? 'text-green-500' : 'text-red-500',
-                            sub: 'vs total deposited',
+                            sub: `vs ${usd(totalInvested)} deposited`,
                             subColor: 'text-[var(--color-text-secondary)]',
                         },
                         {

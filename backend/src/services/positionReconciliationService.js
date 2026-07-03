@@ -139,7 +139,7 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
     const dbMap     = new Map(dbRows.map(r => [r.symbol.toUpperCase(), parseFloat(r.quantity)]));
     const alpacaMap = new Map(
         alpacaPositions
-            .filter(p => parseFloat(p.qty) > 0)   // exclude short positions (qty < 0)
+            .filter(p => parseFloat(p.qty) > 0.0001)   // exclude shorts and dust (< 0.0001 shares)
             .map(p => [p.symbol.toUpperCase(), parseFloat(p.qty)])
     );
 
@@ -226,21 +226,44 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
 
             // 2. Write a SELL to the trades table so transaction history stays complete.
             //    Marks the exit as reconciler-detected so analysts know the price is estimated.
+            //    Also propagates ai_score from the matching BUY record so analytics can group by score.
             if (entryPrice > 0 && dbQty > 0) {
                 const fillPrice = exitPrice > 0 ? exitPrice : entryPrice;
                 const total     = parseFloat((fillPrice * dbQty).toFixed(4));
                 const pnl       = parseFloat(((fillPrice - entryPrice) * dbQty).toFixed(4));
                 const pnlPct    = parseFloat(((fillPrice - entryPrice) / entryPrice * 100).toFixed(4));
+
+                // Look up ai_score, sector, entry_regime, and buy date from the most recent BUY
+                let entryScore = null, entrySector = null, entryRegime = null, holdHours = null;
+                try {
+                    const buyRow = await query(
+                        `SELECT ai_score, sector, entry_regime, trade_date FROM trades
+                         WHERE user_id=$1 AND symbol=$2 AND action='BUY'
+                         ORDER BY trade_date DESC LIMIT 1`,
+                        [userId, symbol]
+                    );
+                    if (buyRow.rows[0]) {
+                        entryScore   = buyRow.rows[0].ai_score;
+                        entrySector  = buyRow.rows[0].sector;
+                        entryRegime  = buyRow.rows[0].entry_regime;
+                        if (buyRow.rows[0].trade_date) {
+                            holdHours = parseFloat(
+                                ((Date.now() - new Date(buyRow.rows[0].trade_date).getTime()) / 3600000).toFixed(2)
+                            );
+                        }
+                    }
+                } catch (_) {}
+
                 await query(
                     `INSERT INTO trades
                          (user_id, symbol, action, quantity, price, total, trade_date,
-                          executed_by, notes, pnl, pnl_percent, status)
+                          executed_by, notes, pnl, pnl_percent, status,
+                          ai_score, sector, entry_regime, hold_hours)
                      VALUES ($1, $2, 'SELL', $3, $4, $5, NOW(),
-                             'reconciler',
-                             $8,
-                             $6, $7, 'CLOSED')`,
+                             'reconciler', $8, $6, $7, 'CLOSED', $9, $10, $11, $12)`,
                     [userId, symbol, dbQty, fillPrice, total, pnl, pnlPct,
-                     `Alpaca stop/exit detected by position reconciler — price source: ${priceSource}`]
+                     `Alpaca stop/exit detected by position reconciler — price source: ${priceSource}`,
+                     entryScore, entrySector, entryRegime, holdHours]
                 );
             }
 

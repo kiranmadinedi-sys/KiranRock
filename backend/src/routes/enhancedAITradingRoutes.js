@@ -179,4 +179,70 @@ router.get('/market/status', (req, res) => {
     }
 });
 
+/**
+ * GET /api/ai-trading/portfolio-heat
+ * Portfolio heat — total dollar risk across all open positions.
+ * Risk per position = qty × (avg_entry × stop_loss_pct).
+ * Useful for enforcing an account-level risk cap before opening new positions.
+ */
+router.get('/portfolio-heat', async (req, res) => {
+    try {
+        const userId = resolveAuthorizedUserId(req);
+        const { query } = require('../config/database');
+        const brokerService = require('../services/brokerService');
+
+        const [riskConfig, positions, accountInfo] = await Promise.all([
+            enhancedAITradingBot.getUserRiskConfig(userId),
+            brokerService.getPositions(userId).catch(() => []),
+            brokerService.getAccountInfo(userId).catch(() => null),
+        ]);
+
+        const stopLossPct = Math.abs(riskConfig.stopLoss || 0.05);
+        const maxRiskPerTrade = riskConfig.maxRiskPerTrade || 15;
+        const equity = accountInfo?.equity || accountInfo?.portfolioValue || 0;
+
+        const positionRisks = (positions || []).map(p => {
+            const qty       = parseFloat(p.qty || p.quantity || 0);
+            const avgEntry  = parseFloat(p.avgEntryPrice || p.average_price || 0);
+            const mktValue  = parseFloat(p.marketValue || p.market_value || qty * avgEntry);
+            const unrealPct = parseFloat(p.unrealizedPlpc || p.gain_loss_percent || 0);
+            const riskUsd   = qty * avgEntry * stopLossPct;
+
+            return {
+                symbol:        p.symbol,
+                qty,
+                avgEntry,
+                marketValue:   mktValue,
+                unrealizedPct: unrealPct,
+                riskUsd:       parseFloat(riskUsd.toFixed(2)),
+                stopPrice:     parseFloat((avgEntry * (1 - stopLossPct)).toFixed(2)),
+            };
+        });
+
+        const totalRiskUsd = positionRisks.reduce((s, p) => s + p.riskUsd, 0);
+        const riskPctOfEquity = equity > 0 ? (totalRiskUsd / equity) * 100 : 0;
+        // Halt threshold: default 2.5% of equity max portfolio risk
+        const maxPortfolioRiskPct = parseFloat(process.env.MAX_PORTFOLIO_RISK_PCT || '2.5');
+        const riskBudgetUsed = maxPortfolioRiskPct > 0 ? (riskPctOfEquity / maxPortfolioRiskPct) * 100 : 0;
+        const isHot = riskPctOfEquity >= maxPortfolioRiskPct;
+
+        res.json({
+            equity:             parseFloat(equity.toFixed(2)),
+            openPositions:      positionRisks.length,
+            totalRiskUsd:       parseFloat(totalRiskUsd.toFixed(2)),
+            riskPctOfEquity:    parseFloat(riskPctOfEquity.toFixed(2)),
+            maxPortfolioRiskPct,
+            riskBudgetUsed:     parseFloat(riskBudgetUsed.toFixed(1)),
+            isHot,
+            stopLossPct:        parseFloat((stopLossPct * 100).toFixed(2)),
+            maxRiskPerTrade,
+            positions:          positionRisks,
+        });
+    } catch (error) {
+        const status = error.status || 500;
+        console.error('Error getting portfolio heat:', error);
+        res.status(status).json({ error: error.message });
+    }
+});
+
 module.exports = router;

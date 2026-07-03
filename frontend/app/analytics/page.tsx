@@ -65,6 +65,23 @@ interface HoldBucket {
     avgHours: number;
 }
 
+interface HealthMetric {
+    key: string;
+    label: string;
+    desc: string;
+    current: number | null;
+    target: string;
+    unit: string;
+    status: 'green' | 'yellow' | 'red' | 'na';
+}
+
+interface HealthData {
+    days: number;
+    total: number;
+    metrics: HealthMetric[];
+    summary: { passing: number; warning: number; failing: number; na: number };
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const fmtPct = (n: number | null) => n == null ? '—' : `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
@@ -159,7 +176,7 @@ function AggTable({ title, rows }: { title: string; rows: AggRow[] }) {
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
-type Tab = 'trades' | 'score' | 'hold';
+type Tab = 'trades' | 'score' | 'hold' | 'health';
 type SortKey = 'closedAt' | 'symbol' | 'pnlPct' | 'aiScore' | 'holdHours';
 type SortDir = 'asc' | 'desc';
 
@@ -188,6 +205,10 @@ export default function AnalyticsPage() {
     const [scoreBuckets, setScoreBuckets] = useState<ScoreBucket[]>([]);
     const [holdBuckets, setHoldBuckets]   = useState<HoldBucket[]>([]);
     const [loadingBuckets, setLoadingBuckets] = useState(false);
+
+    // Strategy health state
+    const [health, setHealth]           = useState<HealthData | null>(null);
+    const [loadingHealth, setLoadingHealth] = useState(false);
 
     // Filters
     const [filterOutcome,  setFilterOutcome]  = useState('');
@@ -239,6 +260,19 @@ export default function AnalyticsPage() {
         }
     }, [days]);
 
+    const fetchHealth = useCallback(async (token: string) => {
+        setLoadingHealth(true);
+        try {
+            const res = await fetch(
+                `${getApiBaseUrl()}/api/performance/strategy-health?days=${days}`,
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+            if (res.ok) { const d = await res.json(); setHealth(d); }
+        } finally {
+            setLoadingHealth(false);
+        }
+    }, [days]);
+
     const fetchSummary = useCallback(async () => {
         const token = getAuthToken();
         if (!token) return;
@@ -275,7 +309,8 @@ export default function AnalyticsPage() {
         if (!token) { router.push('/login'); return; }
         fetchTradeLog(token);
         fetchBuckets(token);
-    }, [fetchTradeLog, fetchBuckets, router]);
+        fetchHealth(token);
+    }, [fetchTradeLog, fetchBuckets, fetchHealth, router]);
 
     // Client-side filters
     const filtered = trades.filter(t => {
@@ -330,6 +365,7 @@ export default function AnalyticsPage() {
         { id: 'trades', label: 'Trade Log' },
         { id: 'score',  label: 'Score Analysis' },
         { id: 'hold',   label: 'Hold Time' },
+        { id: 'health', label: 'Strategy Health' },
     ];
 
     return (
@@ -698,6 +734,98 @@ export default function AnalyticsPage() {
 
                     {aggByHold.length > 0 && (
                         <AggTable title="Hold Period (live breakdown from trade log)" rows={aggByHold} />
+                    )}
+                </div>
+            )}
+
+            {/* ── Strategy Health Monitor ──────────────────────────────────────── */}
+            {tab === 'health' && (
+                <div className="space-y-4">
+                    <p className="text-sm text-gray-400">
+                        9 key metrics vs targets — green = on track, yellow = watch, red = action needed.
+                        Based on the last <strong className="text-white">{days} days</strong> of closed trades.
+                    </p>
+
+                    {loadingHealth ? (
+                        <div className="flex items-center justify-center h-40 text-gray-400">Computing metrics...</div>
+                    ) : !health ? (
+                        <div className="bg-gray-800 border border-gray-700 rounded-xl p-8 text-center text-gray-400">
+                            Could not load strategy health data.
+                        </div>
+                    ) : (
+                        <>
+                            {/* Scorecard header */}
+                            <div className="grid grid-cols-3 gap-3 md:grid-cols-3">
+                                <div className="bg-green-900/40 border border-green-700/50 rounded-xl p-4 text-center">
+                                    <p className="text-3xl font-bold text-green-400">{health.summary.passing}</p>
+                                    <p className="text-xs text-green-300 mt-1">On Target</p>
+                                </div>
+                                <div className="bg-yellow-900/40 border border-yellow-700/50 rounded-xl p-4 text-center">
+                                    <p className="text-3xl font-bold text-yellow-400">{health.summary.warning}</p>
+                                    <p className="text-xs text-yellow-300 mt-1">Watch</p>
+                                </div>
+                                <div className="bg-red-900/40 border border-red-700/50 rounded-xl p-4 text-center">
+                                    <p className="text-3xl font-bold text-red-400">{health.summary.failing}</p>
+                                    <p className="text-xs text-red-300 mt-1">Action Needed</p>
+                                </div>
+                            </div>
+
+                            {/* Metrics table */}
+                            <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
+                                <table className="w-full text-sm">
+                                    <thead className="bg-gray-900/60">
+                                        <tr className="text-gray-400 text-xs">
+                                            <th className="text-left px-4 py-3 w-8"></th>
+                                            <th className="text-left px-4 py-3">Metric</th>
+                                            <th className="text-right px-4 py-3">Current</th>
+                                            <th className="text-right px-4 py-3">Target</th>
+                                            <th className="text-left px-4 py-3 hidden md:table-cell">Description</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {health.metrics.map((m) => {
+                                            const dot = m.status === 'green' ? 'bg-green-400'
+                                                : m.status === 'yellow' ? 'bg-yellow-400'
+                                                : m.status === 'red' ? 'bg-red-400'
+                                                : 'bg-gray-600';
+                                            const valColor = m.status === 'green' ? 'text-green-400 font-semibold'
+                                                : m.status === 'yellow' ? 'text-yellow-400 font-semibold'
+                                                : m.status === 'red' ? 'text-red-400 font-semibold'
+                                                : 'text-gray-500';
+                                            const displayVal = m.current == null
+                                                ? <span className="text-gray-600">N/A</span>
+                                                : <span className={valColor}>
+                                                    {m.unit === '%' || m.unit === 'x'
+                                                        ? `${m.current}${m.unit}`
+                                                        : m.unit === 'h'
+                                                            ? `${m.current}h`
+                                                            : m.unit === 'trades'
+                                                                ? `${m.current} trades`
+                                                                : String(m.current)}
+                                                  </span>;
+                                            return (
+                                                <tr key={m.key} className="border-t border-gray-700/40 hover:bg-gray-700/20">
+                                                    <td className="px-4 py-3">
+                                                        <span className={`inline-block w-2.5 h-2.5 rounded-full ${dot}`} />
+                                                    </td>
+                                                    <td className="px-4 py-3 font-medium text-white">{m.label}</td>
+                                                    <td className="px-4 py-3 text-right">{displayVal}</td>
+                                                    <td className="px-4 py-3 text-right text-gray-400 text-xs">{m.target}</td>
+                                                    <td className="px-4 py-3 text-gray-500 text-xs hidden md:table-cell max-w-xs">{m.desc}</td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            {health.total < 20 && (
+                                <div className="bg-yellow-900/30 border border-yellow-700/40 rounded-xl p-4 text-sm text-yellow-300">
+                                    ⚠ Only {health.total} closed trades in the last {days} days — metrics will stabilise with more data.
+                                    ChatGPT recommends 100+ trades for reliable signal.
+                                </div>
+                            )}
+                        </>
                     )}
                 </div>
             )}

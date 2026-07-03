@@ -1446,4 +1446,196 @@ Rules:
     }
 });
 
+/**
+ * GET /api/performance/strategy-health?days=90
+ * Returns the 9 key metrics from the ChatGPT monitoring table with current
+ * values, targets, and pass/warn/fail status. All computed from the trades table.
+ */
+router.get('/strategy-health', protect, async (req, res) => {
+    try {
+        const { query } = require('../config/database');
+        const userId = req.userId;
+        const days   = Math.max(7, Math.min(parseInt(req.query.days) || 90, 365));
+
+        const result = await query(`
+            WITH sells AS (
+                SELECT
+                    s.pnl,
+                    s.pnl_percent,
+                    s.hold_hours,
+                    s.slippage_pct,
+                    s.trade_date,
+                    s.notes
+                FROM trades s
+                WHERE s.user_id  = $1
+                  AND s.action   = 'SELL'
+                  AND s.pnl      IS NOT NULL
+                  AND s.trade_date >= NOW() - ($2 * INTERVAL '1 day')
+            ),
+            agg AS (
+                SELECT
+                    COUNT(*)                                                          AS total,
+                    COUNT(*) FILTER (WHERE pnl > 0)                                  AS winners,
+                    COUNT(*) FILTER (WHERE pnl < 0)                                  AS losers,
+                    -- Profit Factor
+                    ROUND(
+                        NULLIF(SUM(pnl) FILTER (WHERE pnl > 0), 0) /
+                        NULLIF(ABS(SUM(pnl) FILTER (WHERE pnl < 0)), 0),
+                    2)                                                                AS profit_factor,
+                    -- Win Rate
+                    ROUND(COUNT(*) FILTER (WHERE pnl > 0)::numeric / NULLIF(COUNT(*),0) * 100, 1) AS win_rate,
+                    -- Avg Winner % and Avg Loser % for ratio + expectancy
+                    ROUND(AVG(pnl_percent) FILTER (WHERE pnl > 0)::numeric, 2)       AS avg_win_pct,
+                    ROUND(ABS(AVG(pnl_percent) FILTER (WHERE pnl < 0))::numeric, 2)  AS avg_loss_pct,
+                    -- Hold time
+                    ROUND(AVG(hold_hours)::numeric, 1)                               AS avg_hold_hours,
+                    ROUND(STDDEV(hold_hours)::numeric, 1)                            AS stddev_hold_hours,
+                    -- Slippage
+                    ROUND(AVG(ABS(slippage_pct))::numeric, 4)                        AS avg_slippage,
+                    ROUND(MAX(ABS(slippage_pct))::numeric, 4)                        AS max_slippage,
+                    -- Stop repair proxy: sells by reconciler (Alpaca stop fired)
+                    COUNT(*) FILTER (WHERE notes ILIKE '%stop%' OR notes ILIKE '%reconcil%') AS stop_exits,
+                    -- Running drawdown: consecutive loss streaks (max losing run)
+                    COUNT(*) FILTER (WHERE pnl < 0)                                  AS total_losers
+                FROM sells
+            )
+            SELECT * FROM agg
+        `, [userId, days]);
+
+        const r = result.rows[0];
+        const total      = parseInt(r.total || 0);
+        const winners    = parseInt(r.winners || 0);
+        const losers     = parseInt(r.losers  || 0);
+        const winRate    = parseFloat(r.win_rate    || 0);
+        const pf         = parseFloat(r.profit_factor || 0);
+        const avgWinPct  = parseFloat(r.avg_win_pct  || 0);
+        const avgLossPct = parseFloat(r.avg_loss_pct || 0); // already abs
+        const winLossRatio = avgLossPct > 0 ? parseFloat((avgWinPct / avgLossPct).toFixed(2)) : null;
+        const expectancy   = parseFloat(
+            ((winRate / 100) * avgWinPct - (1 - winRate / 100) * avgLossPct).toFixed(2)
+        );
+        const avgHoldHours  = parseFloat(r.avg_hold_hours || 0);
+        const stddevHold    = parseFloat(r.stddev_hold_hours || 0);
+        const holdStability = avgHoldHours > 0 ? parseFloat((stddevHold / avgHoldHours).toFixed(2)) : null;
+        const avgSlippage   = parseFloat(r.avg_slippage || 0);
+        const stopExits     = parseInt(r.stop_exits || 0);
+
+        // Estimate stop repair events from trading logs (best-effort)
+        let stopRepairCount = 0;
+        try {
+            const repairRes = await query(`
+                SELECT COUNT(*) AS cnt
+                FROM   trading_activity_log
+                WHERE  user_id   = $1
+                  AND  action    ILIKE '%stop repair%'
+                  AND  timestamp >= NOW() - ($2 * INTERVAL '1 day')
+            `, [userId, days]);
+            stopRepairCount = parseInt(repairRes.rows[0]?.cnt || 0);
+        } catch (_) { /* table may not exist in all envs */ }
+
+        function status(val, greenTest, yellowTest) {
+            if (val == null || total === 0) return 'na';
+            if (greenTest(val)) return 'green';
+            if (yellowTest(val)) return 'yellow';
+            return 'red';
+        }
+
+        const metrics = [
+            {
+                key:      'profitFactor',
+                label:    'Profit Factor',
+                desc:     'Gross wins ÷ gross losses. Above 1.5 = good edge.',
+                current:  pf || null,
+                target:   '> 1.5',
+                unit:     'x',
+                status:   status(pf, v => v >= 1.5, v => v >= 1.2),
+            },
+            {
+                key:      'winRate',
+                label:    'Win Rate',
+                desc:     'Percentage of trades that closed profitably.',
+                current:  winRate || null,
+                target:   '50–60%',
+                unit:     '%',
+                status:   status(winRate, v => v >= 50 && v <= 65, v => v >= 45),
+            },
+            {
+                key:      'winLossRatio',
+                label:    'Avg Winner / Avg Loser',
+                desc:     'How much bigger wins are vs losses on average.',
+                current:  winLossRatio,
+                target:   '> 1.5×',
+                unit:     'x',
+                status:   status(winLossRatio, v => v >= 1.5, v => v >= 1.1),
+            },
+            {
+                key:      'expectancy',
+                label:    'Expectancy',
+                desc:     'Average % return per trade taken (positive = edge exists).',
+                current:  expectancy || null,
+                target:   'Positive',
+                unit:     '%',
+                status:   status(expectancy, v => v > 0, v => v > -0.5),
+            },
+            {
+                key:      'avgHoldHours',
+                label:    'Avg Hold Time',
+                desc:     'Average hours a position was open before closing.',
+                current:  avgHoldHours || null,
+                target:   'Stable',
+                unit:     'h',
+                status:   total === 0 ? 'na' : holdStability !== null && holdStability < 1.0 ? 'green' : holdStability !== null && holdStability < 1.5 ? 'yellow' : 'red',
+            },
+            {
+                key:      'slippage',
+                label:    'Slippage',
+                desc:     'Difference between expected and actual fill price.',
+                current:  avgSlippage > 0 ? avgSlippage : null,
+                target:   '< 0.15%',
+                unit:     '%',
+                status:   status(avgSlippage, v => v < 0.15, v => v < 0.30),
+            },
+            {
+                key:      'sampleSize',
+                label:    'Sample Size',
+                desc:     'Closed trades in period. Need 100+ for early confidence.',
+                current:  total,
+                target:   '≥ 100',
+                unit:     'trades',
+                status:   total >= 100 ? 'green' : total >= 50 ? 'yellow' : 'red',
+            },
+            {
+                key:      'stopRepairEvents',
+                label:    'Stop Repair Events',
+                desc:     'Times the bot had to replace a missing stop. Should be rare.',
+                current:  stopRepairCount,
+                target:   'Rare (< 5)',
+                unit:     '',
+                status:   stopRepairCount === 0 ? 'green' : stopRepairCount < 5 ? 'yellow' : 'red',
+            },
+            {
+                key:      'stopLossExits',
+                label:    'Stop-Loss Exit Rate',
+                desc:     'Percentage of trades that exited via a stop-loss.',
+                current:  total > 0 ? parseFloat(((stopExits / total) * 100).toFixed(1)) : null,
+                target:   '< 40%',
+                unit:     '%',
+                status:   status(
+                    total > 0 ? (stopExits / total) * 100 : null,
+                    v => v < 30, v => v < 45
+                ),
+            },
+        ];
+
+        const passing = metrics.filter(m => m.status === 'green').length;
+        const warning = metrics.filter(m => m.status === 'yellow').length;
+        const failing = metrics.filter(m => m.status === 'red').length;
+
+        res.json({ days, total, metrics, summary: { passing, warning, failing, na: metrics.length - passing - warning - failing } });
+    } catch (err) {
+        logger.error('Strategy health endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = router;

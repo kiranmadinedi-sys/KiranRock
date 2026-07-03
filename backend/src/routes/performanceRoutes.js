@@ -1320,6 +1320,11 @@ router.post('/plain-summary', protect, async (req, res) => {
                 ROUND(SUM(pnl)::numeric, 2)                                      AS net_pnl,
                 ROUND(AVG(pnl)::numeric, 2)                                      AS avg_pnl,
                 ROUND(AVG(pnl_percent)::numeric, 2)                              AS avg_return_pct,
+                -- Winner/loser averages separately (keeps Haiku from confusing overall avg with per-direction avg)
+                ROUND(AVG(pnl)         FILTER (WHERE pnl > 0)::numeric, 2)      AS avg_win_usd,
+                ROUND(AVG(pnl_percent) FILTER (WHERE pnl > 0)::numeric, 2)      AS avg_win_pct,
+                ROUND(ABS(AVG(pnl))    FILTER (WHERE pnl < 0)::numeric, 2)      AS avg_loss_usd,
+                ROUND(ABS(AVG(pnl_percent)) FILTER (WHERE pnl < 0)::numeric, 2) AS avg_loss_pct,
                 ROUND(MAX(pnl)::numeric, 2)                                      AS best_trade_pnl,
                 ROUND(MIN(pnl)::numeric, 2)                                      AS worst_trade_pnl,
                 (SELECT symbol FROM sells ORDER BY pnl DESC  LIMIT 1)           AS best_symbol,
@@ -1368,25 +1373,41 @@ router.post('/plain-summary', protect, async (req, res) => {
             : s.gross_wins > 0 ? '∞' : '0';
 
         // ── 2. Build the data blob for Claude ─────────────────────────────
+        const winners    = parseInt(s.winners || 0);
+        const losers     = parseInt(s.losers  || 0);
+        const grossWins  = parseFloat(s.gross_wins  || 0);
+        const grossLoss  = parseFloat(s.gross_losses || 0);
+        const avgWinUsd  = parseFloat(s.avg_win_usd  || 0);
+        const avgLossUsd = parseFloat(s.avg_loss_usd || 0);
+        const winLossRatio = avgLossUsd > 0 ? (avgWinUsd / avgLossUsd).toFixed(2) : null;
+
         const statsBlob = {
-            period:          `last ${days} days`,
-            totalTrades:     total,
-            winners:         parseInt(s.winners || 0),
-            losers:          parseInt(s.losers  || 0),
-            winRatePct:      parseFloat(s.win_rate || 0),
-            netPnlUsd:       parseFloat(s.net_pnl || 0),
-            avgPnlUsd:       parseFloat(s.avg_pnl || 0),
-            avgReturnPct:    parseFloat(s.avg_return_pct || 0),
-            bestTradePnl:    parseFloat(s.best_trade_pnl || 0),
-            worstTradePnl:   parseFloat(s.worst_trade_pnl || 0),
-            bestSymbol:      s.best_symbol,
-            worstSymbol:     s.worst_symbol,
-            avgHoldHours:    parseFloat(s.avg_hold_hours || 0),
-            bestSector:      s.best_sector,
-            worstSector:     s.worst_sector,
-            mostCommonExit:  s.most_common_exit,
-            dominantRegime:  s.dominant_regime,
-            avgAiScore:      parseFloat(s.avg_ai_score || 0),
+            period:           `last ${days} days`,
+            totalTrades:      total,
+            winners,
+            losers,
+            winRatePct:       parseFloat(s.win_rate || 0),
+            netPnlUsd:        parseFloat(s.net_pnl || 0),
+            avgNetPnlPerTrade: parseFloat(s.avg_pnl || 0),  // renamed to make clear it's OVERALL avg
+            avgReturnPct:     parseFloat(s.avg_return_pct || 0),
+            // Per-direction averages — DO NOT confuse with avgNetPnlPerTrade
+            avgWinUsd,
+            avgWinPct:        parseFloat(s.avg_win_pct  || 0),
+            avgLossUsd,
+            avgLossPct:       parseFloat(s.avg_loss_pct || 0),
+            winLossRatio,     // avgWin ÷ avgLoss (>1.5 = good edge)
+            grossWins,
+            grossLosses:      grossLoss,
+            bestTradePnl:     parseFloat(s.best_trade_pnl || 0),
+            worstTradePnl:    parseFloat(s.worst_trade_pnl || 0),
+            bestSymbol:       s.best_symbol,
+            worstSymbol:      s.worst_symbol,
+            avgHoldHours:     parseFloat(s.avg_hold_hours || 0),
+            bestSector:       s.best_sector,
+            worstSector:      s.worst_sector,
+            mostCommonExit:   s.most_common_exit,
+            dominantRegime:   s.dominant_regime,
+            avgAiScore:       parseFloat(s.avg_ai_score || 0),
             profitFactor,
         };
 
@@ -1415,9 +1436,18 @@ router.post('/plain-summary', protect, async (req, res) => {
 Here are the trading results for the ${statsBlob.period}:
 ${JSON.stringify(statsBlob, null, 2)}
 
+IMPORTANT number guide (read before writing):
+- "netPnlUsd" = total money made or lost across ALL trades combined
+- "avgNetPnlPerTrade" = net profit divided by total trades (overall average per trade — includes both wins and losses)
+- "avgWinUsd" = average profit on the WINNING trades only
+- "avgLossUsd" = average loss on the LOSING trades only (already positive, so treat as a cost)
+- "winLossRatio" = avgWinUsd ÷ avgLossUsd — above 1.5 is strong, below 1.0 means losses outsize wins
+- "profitFactor" = gross wins ÷ gross losses — above 1.5 = healthy edge
+Do NOT confuse "avgNetPnlPerTrade" with "avgWinUsd" or "avgLossUsd". They are different numbers.
+
 Write a clear, friendly performance summary covering:
 1. Overall result — did the account make or lose money, and by how much?
-2. How often did trades work out vs. not work out?
+2. Win rate and what the average winning trade made vs what the average losing trade cost
 3. Which stocks or sectors did well, which did poorly?
 4. How long were stocks typically held?
 5. How the bot decided to exit trades (stop loss, profit target, etc.)
@@ -1426,8 +1456,8 @@ Write a clear, friendly performance summary covering:
 
 Rules:
 - Write in plain English a family member could understand
-- Use dollars and percentages with context ("winning $14 on a $300 trade")
-- Keep it under 250 words
+- Always name the specific dollar amounts for wins and losses with context ("each winning trade made about $X on average")
+- Keep it under 280 words
 - Use short paragraphs, not bullet points
 - Do NOT start with "Overall" — vary the opening`;
 
@@ -1442,6 +1472,97 @@ Rules:
 
     } catch (err) {
         logger.error('Plain summary endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/performance/equity-curve?days=90
+ * Returns daily cumulative P&L for charting the equity curve.
+ * Each row = one day that had at least one closed trade.
+ * Also returns max drawdown computed from running peak.
+ */
+router.get('/equity-curve', protect, async (req, res) => {
+    try {
+        const { query } = require('../config/database');
+        const userId = req.userId;
+        const days   = Math.max(7, Math.min(parseInt(req.query.days) || 90, 365));
+
+        const result = await query(`
+            WITH daily AS (
+                SELECT
+                    DATE(trade_date)                       AS day,
+                    SUM(pnl)                               AS daily_pnl,
+                    COUNT(*)                               AS trades,
+                    COUNT(*) FILTER (WHERE pnl > 0)        AS wins,
+                    COUNT(*) FILTER (WHERE pnl < 0)        AS losses,
+                    ROUND(MAX(pnl)::numeric, 2)            AS best_trade,
+                    ROUND(MIN(pnl)::numeric, 2)            AS worst_trade,
+                    STRING_AGG(DISTINCT symbol, ', ' ORDER BY symbol) AS symbols
+                FROM trades
+                WHERE user_id   = $1
+                  AND action    = 'SELL'
+                  AND pnl       IS NOT NULL
+                  AND trade_date >= NOW() - ($2 * INTERVAL '1 day')
+                GROUP BY DATE(trade_date)
+                ORDER BY DATE(trade_date) ASC
+            ),
+            running AS (
+                SELECT
+                    day,
+                    daily_pnl,
+                    trades,
+                    wins,
+                    losses,
+                    best_trade,
+                    worst_trade,
+                    symbols,
+                    ROUND(SUM(daily_pnl) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)::numeric, 2) AS cumulative_pnl,
+                    ROUND(MAX(SUM(daily_pnl) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)::numeric, 2) AS peak_pnl
+                FROM daily
+            )
+            SELECT
+                day,
+                ROUND(daily_pnl::numeric, 2)  AS daily_pnl,
+                trades, wins, losses,
+                best_trade, worst_trade, symbols,
+                cumulative_pnl,
+                peak_pnl,
+                ROUND((cumulative_pnl - peak_pnl)::numeric, 2) AS drawdown
+            FROM running
+            ORDER BY day ASC
+        `, [userId, days]);
+
+        const rows = result.rows;
+        const maxDrawdown = rows.length > 0
+            ? Math.min(...rows.map(r => parseFloat(r.drawdown || 0)))
+            : 0;
+        const finalPnl    = rows.length > 0 ? parseFloat(rows[rows.length - 1].cumulative_pnl || 0) : 0;
+        const peakPnl     = rows.length > 0 ? Math.max(...rows.map(r => parseFloat(r.cumulative_pnl || 0))) : 0;
+        const totalTrades = rows.reduce((s, r) => s + parseInt(r.trades || 0), 0);
+
+        res.json({
+            days,
+            totalTrades,
+            finalPnl,
+            peakPnl: parseFloat(peakPnl.toFixed(2)),
+            maxDrawdown: parseFloat(maxDrawdown.toFixed(2)),
+            points: rows.map(r => ({
+                date:          r.day,
+                dailyPnl:      parseFloat(r.daily_pnl),
+                cumulativePnl: parseFloat(r.cumulative_pnl),
+                peakPnl:       parseFloat(r.peak_pnl),
+                drawdown:      parseFloat(r.drawdown),
+                trades:        parseInt(r.trades),
+                wins:          parseInt(r.wins),
+                losses:        parseInt(r.losses),
+                bestTrade:     parseFloat(r.best_trade || 0),
+                worstTrade:    parseFloat(r.worst_trade || 0),
+                symbols:       r.symbols || '',
+            })),
+        });
+    } catch (err) {
+        logger.error('Equity curve endpoint error', { error: err.message });
         res.status(500).json({ error: err.message });
     }
 });

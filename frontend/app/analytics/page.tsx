@@ -4,6 +4,14 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { getApiBaseUrl } from '../config';
+import {
+    Chart as ChartJS,
+    CategoryScale, LinearScale, PointElement, LineElement,
+    Filler, Tooltip, Legend,
+} from 'chart.js';
+import { Line } from 'react-chartjs-2';
+
+ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, Tooltip, Legend);
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -63,6 +71,28 @@ interface HoldBucket {
     avgLossPct: number;
     expectancy: number;
     avgHours: number;
+}
+
+interface EquityPoint {
+    date: string;
+    dailyPnl: number;
+    cumulativePnl: number;
+    drawdown: number;
+    trades: number;
+    wins: number;
+    losses: number;
+    bestTrade: number;
+    worstTrade: number;
+    symbols: string;
+}
+
+interface EquityData {
+    days: number;
+    totalTrades: number;
+    finalPnl: number;
+    peakPnl: number;
+    maxDrawdown: number;
+    points: EquityPoint[];
 }
 
 interface HealthMetric {
@@ -177,7 +207,7 @@ function AggTable({ title, rows }: { title: string; rows: AggRow[] }) {
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
-type Tab = 'trades' | 'score' | 'hold' | 'health';
+type Tab = 'trades' | 'score' | 'hold' | 'health' | 'equity';
 type SortKey = 'closedAt' | 'symbol' | 'pnlPct' | 'aiScore' | 'holdHours';
 type SortDir = 'asc' | 'desc';
 
@@ -210,6 +240,10 @@ export default function AnalyticsPage() {
     // Strategy health state
     const [health, setHealth]           = useState<HealthData | null>(null);
     const [loadingHealth, setLoadingHealth] = useState(false);
+
+    // Equity curve state
+    const [equity, setEquity]           = useState<EquityData | null>(null);
+    const [loadingEquity, setLoadingEquity] = useState(false);
 
     // Filters
     const [filterOutcome,  setFilterOutcome]  = useState('');
@@ -274,6 +308,19 @@ export default function AnalyticsPage() {
         }
     }, [days]);
 
+    const fetchEquity = useCallback(async (token: string) => {
+        setLoadingEquity(true);
+        try {
+            const res = await fetch(
+                `${getApiBaseUrl()}/api/performance/equity-curve?days=${days}`,
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+            if (res.ok) { const d = await res.json(); setEquity(d); }
+        } finally {
+            setLoadingEquity(false);
+        }
+    }, [days]);
+
     const fetchSummary = useCallback(async () => {
         const token = getAuthToken();
         if (!token) return;
@@ -311,7 +358,8 @@ export default function AnalyticsPage() {
         fetchTradeLog(token);
         fetchBuckets(token);
         fetchHealth(token);
-    }, [fetchTradeLog, fetchBuckets, fetchHealth, router]);
+        fetchEquity(token);
+    }, [fetchTradeLog, fetchBuckets, fetchHealth, fetchEquity, router]);
 
     // Client-side filters
     const filtered = trades.filter(t => {
@@ -364,6 +412,7 @@ export default function AnalyticsPage() {
 
     const TABS: { id: Tab; label: string }[] = [
         { id: 'trades', label: 'Trade Log' },
+        { id: 'equity', label: 'Equity Curve' },
         { id: 'score',  label: 'Score Analysis' },
         { id: 'hold',   label: 'Hold Time' },
         { id: 'health', label: 'Strategy Health' },
@@ -735,6 +784,139 @@ export default function AnalyticsPage() {
 
                     {aggByHold.length > 0 && (
                         <AggTable title="Hold Period (live breakdown from trade log)" rows={aggByHold} />
+                    )}
+                </div>
+            )}
+
+            {/* ── Equity Curve ────────────────────────────────────────────────── */}
+            {tab === 'equity' && (
+                <div className="space-y-4">
+                    {loadingEquity ? (
+                        <div className="flex items-center justify-center h-48 text-gray-400">Loading equity curve...</div>
+                    ) : !equity || equity.points.length === 0 ? (
+                        <div className="bg-gray-800 border border-gray-700 rounded-xl p-8 text-center text-gray-400">
+                            No closed trade data yet for this period.
+                        </div>
+                    ) : (
+                        <>
+                            {/* Summary cards */}
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                <StatCard label="Final P&L"     value={fmtUsd(equity.finalPnl)}    color={pnlColor(equity.finalPnl)} />
+                                <StatCard label="Peak P&L"      value={fmtUsd(equity.peakPnl)}     color="text-blue-400" />
+                                <StatCard label="Max Drawdown"  value={fmtUsd(equity.maxDrawdown)} color={equity.maxDrawdown < -100 ? 'text-red-400' : 'text-yellow-400'}
+                                    sub="from peak to trough" />
+                                <StatCard label="Trading Days"  value={String(equity.points.length)} sub={`${equity.totalTrades} total trades`} />
+                            </div>
+
+                            {/* Cumulative P&L line chart */}
+                            <div className="bg-gray-800 border border-gray-700 rounded-xl p-5">
+                                <h3 className="text-sm font-semibold text-gray-200 mb-4">Cumulative P&L Over Time</h3>
+                                <Line
+                                    data={{
+                                        labels: equity.points.map(p => {
+                                            const d = new Date(p.date);
+                                            return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                                        }),
+                                        datasets: [
+                                            {
+                                                label: 'Cumulative P&L ($)',
+                                                data: equity.points.map(p => p.cumulativePnl),
+                                                borderColor: equity.finalPnl >= 0 ? '#4ade80' : '#f87171',
+                                                backgroundColor: equity.finalPnl >= 0 ? 'rgba(74,222,128,0.08)' : 'rgba(248,113,113,0.08)',
+                                                fill: true,
+                                                tension: 0.3,
+                                                pointRadius: equity.points.length > 40 ? 2 : 4,
+                                                pointHoverRadius: 6,
+                                            },
+                                            {
+                                                label: 'Drawdown ($)',
+                                                data: equity.points.map(p => p.drawdown),
+                                                borderColor: 'rgba(248,113,113,0.6)',
+                                                backgroundColor: 'rgba(248,113,113,0.05)',
+                                                fill: true,
+                                                tension: 0.3,
+                                                pointRadius: 0,
+                                                borderDash: [4, 4],
+                                            },
+                                        ],
+                                    }}
+                                    options={{
+                                        responsive: true,
+                                        interaction: { mode: 'index', intersect: false },
+                                        plugins: {
+                                            legend: { labels: { color: '#9ca3af', font: { size: 11 } } },
+                                            tooltip: {
+                                                backgroundColor: '#1f2937',
+                                                borderColor: '#374151',
+                                                borderWidth: 1,
+                                                titleColor: '#f9fafb',
+                                                bodyColor: '#d1d5db',
+                                                callbacks: {
+                                                    afterBody: (items) => {
+                                                        const idx = items[0]?.dataIndex;
+                                                        if (idx == null) return [];
+                                                        const p = equity.points[idx];
+                                                        return [
+                                                            `Daily P&L: ${p.dailyPnl >= 0 ? '+' : ''}$${p.dailyPnl.toFixed(2)}`,
+                                                            `Trades: ${p.trades} (${p.wins}W/${p.losses}L)`,
+                                                            p.symbols ? `Symbols: ${p.symbols}` : '',
+                                                        ].filter(Boolean);
+                                                    },
+                                                },
+                                            },
+                                        },
+                                        scales: {
+                                            x: { ticks: { color: '#6b7280', maxRotation: 45 }, grid: { color: 'rgba(255,255,255,0.04)' } },
+                                            y: {
+                                                ticks: { color: '#6b7280', callback: (v) => `$${Number(v).toFixed(0)}` },
+                                                grid: { color: 'rgba(255,255,255,0.04)' },
+                                            },
+                                        },
+                                    }}
+                                />
+                            </div>
+
+                            {/* Daily P&L bar summary */}
+                            <div className="bg-gray-800 border border-gray-700 rounded-xl p-5">
+                                <h3 className="text-sm font-semibold text-gray-200 mb-3">Daily Breakdown</h3>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-xs">
+                                        <thead>
+                                            <tr className="text-gray-400 border-b border-gray-700">
+                                                <th className="text-left pb-2 pr-3">Date</th>
+                                                <th className="text-right pb-2 pr-3">Trades</th>
+                                                <th className="text-right pb-2 pr-3">W/L</th>
+                                                <th className="text-right pb-2 pr-3">Daily P&L</th>
+                                                <th className="text-right pb-2 pr-3">Cumulative</th>
+                                                <th className="text-left pb-2">Symbols</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {equity.points.map((p, i) => (
+                                                <tr key={i} className="border-b border-gray-700/30 hover:bg-gray-700/20">
+                                                    <td className="py-1.5 pr-3 text-gray-400">
+                                                        {new Date(p.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                                    </td>
+                                                    <td className="text-right pr-3 text-gray-300">{p.trades}</td>
+                                                    <td className="text-right pr-3">
+                                                        <span className="text-green-400">{p.wins}</span>
+                                                        <span className="text-gray-600">/</span>
+                                                        <span className="text-red-400">{p.losses}</span>
+                                                    </td>
+                                                    <td className={`text-right pr-3 font-medium ${pnlColor(p.dailyPnl)}`}>
+                                                        {fmtUsd(p.dailyPnl)}
+                                                    </td>
+                                                    <td className={`text-right pr-3 ${pnlColor(p.cumulativePnl)}`}>
+                                                        {fmtUsd(p.cumulativePnl)}
+                                                    </td>
+                                                    <td className="text-gray-500 max-w-[160px] truncate">{p.symbols}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </>
                     )}
                 </div>
             )}

@@ -1107,4 +1107,167 @@ router.get('/hold-time-analysis', protect, async (req, res) => {
     }
 });
 
+/**
+ * GET /api/performance/trade-log?days=90&outcome=win|loss&sector=X&regime=X&exitType=X&minScore=N&maxScore=N
+ * Full closed-trade history from the trades table (action='SELL').
+ * Joins matching BUY record to get entry_price, ai_score, sector, entry_regime.
+ * This is the ground-truth source — every executed trade appears here.
+ */
+router.get('/trade-log', protect, async (req, res) => {
+    try {
+        const { query } = require('../config/database');
+        const userId   = req.userId;
+        const days     = Math.max(7, Math.min(parseInt(req.query.days) || 90, 365));
+        const outcome  = typeof req.query.outcome  === 'string' ? req.query.outcome  : null;
+        const sector   = typeof req.query.sector   === 'string' ? req.query.sector   : null;
+        const regime   = typeof req.query.regime   === 'string' ? req.query.regime   : null;
+        const exitType = typeof req.query.exitType === 'string' ? req.query.exitType : null;
+        const minScore = parseFloat(req.query.minScore) || null;
+        const maxScore = parseFloat(req.query.maxScore) || null;
+
+        // Build WHERE clauses
+        const clauses = [
+            `s.user_id   = $1`,
+            `s.action    = 'SELL'`,
+            `s.trade_date >= NOW() - ($2 * INTERVAL '1 day')`,
+            `s.pnl       IS NOT NULL`,
+        ];
+        const params = [userId, days];
+
+        if (outcome === 'win')  { clauses.push(`s.pnl > 0`); }
+        if (outcome === 'loss') { clauses.push(`s.pnl < 0`); }
+        if (sector)  { params.push(sector);   clauses.push(`COALESCE(s.sector, b.sector) = $${params.length}`); }
+        if (regime)  { params.push(regime);   clauses.push(`COALESCE(s.entry_regime, b.entry_regime) = $${params.length}`); }
+        if (minScore != null) { params.push(minScore); clauses.push(`COALESCE(s.ai_score, b.ai_score) >= $${params.length}`); }
+        if (maxScore != null) { params.push(maxScore); clauses.push(`COALESCE(s.ai_score, b.ai_score) <= $${params.length}`); }
+        if (exitType) {
+            params.push(`%${exitType}%`);
+            clauses.push(`(s.notes ILIKE $${params.length} OR s.executed_by ILIKE $${params.length})`);
+        }
+
+        const whereClause = clauses.join(' AND ');
+
+        const result = await query(`
+            SELECT
+                s.id,
+                s.symbol,
+                s.quantity,
+                s.price                                              AS exit_price,
+                s.trade_date                                         AS closed_at,
+                s.pnl,
+                s.pnl_percent,
+                s.hold_hours,
+                s.slippage_pct,
+                s.notes                                              AS exit_notes,
+                s.executed_by,
+                -- prefer data from SELL record, fall back to matched BUY
+                COALESCE(s.ai_score,      b.ai_score)               AS ai_score,
+                COALESCE(s.sector,        b.sector)                 AS sector,
+                COALESCE(s.entry_regime,  b.entry_regime)           AS entry_regime,
+                b.price                                              AS entry_price,
+                b.trade_date                                         AS opened_at,
+                b.notes                                              AS entry_notes
+            FROM trades s
+            LEFT JOIN LATERAL (
+                SELECT price, trade_date, ai_score, sector, entry_regime, notes
+                FROM   trades
+                WHERE  user_id   = s.user_id
+                  AND  symbol    = s.symbol
+                  AND  action    = 'BUY'
+                  AND  trade_date <= s.trade_date
+                ORDER BY trade_date DESC
+                LIMIT 1
+            ) b ON true
+            WHERE ${whereClause}
+            ORDER BY s.trade_date DESC
+            LIMIT 500
+        `, params);
+
+        const toWinLoss = (pnl) => pnl > 0 ? 'win' : pnl < 0 ? 'loss' : 'breakeven';
+
+        // Derive exit type from notes/executed_by
+        function deriveExitType(notes, executedBy) {
+            const n = (notes || '').toLowerCase();
+            const e = (executedBy || '').toLowerCase();
+            if (/trailing.stop|trail/i.test(n + e))                    return 'trailing_stop';
+            if (/partial.*profit|partial.*take|locking/i.test(n + e))  return 'partial_take_profit';
+            if (/take.profit|profit.target/i.test(n + e))              return 'take_profit';
+            if (/stop.loss|stopped.out|stop loss/i.test(n + e))        return 'stop_loss';
+            if (/reconcil/i.test(e))                                    return 'stop_loss';
+            if (/slow.mover|max.hold|time.exit/i.test(n + e))          return 'time_exit';
+            if (/manual/i.test(e))                                      return 'manual';
+            return 'bot';
+        }
+
+        const trades = result.rows.map(r => ({
+            id:          r.id,
+            symbol:      r.symbol,
+            quantity:    parseFloat(r.quantity),
+            exitPrice:   r.exit_price  != null ? parseFloat(r.exit_price)  : null,
+            entryPrice:  r.entry_price != null ? parseFloat(r.entry_price) : null,
+            closedAt:    r.closed_at,
+            openedAt:    r.opened_at,
+            pnl:         r.pnl         != null ? parseFloat(r.pnl)         : null,
+            pnlPct:      r.pnl_percent != null ? parseFloat(r.pnl_percent) : null,
+            holdHours:   r.hold_hours  != null ? parseFloat(r.hold_hours)  : null,
+            slippagePct: r.slippage_pct != null ? parseFloat(r.slippage_pct) : null,
+            aiScore:     r.ai_score    != null ? parseFloat(r.ai_score)    : null,
+            sector:      r.sector      || null,
+            regime:      r.entry_regime || null,
+            exitType:    deriveExitType(r.exit_notes, r.executed_by),
+            executedBy:  r.executed_by || null,
+            outcome:     r.pnl != null ? toWinLoss(parseFloat(r.pnl)) : null,
+        }));
+
+        // Aggregate breakdowns
+        function buildAgg(rows, keyFn) {
+            const map = {};
+            for (const t of rows) {
+                const k = keyFn(t) || 'Unknown';
+                if (!map[k]) map[k] = { total: 0, wins: 0, pnls: [], returns: [] };
+                map[k].total++;
+                if (t.pnl > 0) map[k].wins++;
+                map[k].pnls.push(t.pnl || 0);
+                map[k].returns.push(t.pnlPct || 0);
+            }
+            return Object.entries(map).map(([bucket, d]) => ({
+                bucket,
+                total:     d.total,
+                wins:      d.wins,
+                winRate:   parseFloat(((d.wins / d.total) * 100).toFixed(1)),
+                avgReturn: parseFloat((d.returns.reduce((s, v) => s + v, 0) / d.total).toFixed(2)),
+                totalPnl:  parseFloat(d.pnls.reduce((s, v) => s + v, 0).toFixed(2)),
+            })).sort((a, b) => b.totalPnl - a.totalPnl);
+        }
+
+        // Sector filter options for the UI
+        const sectors  = [...new Set(trades.map(t => t.sector).filter(Boolean))].sort();
+        const regimes  = [...new Set(trades.map(t => t.regime).filter(Boolean))].sort();
+        const exitTypes = [...new Set(trades.map(t => t.exitType).filter(Boolean))].sort();
+
+        res.json({
+            days,
+            totalTrades: trades.length,
+            trades,
+            filters: { sectors, regimes, exitTypes },
+            byExit:   buildAgg(trades, t => t.exitType),
+            bySector: buildAgg(trades, t => t.sector),
+            byRegime: buildAgg(trades, t => t.regime),
+            byHold:   buildAgg(trades, t => {
+                const h = t.holdHours;
+                if (h == null) return 'Unknown';
+                if (h <= 24)  return '0-24h';
+                if (h <= 48)  return '25-48h';
+                if (h <= 72)  return '49-72h';
+                if (h <= 96)  return '73-96h';
+                if (h <= 120) return '97-120h';
+                return '120h+';
+            }),
+        });
+    } catch (err) {
+        logger.error('Trade log endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = router;

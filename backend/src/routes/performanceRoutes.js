@@ -1491,45 +1491,45 @@ router.get('/equity-curve', protect, async (req, res) => {
         const result = await query(`
             WITH daily AS (
                 SELECT
-                    DATE(trade_date)                       AS day,
-                    SUM(pnl)                               AS daily_pnl,
-                    COUNT(*)                               AS trades,
-                    COUNT(*) FILTER (WHERE pnl > 0)        AS wins,
-                    COUNT(*) FILTER (WHERE pnl < 0)        AS losses,
-                    ROUND(MAX(pnl)::numeric, 2)            AS best_trade,
-                    ROUND(MIN(pnl)::numeric, 2)            AS worst_trade,
-                    STRING_AGG(DISTINCT symbol, ', ' ORDER BY symbol) AS symbols
+                    DATE(trade_date)                                    AS day,
+                    SUM(pnl)                                            AS daily_pnl,
+                    COUNT(*)                                            AS trades,
+                    COUNT(*) FILTER (WHERE pnl > 0)                    AS wins,
+                    COUNT(*) FILTER (WHERE pnl < 0)                    AS losses,
+                    ROUND(MAX(pnl)::numeric, 2)                        AS best_trade,
+                    ROUND(MIN(pnl)::numeric, 2)                        AS worst_trade,
+                    STRING_AGG(DISTINCT symbol, ', ' ORDER BY symbol)  AS symbols
                 FROM trades
-                WHERE user_id   = $1
-                  AND action    = 'SELL'
-                  AND pnl       IS NOT NULL
+                WHERE user_id  = $1
+                  AND action   = 'SELL'
+                  AND pnl      IS NOT NULL
                   AND trade_date >= NOW() - ($2 * INTERVAL '1 day')
                 GROUP BY DATE(trade_date)
-                ORDER BY DATE(trade_date) ASC
             ),
             running AS (
+                -- Step 1: running cumulative P&L (single window function)
                 SELECT
-                    day,
-                    daily_pnl,
-                    trades,
-                    wins,
-                    losses,
-                    best_trade,
-                    worst_trade,
-                    symbols,
-                    ROUND(SUM(daily_pnl) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)::numeric, 2) AS cumulative_pnl,
-                    ROUND(MAX(SUM(daily_pnl) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)::numeric, 2) AS peak_pnl
+                    day, daily_pnl, trades, wins, losses,
+                    best_trade, worst_trade, symbols,
+                    SUM(daily_pnl) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_pnl
                 FROM daily
+            ),
+            with_peak AS (
+                -- Step 2: running peak of the cumulative P&L (second window function, not nested)
+                SELECT
+                    *,
+                    MAX(cumulative_pnl) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS peak_pnl
+                FROM running
             )
             SELECT
                 day,
-                ROUND(daily_pnl::numeric, 2)  AS daily_pnl,
+                ROUND(daily_pnl::numeric, 2)     AS daily_pnl,
                 trades, wins, losses,
                 best_trade, worst_trade, symbols,
-                cumulative_pnl,
-                peak_pnl,
+                ROUND(cumulative_pnl::numeric, 2) AS cumulative_pnl,
+                ROUND(peak_pnl::numeric, 2)       AS peak_pnl,
                 ROUND((cumulative_pnl - peak_pnl)::numeric, 2) AS drawdown
-            FROM running
+            FROM with_peak
             ORDER BY day ASC
         `, [userId, days]);
 

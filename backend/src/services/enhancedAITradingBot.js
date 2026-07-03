@@ -1058,6 +1058,46 @@ async function getSPY20DayReturn() {
     }
 }
 
+async function getSPY5DayReturn() {
+    const cached = cacheService.get('spy_5d_return');
+    if (cached !== null) return cached;
+    try {
+        const bars = await dataProvider.getBars('SPY', '1d', 10);
+        const closes = bars.map(b => b.close).filter(Boolean);
+        if (closes.length < 5) return 0;
+        const ret = ((closes[closes.length - 1] - closes[closes.length - 5]) / closes[closes.length - 5]) * 100;
+        cacheService.set('spy_5d_return', ret, 15 * 60 * 1000);
+        return ret;
+    } catch {
+        return 0;
+    }
+}
+
+/**
+ * Fetch short interest data for squeeze potential scoring.
+ * Yahoo's defaultKeyStatistics returns shortRatio (days-to-cover)
+ * and shortPercentOfFloat. Data updates bi-weekly; 4-hour in-process
+ * cache means one fetch per stock per scan window.
+ */
+async function getShortInterestData(symbol) {
+    const cacheKey = `short_int_${symbol}`;
+    const cached = cacheService.get(cacheKey);
+    if (cached !== null) return cached;
+    try {
+        const summary = await yahooFinance.quoteSummary(symbol, { modules: ['defaultKeyStatistics'] });
+        const ks = summary?.defaultKeyStatistics || {};
+        const result = {
+            shortRatio:          typeof ks.shortRatio          === 'number' ? ks.shortRatio          : null,
+            shortPercentOfFloat: typeof ks.shortPercentOfFloat === 'number' ? ks.shortPercentOfFloat : null,
+        };
+        cacheService.set(cacheKey, result, 4 * 60 * 60 * 1000);
+        return result;
+    } catch {
+        cacheService.set(cacheKey, null, 60 * 60 * 1000); // 1-hour miss cache
+        return null;
+    }
+}
+
 /**
  * Get days until the stock's next earnings report.
  * Returns null if unavailable, positive number = days until earnings,
@@ -1236,10 +1276,11 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         // Fetch core market data through provider abstraction to avoid Yahoo-specific 429 failures.
         // Each external call has a 10s hard timeout so a single stalled Yahoo request cannot
         // block the entire scan batch (and starve the DB connection pool).
-        const [quote, historicalData, spyReturn, daysToEarnings, newsData, smartMoneyScore, fundamentals, redditData, globalSentiment] = await Promise.all([
+        const [quote, historicalData, spyReturn, spyReturn5d, daysToEarnings, newsData, smartMoneyScore, fundamentals, redditData, globalSentiment, shortInterestData] = await Promise.all([
             _withQuoteTimeout(dataProvider.getQuote(symbol), null).catch(() => null),
             _withQuoteTimeout(dataProvider.getBars(symbol, '1d', 220), []).catch(() => []), // 220 days needed for 200-day SMA (Weinstein)
             getSPY20DayReturn(),
+            getSPY5DayReturn(),
             getDaysToEarnings(symbol, yahooFinanceInstance),
             AI_NEWS_SCORING_ENABLED
                 ? newsSentimentService.getNewsSentiment(symbol).catch(() => null)
@@ -1248,6 +1289,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             getFundamentalsQuick(symbol).catch(() => null),        // CANSLIM — 4hr cache
             redditAltDataService.getMentionScore(symbol).catch(() => null), // alt data — 15min cache
             globalSentimentService.getGlobalSentiment().catch(() => null),  // ATLAS — 15min cache
+            getShortInterestData(symbol).catch(() => null),        // squeeze potential — 4hr cache
         ]);
 
         if (!quote || !quote.price) {
@@ -1316,10 +1358,13 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         const macdInterpretation = indicators.interpretMACD(macd);
         const bbInterpretation = indicators.interpretBollingerBands(bb, quote.price);
 
-        // 20-day stock return for Relative Strength vs SPY
-        const price20dAgo = closes[Math.max(0, closes.length - 20)];
-        const stockReturn20d = ((price - price20dAgo) / price20dAgo) * 100;
-        const relativeStrength = stockReturn20d - spyReturn;
+        // 20-day & 5-day stock return for multi-timeframe Relative Strength vs SPY
+        const price20dAgo    = closes[Math.max(0, closes.length - 20)];
+        const price5dAgo     = closes[Math.max(0, closes.length - 5)];
+        const stockReturn20d = price20dAgo > 0 ? ((price - price20dAgo) / price20dAgo) * 100 : 0;
+        const stockReturn5d  = price5dAgo  > 0 ? ((price - price5dAgo)  / price5dAgo)  * 100 : 0;
+        const relativeStrength   = stockReturn20d - spyReturn;    // 20-day RS
+        const relativeStrength5d = stockReturn5d  - spyReturn5d;  // 5-day RS (short-term momentum check)
 
         // 52-week high proximity (how close price is to 52wk high)
         const highProximity = week52High > 0 ? price / week52High : 1;
@@ -1447,9 +1492,8 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         // 5b. 5-day momentum overbought guard: if price up >8% in 5 days AND already above SMA20,
         // apply an additional penalty. This catches the "chasing a breakout" pattern that produces
         // high AI scores but buys at the top (the BKNG / high-score loss pattern in our data).
-        if (closes.length >= 5) {
-            const price5dAgo = closes[closes.length - 5];
-            const gain5d = price5dAgo > 0 ? ((price - price5dAgo) / price5dAgo) * 100 : 0;
+        if (closes.length >= 5 && price5dAgo > 0) {
+            const gain5d = ((price - price5dAgo) / price5dAgo) * 100;
             if (gain5d > 8 && distFromSma20Pct > 3) {
                 const momentumPenalty = Math.round(Math.min(10, gain5d * 0.6));
                 aiScore -= momentumPenalty;
@@ -1457,12 +1501,27 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             }
         }
 
-        // 6. Relative Strength vs SPY (±8) — NEW
-        if (relativeStrength > 8)       { aiScore += 8;  scoringLog.push('RelStrength: +8 (strongly outperforming SPY)'); }
-        else if (relativeStrength > 3)  { aiScore += 4;  scoringLog.push('RelStrength: +4 (outperforming SPY)'); }
-        else if (relativeStrength > -3) { aiScore += 0;  scoringLog.push('RelStrength: 0 (in-line with SPY)'); }
-        else if (relativeStrength > -8) { aiScore -= 4;  scoringLog.push('RelStrength: -4 (underperforming SPY)'); }
-        else                            { aiScore -= 8;  scoringLog.push('RelStrength: -8 (strongly underperforming SPY)'); }
+        // 6. Relative Strength vs SPY — multi-timeframe (±8 base, ±3 confirmation)
+        // Primary: 20-day RS tells us the medium-term trend vs index.
+        // Confirmation: 5-day RS adds/removes 3 pts based on whether recent momentum agrees.
+        {
+            let rsAdj = 0;
+            if      (relativeStrength > 8)  { rsAdj = 8;  scoringLog.push(`RelStrength20d: +8 (${relativeStrength.toFixed(1)}pp vs SPY)`); }
+            else if (relativeStrength > 3)  { rsAdj = 4;  scoringLog.push(`RelStrength20d: +4 (${relativeStrength.toFixed(1)}pp vs SPY)`); }
+            else if (relativeStrength > -3) { rsAdj = 0;  scoringLog.push(`RelStrength20d: 0 (in-line with SPY)`); }
+            else if (relativeStrength > -8) { rsAdj = -4; scoringLog.push(`RelStrength20d: -4 (${relativeStrength.toFixed(1)}pp vs SPY)`); }
+            else                            { rsAdj = -8; scoringLog.push(`RelStrength20d: -8 (${relativeStrength.toFixed(1)}pp vs SPY)`); }
+
+            // 5-day confirmation: +3 if both timeframes agree bullish, -3 if 5d diverging bearish
+            if (relativeStrength > 3 && relativeStrength5d > 2) {
+                rsAdj += 3;
+                scoringLog.push(`RelStrength5d: +3 (momentum confirming, 5d RS +${relativeStrength5d.toFixed(1)}pp)`);
+            } else if (relativeStrength > 0 && relativeStrength5d < -3) {
+                rsAdj -= 3;
+                scoringLog.push(`RelStrength5d: -3 (momentum decelerating, 5d RS ${relativeStrength5d.toFixed(1)}pp)`);
+            }
+            aiScore += rsAdj;
+        }
 
         // 7. 52-Week High Proximity (±7) — NEW
         // Stocks near/at 52wk highs have momentum; far below shows weakness
@@ -1620,6 +1679,36 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             else if (smartMoneyScore > 0.55) { smAdj = +4; scoringLog.push(`SmartMoney: +4 (moderate institutional)`); }
             else if (smartMoneyScore < 0.35) { smAdj = -4; scoringLog.push(`SmartMoney: -4 (low institutional interest)`); }
             aiScore += smAdj;
+        }
+
+        // 12b. SHORT FLOAT / SQUEEZE POTENTIAL (±8)
+        // High short float + uptrend = squeeze fuel (short-covering amplifies the move).
+        // Very low short float = clean institutional setup (no trapped-short overhead).
+        // High short float + downtrend = shorts are right → penalise.
+        if (shortInterestData) {
+            const { shortRatio, shortPercentOfFloat } = shortInterestData;
+            if (shortPercentOfFloat !== null) {
+                // Is the stock in a short-term uptrend? Use 5-day and 1-day change.
+                const inUptrend = change > 0 && (closes.length >= 5 ? price > price5dAgo : true);
+
+                if (shortPercentOfFloat >= 0.20 && inUptrend) {
+                    // Heavy short + price moving up = explosive squeeze setup
+                    const ratioNote = shortRatio ? `, ${shortRatio.toFixed(1)}d DTC` : '';
+                    aiScore += 8;
+                    scoringLog.push(`Squeeze: +8 (${(shortPercentOfFloat * 100).toFixed(0)}% float short${ratioNote} — squeeze fuel)`);
+                } else if (shortPercentOfFloat >= 0.10 && inUptrend) {
+                    aiScore += 4;
+                    scoringLog.push(`Squeeze: +4 (${(shortPercentOfFloat * 100).toFixed(0)}% float short + uptrend)`);
+                } else if (shortPercentOfFloat < 0.02) {
+                    // Very low short = "clean" — institutions aren't fighting this
+                    aiScore += 3;
+                    scoringLog.push(`ShortFloat: +3 (only ${(shortPercentOfFloat * 100).toFixed(1)}% short — clean setup)`);
+                } else if (shortPercentOfFloat >= 0.20 && !inUptrend) {
+                    // Heavily shorted and falling → shorts are right, stay away
+                    aiScore -= 5;
+                    scoringLog.push(`Squeeze: -5 (${(shortPercentOfFloat * 100).toFixed(0)}% float short but downtrend — avoid)`);
+                }
+            }
         }
 
         // 13. CANSLIM (±14) — PANTHEON STEP 4: EPS growth + Revenue growth

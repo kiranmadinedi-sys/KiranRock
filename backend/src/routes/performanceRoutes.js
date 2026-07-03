@@ -1487,10 +1487,12 @@ router.get('/strategy-health', protect, async (req, res) => {
                     -- Avg Winner % and Avg Loser % for ratio + expectancy
                     ROUND(AVG(pnl_percent) FILTER (WHERE pnl > 0)::numeric, 2)       AS avg_win_pct,
                     ROUND(ABS(AVG(pnl_percent) FILTER (WHERE pnl < 0))::numeric, 2)  AS avg_loss_pct,
-                    -- Hold time
+                    -- Hold time (only rows where hold_hours is populated)
+                    COUNT(*) FILTER (WHERE hold_hours IS NOT NULL)                    AS hold_count,
                     ROUND(AVG(hold_hours)::numeric, 1)                               AS avg_hold_hours,
                     ROUND(STDDEV(hold_hours)::numeric, 1)                            AS stddev_hold_hours,
-                    -- Slippage
+                    -- Slippage (only rows where slippage_pct is populated)
+                    COUNT(*) FILTER (WHERE slippage_pct IS NOT NULL)                 AS slippage_count,
                     ROUND(AVG(ABS(slippage_pct))::numeric, 4)                        AS avg_slippage,
                     ROUND(MAX(ABS(slippage_pct))::numeric, 4)                        AS max_slippage,
                     -- Stop repair proxy: sells by reconciler (Alpaca stop fired)
@@ -1514,10 +1516,14 @@ router.get('/strategy-health', protect, async (req, res) => {
         const expectancy   = parseFloat(
             ((winRate / 100) * avgWinPct - (1 - winRate / 100) * avgLossPct).toFixed(2)
         );
-        const avgHoldHours  = parseFloat(r.avg_hold_hours || 0);
-        const stddevHold    = parseFloat(r.stddev_hold_hours || 0);
-        const holdStability = avgHoldHours > 0 ? parseFloat((stddevHold / avgHoldHours).toFixed(2)) : null;
-        const avgSlippage   = parseFloat(r.avg_slippage || 0);
+        const holdCount     = parseInt(r.hold_count || 0);
+        const avgHoldHours  = holdCount > 0 ? parseFloat(r.avg_hold_hours || 0) : null;
+        const stddevHold    = holdCount > 0 ? parseFloat(r.stddev_hold_hours || 0) : null;
+        const holdStability = (avgHoldHours != null && avgHoldHours > 0 && stddevHold != null)
+            ? parseFloat((stddevHold / avgHoldHours).toFixed(2)) : null;
+
+        const slippageCount = parseInt(r.slippage_count || 0);
+        const avgSlippage   = slippageCount > 0 ? parseFloat(r.avg_slippage || 0) : null;
         const stopExits     = parseInt(r.stop_exits || 0);
 
         // Estimate stop repair events from trading logs (best-effort)
@@ -1581,19 +1587,23 @@ router.get('/strategy-health', protect, async (req, res) => {
                 key:      'avgHoldHours',
                 label:    'Avg Hold Time',
                 desc:     'Average hours a position was open before closing.',
-                current:  avgHoldHours || null,
-                target:   'Stable',
+                current:  avgHoldHours,
+                target:   'Stable (low variance)',
                 unit:     'h',
-                status:   total === 0 ? 'na' : holdStability !== null && holdStability < 1.0 ? 'green' : holdStability !== null && holdStability < 1.5 ? 'yellow' : 'red',
+                status:   holdCount === 0 || holdStability === null ? 'na'
+                    : holdStability < 1.0 ? 'green'
+                    : holdStability < 1.5 ? 'yellow' : 'red',
+                note:     holdCount > 0 ? `${holdCount} of ${total} trades have hold time data` : 'hold_hours not yet populated',
             },
             {
                 key:      'slippage',
                 label:    'Slippage',
                 desc:     'Difference between expected and actual fill price.',
-                current:  avgSlippage > 0 ? avgSlippage : null,
+                current:  avgSlippage,
                 target:   '< 0.15%',
                 unit:     '%',
-                status:   status(avgSlippage, v => v < 0.15, v => v < 0.30),
+                status:   slippageCount === 0 ? 'na' : status(avgSlippage, v => v < 0.15, v => v < 0.30),
+                note:     slippageCount > 0 ? `${slippageCount} of ${total} trades have slippage data` : 'slippage_pct not yet populated',
             },
             {
                 key:      'sampleSize',

@@ -73,6 +73,7 @@ interface HealthMetric {
     target: string;
     unit: string;
     status: 'green' | 'yellow' | 'red' | 'na';
+    note?: string;
 }
 
 interface HealthData {
@@ -784,31 +785,35 @@ export default function AnalyticsPage() {
                                     </thead>
                                     <tbody>
                                         {health.metrics.map((m) => {
-                                            const dot = m.status === 'green' ? 'bg-green-400'
+                                            const dot = m.status === 'green'  ? 'bg-green-400'
                                                 : m.status === 'yellow' ? 'bg-yellow-400'
-                                                : m.status === 'red' ? 'bg-red-400'
+                                                : m.status === 'red'    ? 'bg-red-400'
                                                 : 'bg-gray-600';
-                                            const valColor = m.status === 'green' ? 'text-green-400 font-semibold'
+                                            const valColor = m.status === 'green'  ? 'text-green-400 font-semibold'
                                                 : m.status === 'yellow' ? 'text-yellow-400 font-semibold'
-                                                : m.status === 'red' ? 'text-red-400 font-semibold'
+                                                : m.status === 'red'    ? 'text-red-400 font-semibold'
                                                 : 'text-gray-500';
+                                            const fmt = (v: number) => {
+                                                if (m.unit === '%')      return `${v}%`;
+                                                if (m.unit === 'x')      return `${v}x`;
+                                                if (m.unit === 'h')      return `${v}h`;
+                                                if (m.unit === 'trades') return `${v} trades`;
+                                                return String(v);
+                                            };
                                             const displayVal = m.current == null
-                                                ? <span className="text-gray-600">N/A</span>
-                                                : <span className={valColor}>
-                                                    {m.unit === '%' || m.unit === 'x'
-                                                        ? `${m.current}${m.unit}`
-                                                        : m.unit === 'h'
-                                                            ? `${m.current}h`
-                                                            : m.unit === 'trades'
-                                                                ? `${m.current} trades`
-                                                                : String(m.current)}
-                                                  </span>;
+                                                ? <span className="text-gray-600 text-xs italic">No data yet</span>
+                                                : <span className={valColor}>{fmt(m.current)}</span>;
                                             return (
                                                 <tr key={m.key} className="border-t border-gray-700/40 hover:bg-gray-700/20">
                                                     <td className="px-4 py-3">
                                                         <span className={`inline-block w-2.5 h-2.5 rounded-full ${dot}`} />
                                                     </td>
-                                                    <td className="px-4 py-3 font-medium text-white">{m.label}</td>
+                                                    <td className="px-4 py-3">
+                                                        <span className="font-medium text-white">{m.label}</span>
+                                                        {m.note && m.status === 'na' && (
+                                                            <p className="text-[10px] text-gray-600 mt-0.5">{m.note}</p>
+                                                        )}
+                                                    </td>
                                                     <td className="px-4 py-3 text-right">{displayVal}</td>
                                                     <td className="px-4 py-3 text-right text-gray-400 text-xs">{m.target}</td>
                                                     <td className="px-4 py-3 text-gray-500 text-xs hidden md:table-cell max-w-xs">{m.desc}</td>

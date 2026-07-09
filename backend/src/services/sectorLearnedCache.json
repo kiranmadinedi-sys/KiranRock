@@ -45,5 +45,7 @@
   "CMG": "Consumer Cyclical",
   "BMY": "Healthcare",
   "BNTX": "Healthcare",
-  "BILL": "Financial Services"
+  "BILL": "Financial Services",
+  "APD": "Basic Materials",
+  "AIG": "Financial Services"
 }

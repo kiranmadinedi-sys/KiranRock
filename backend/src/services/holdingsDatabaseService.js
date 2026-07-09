@@ -111,6 +111,18 @@ async function updatePeakPrice(userId, symbol, peakPrice) {
     return result.rows[0];
 }
 
+// Persist a re-score result for quality score decay tracking
+async function updateRescoreState(userId, symbol, score, streak) {
+    const result = await query(`
+        UPDATE holdings
+        SET last_rescore_score = $1, last_rescore_at = NOW(), low_score_streak = $2
+        WHERE user_id = $3 AND symbol = $4
+        RETURNING *
+    `, [score, streak, userId, symbol]);
+
+    return result.rows[0];
+}
+
 // Mark partial profit taken
 async function markPartialProfitTaken(userId, symbol, taken = true) {
     const result = await query(`
@@ -150,6 +162,7 @@ module.exports = {
     upsertHolding,
     updateHoldingQuantity,
     updatePeakPrice,
+    updateRescoreState,
     markPartialProfitTaken,
     updateCurrentPrices,
     deleteHolding

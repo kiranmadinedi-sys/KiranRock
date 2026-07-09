@@ -88,6 +88,7 @@ const yahooProvider = (() => {
         return {
             symbol,
             price:         q.regularMarketPrice,
+            open:          q.regularMarketOpen || null,  // today's opening price for intraday direction filter
             change:        q.regularMarketChange || 0,
             changePercent: q.regularMarketChangePercent || 0,
             volume:        q.regularMarketVolume || 0,
@@ -173,6 +174,31 @@ const alpacaProvider = (() => {
     const _quoteCache = new Map();
     const QUOTE_CACHE_TTL = 60 * 1000; // 60 seconds
 
+    // ── Stale-trade guard for gate-critical symbols (2026-07-06 incident) ──────────
+    // Alpaca's free IEX snapshot served a stuck LatestTrade for QQQ for 6+ hours,
+    // implying a price ~3% off the real (unremarkable) intraday range. Because
+    // QQQGate/SPYGate use this single quote to block ALL new buys bot-wide, a stuck
+    // feed for one of these symbols silently costs a full trading day of opportunity.
+    // Fix: for this small set of gate-critical, highly-liquid symbols, reject a quote
+    // whose LatestTrade hasn't updated in STALE_TRADE_MAX_AGE_MS during regular market
+    // hours — the caller's existing Polygon fallback then takes over automatically.
+    // Scoped narrowly (not all symbols) so illiquid names with genuinely sparse IEX
+    // prints aren't penalized.
+    const STALE_TRADE_GUARD_SYMBOLS = new Set(['QQQ', 'SPY']);
+    const STALE_TRADE_MAX_AGE_MS    = 5 * 60 * 1000; // 5 minutes
+
+    function isRegularMarketHoursET() {
+        const parts = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hour12: false, weekday: 'short'
+        }).formatToParts(new Date());
+        const day    = parts.find(p => p.type === 'weekday').value;
+        if (day === 'Sat' || day === 'Sun') return false;
+        const hour   = parseInt(parts.find(p => p.type === 'hour').value,   10);
+        const minute = parseInt(parts.find(p => p.type === 'minute').value, 10);
+        const mins   = hour * 60 + minute;
+        return mins >= (9 * 60 + 30) && mins < (16 * 60);
+    }
+
     // Alpaca doesn't support index symbols (^VIX, ^GSPC etc.) — fall back to Yahoo
     function isIndexSymbol(symbol) {
         return symbol.startsWith('^') || symbol.startsWith('=');
@@ -237,6 +263,18 @@ const alpacaProvider = (() => {
         const d = snap.DailyBar      || snap.dailyBar      || {};
         const p = snap.PrevDailyBar  || snap.prevDailyBar  || {};
         const q = snap.LatestQuote   || snap.latestQuote   || {};
+
+        const sym = (symbol || '').toUpperCase();
+        if (STALE_TRADE_GUARD_SYMBOLS.has(sym) && t.Timestamp && isRegularMarketHoursET()) {
+            const tradeAgeMs = Date.now() - new Date(t.Timestamp).getTime();
+            if (tradeAgeMs > STALE_TRADE_MAX_AGE_MS) {
+                logger.warn(`[DataProvider:Alpaca] Stale IEX trade for ${sym} during market hours — rejecting, will fall back to Polygon`, {
+                    symbol: sym, tradeAgeMin: Math.round(tradeAgeMs / 60000), tradeTimestamp: t.Timestamp
+                });
+                throw new Error(`Stale Alpaca IEX trade for ${sym} (${Math.round(tradeAgeMs / 60000)}min old)`);
+            }
+        }
+
         const price = t.Price || d.ClosePrice || 0;
         const prevClose = p.ClosePrice || d.OpenPrice || price;
         const result = {

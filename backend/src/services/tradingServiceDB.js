@@ -25,7 +25,7 @@ const getCurrentPrice = async (symbol) => {
 /**
  * Execute a buy order
  */
-const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', aiScore = null, sector = null, notes = null, fillPrice = null, entryRegime = null) => {
+const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', aiScore = null, sector = null, notes = null, fillPrice = null, entryRegime = null, atr = null) => {
     try {
         if (quantity <= 0 || !Number.isInteger(quantity)) {
             throw new Error('Quantity must be a positive integer');
@@ -108,13 +108,13 @@ const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', 
                     symbol.toUpperCase()
                 ]);
             } else {
-                // Create new holding
+                // Create new holding — store ATR at entry for ATR-aware trailing stops
                 await client.query(`
                     INSERT INTO holdings (
                         user_id, symbol, quantity, average_price, current_price,
                         market_value, gain_loss, gain_loss_percent,
-                        peak_price, sector
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                        peak_price, sector, atr
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 `, [
                     userId,
                     symbol.toUpperCase(),
@@ -125,7 +125,8 @@ const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', 
                     0,
                     0,
                     currentPrice,
-                    sector
+                    sector,
+                    atr
                 ]);
             }
             

@@ -1321,10 +1321,10 @@ router.post('/plain-summary', protect, async (req, res) => {
                 ROUND(AVG(pnl)::numeric, 2)                                      AS avg_pnl,
                 ROUND(AVG(pnl_percent)::numeric, 2)                              AS avg_return_pct,
                 -- Winner/loser averages separately (keeps Haiku from confusing overall avg with per-direction avg)
-                ROUND(AVG(pnl)         FILTER (WHERE pnl > 0)::numeric, 2)      AS avg_win_usd,
-                ROUND(AVG(pnl_percent) FILTER (WHERE pnl > 0)::numeric, 2)      AS avg_win_pct,
-                ROUND(ABS(AVG(pnl))    FILTER (WHERE pnl < 0)::numeric, 2)      AS avg_loss_usd,
-                ROUND(ABS(AVG(pnl_percent)) FILTER (WHERE pnl < 0)::numeric, 2) AS avg_loss_pct,
+                ROUND((AVG(pnl)         FILTER (WHERE pnl > 0))::numeric, 2)    AS avg_win_usd,
+                ROUND((AVG(pnl_percent) FILTER (WHERE pnl > 0))::numeric, 2)    AS avg_win_pct,
+                ROUND(ABS((AVG(pnl)         FILTER (WHERE pnl < 0))::numeric), 2) AS avg_loss_usd,
+                ROUND(ABS((AVG(pnl_percent) FILTER (WHERE pnl < 0))::numeric), 2) AS avg_loss_pct,
                 ROUND(MAX(pnl)::numeric, 2)                                      AS best_trade_pnl,
                 ROUND(MIN(pnl)::numeric, 2)                                      AS worst_trade_pnl,
                 (SELECT symbol FROM sells ORDER BY pnl DESC  LIMIT 1)           AS best_symbol,
@@ -1765,6 +1765,325 @@ router.get('/strategy-health', protect, async (req, res) => {
         res.json({ days, total, metrics, summary: { passing, warning, failing, na: metrics.length - passing - warning - failing } });
     } catch (err) {
         logger.error('Strategy health endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/performance/exit-breakdown?days=90
+ * Categorizes closed trades by exit type and returns avg return + trade count per category.
+ * Exit types are derived from the notes/reason text recorded at sell time.
+ * Used by the Analytics page to show which exit mechanisms contribute most to P&L.
+ */
+router.get('/exit-breakdown', protect, async (req, res) => {
+    try {
+        const { query } = require('../config/database');
+        const userId = req.userId;
+        const days   = Math.max(7, Math.min(parseInt(req.query.days) || 90, 365));
+
+        const result = await query(`
+            SELECT
+                CASE
+                    WHEN notes ILIKE '%break-even%' OR notes ILIKE '%breakeven%'
+                         THEN 'Break-even Stop'
+                    WHEN notes ILIKE '%trailing stop%'
+                         THEN 'Trailing Stop'
+                    WHEN notes ILIKE '%stop-loss%' OR notes ILIKE '%stop loss%'
+                         THEN 'Initial Stop'
+                    WHEN notes ILIKE '%partial take-profit%' OR notes ILIKE '%partial profit%'
+                         THEN 'Partial Profit'
+                    WHEN notes ILIKE '%take-profit%' OR notes ILIKE '%take profit%'
+                         THEN 'Full Profit Target'
+                    WHEN notes ILIKE '%max-hold%' OR notes ILIKE '%max hold%'
+                         THEN 'Max Hold (7d)'
+                    WHEN notes ILIKE '%slow mover%'
+                         THEN 'Slow Mover Exit'
+                    WHEN notes ILIKE '%earnings%'
+                         THEN 'Earnings Exit'
+                    WHEN notes ILIKE '%swing%'
+                         THEN 'Swing Exit'
+                    ELSE 'Other'
+                END                                                   AS exit_type,
+                COUNT(*)                                              AS trades,
+                COUNT(*) FILTER (WHERE pnl > 0)                      AS winners,
+                ROUND((AVG(pnl_percent))::numeric, 2)                AS avg_return_pct,
+                ROUND((AVG(pnl))::numeric, 2)                        AS avg_pnl_usd,
+                ROUND((SUM(pnl))::numeric, 2)                        AS total_pnl_usd,
+                ROUND(
+                    (COUNT(*) FILTER (WHERE pnl > 0))::numeric /
+                    NULLIF(COUNT(*), 0) * 100, 1
+                )                                                     AS win_rate
+            FROM trades
+            WHERE user_id   = $1
+              AND action     = 'SELL'
+              AND pnl        IS NOT NULL
+              AND trade_date >= NOW() - ($2 * INTERVAL '1 day')
+            GROUP BY 1
+            ORDER BY total_pnl_usd DESC
+        `, [userId, days]);
+
+        res.json({
+            days,
+            rows: result.rows.map(r => ({
+                exitType:      r.exit_type,
+                trades:        parseInt(r.trades),
+                winners:       parseInt(r.winners),
+                winRate:       parseFloat(r.win_rate || 0),
+                avgReturnPct:  parseFloat(r.avg_return_pct || 0),
+                avgPnlUsd:     parseFloat(r.avg_pnl_usd || 0),
+                totalPnlUsd:   parseFloat(r.total_pnl_usd || 0),
+            }))
+        });
+    } catch (err) {
+        const logger = require('../utils/logger');
+        logger.error('Exit breakdown endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/performance/holdback-sim?days=90
+ * For every trailing-stop and break-even exit, looks up what the stock did on
+ * the next trading day (using daily_bars, which is already ingested nightly).
+ * Answers: "Was our exit too early — would holding 24h longer have made more?"
+ * Pure observation — no bot behavior changes.
+ */
+router.get('/holdback-sim', protect, async (req, res) => {
+    try {
+        const { query } = require('../config/database');
+        const userId = req.userId;
+        const days   = Math.max(7, Math.min(parseInt(req.query.days) || 90, 365));
+
+        // Join each exit trade to the next available daily bar close after the exit date.
+        // We consider only trailing stop and break-even exits — those are where holding
+        // longer is meaningful. Initial stops exited because the trade was wrong; simulating
+        // holding a loser longer is not useful.
+        const result = await query(`
+            WITH exits AS (
+                SELECT
+                    t.id,
+                    t.symbol,
+                    t.trade_date                            AS exit_date,
+                    t.price                                 AS exit_price,
+                    t.quantity,
+                    t.pnl                                   AS actual_pnl,
+                    t.pnl_percent                           AS actual_pnl_pct,
+                    CASE
+                        WHEN t.notes ILIKE '%break-even%' OR t.notes ILIKE '%breakeven%'
+                             THEN 'Break-even Stop'
+                        WHEN t.notes ILIKE '%trailing stop%'
+                             THEN 'Trailing Stop'
+                    END                                     AS exit_type
+                FROM trades t
+                WHERE t.user_id  = $1
+                  AND t.action   = 'SELL'
+                  AND t.pnl      IS NOT NULL
+                  AND t.price    IS NOT NULL
+                  AND t.quantity IS NOT NULL
+                  AND t.trade_date >= NOW() - ($2 * INTERVAL '1 day')
+                  AND (
+                    t.notes ILIKE '%trailing stop%'
+                    OR t.notes ILIKE '%break-even%'
+                    OR t.notes ILIKE '%breakeven%'
+                  )
+            ),
+            next_bar AS (
+                SELECT DISTINCT ON (e.id)
+                    e.id,
+                    b.close AS next_day_close
+                FROM exits e
+                JOIN daily_bars b ON b.symbol = e.symbol
+                    AND b.timestamp > e.exit_date
+                ORDER BY e.id, b.timestamp ASC
+            )
+            SELECT
+                e.exit_type,
+                e.symbol,
+                e.exit_date,
+                ROUND(e.exit_price::numeric, 2)                                AS exit_price,
+                ROUND(nb.next_day_close::numeric, 2)                           AS next_day_price,
+                ROUND(e.actual_pnl::numeric, 2)                                AS actual_pnl,
+                -- What we would have made if held one more day
+                ROUND((nb.next_day_close - e.exit_price) * e.quantity::numeric, 2) AS holdback_delta,
+                -- Positive = exit was too early (stock kept going up)
+                -- Negative = exit was correct (stock dropped after we sold)
+                ROUND(((nb.next_day_close - e.exit_price) / NULLIF(e.exit_price, 0) * 100)::numeric, 2) AS holdback_pct
+            FROM exits e
+            JOIN next_bar nb ON nb.id = e.id
+            ORDER BY e.exit_date DESC
+        `, [userId, days]);
+
+        const rows = result.rows;
+
+        // Aggregate: was exiting early net positive or negative?
+        const trailingRows = rows.filter(r => r.exit_type === 'Trailing Stop');
+        const breakevenRows = rows.filter(r => r.exit_type === 'Break-even Stop');
+
+        const summarize = (rws) => {
+            if (!rws.length) return null;
+            const totalDelta  = rws.reduce((s, r) => s + parseFloat(r.holdback_delta || 0), 0);
+            const tooEarly    = rws.filter(r => parseFloat(r.holdback_delta) > 0).length;
+            const correct     = rws.filter(r => parseFloat(r.holdback_delta) <= 0).length;
+            const avgPct      = rws.reduce((s, r) => s + parseFloat(r.holdback_pct || 0), 0) / rws.length;
+            return {
+                count: rws.length,
+                tooEarly,
+                correct,
+                totalDelta: parseFloat(totalDelta.toFixed(2)),
+                avgHoldbackPct: parseFloat(avgPct.toFixed(2)),
+                verdict: totalDelta > 0 ? 'exits too early' : 'exits correctly'
+            };
+        };
+
+        res.json({
+            days,
+            trailing:  summarize(trailingRows),
+            breakeven: summarize(breakevenRows),
+            trades: rows.map(r => ({
+                exitType:      r.exit_type,
+                symbol:        r.symbol,
+                exitDate:      r.exit_date,
+                exitPrice:     parseFloat(r.exit_price),
+                nextDayPrice:  parseFloat(r.next_day_price),
+                actualPnl:     parseFloat(r.actual_pnl),
+                holdbackDelta: parseFloat(r.holdback_delta),  // >0 = left money on table, <0 = exit was right
+                holdbackPct:   parseFloat(r.holdback_pct),
+            }))
+        });
+    } catch (err) {
+        const logger = require('../utils/logger');
+        logger.error('Holdback sim endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/performance/market-review?days=7
+ * Compares AI score/recommendation against actual forward market returns for the FULL
+ * scan universe (every ticker analyzed, not just what the bot traded). Not user-scoped —
+ * market_review_snapshots is global scan data, same for every account.
+ * Answers: "is the model's score correlated with real outcomes, and what did it pass on?"
+ */
+router.get('/market-review', protect, async (req, res) => {
+    try {
+        const { query } = require('../config/database');
+        const days = Math.max(1, Math.min(parseInt(req.query.days) || 7, 90));
+
+        const bucketRes = await query(`
+            SELECT
+                COALESCE(recommendation, 'UNSCORED')                                        AS recommendation,
+                COUNT(*)                                                                     AS count,
+                COUNT(*) FILTER (WHERE return_1d_pct IS NOT NULL)                            AS count_1d,
+                ROUND(AVG(return_1d_pct)::numeric, 2)                                        AS avg_return_1d,
+                ROUND(AVG(return_3d_pct)::numeric, 2)                                        AS avg_return_3d,
+                ROUND(AVG(return_5d_pct)::numeric, 2)                                        AS avg_return_5d,
+                ROUND(
+                    (COUNT(*) FILTER (WHERE return_1d_pct > 0))::numeric /
+                    NULLIF(COUNT(*) FILTER (WHERE return_1d_pct IS NOT NULL), 0) * 100, 1
+                )                                                                            AS win_rate_1d
+            FROM market_review_snapshots
+            WHERE scan_date >= CURRENT_DATE - ($1 * INTERVAL '1 day')
+            GROUP BY recommendation
+            ORDER BY CASE recommendation
+                WHEN 'STRONG BUY'  THEN 1 WHEN 'BUY' THEN 2 WHEN 'HOLD' THEN 3
+                WHEN 'SELL'        THEN 4 WHEN 'STRONG SELL' THEN 5 ELSE 6 END
+        `, [days]);
+
+        // Highest-return tickers the bot did NOT trade — what did the score miss?
+        const missedRes = await query(`
+            SELECT scan_date, symbol, ai_score, recommendation, sector, setup_family, regime, blocked_reason,
+                   price_at_scan, return_1d_pct, return_3d_pct, return_5d_pct
+            FROM market_review_snapshots
+            WHERE scan_date >= CURRENT_DATE - ($1 * INTERVAL '1 day')
+              AND was_traded = false
+              AND COALESCE(return_5d_pct, return_3d_pct, return_1d_pct) IS NOT NULL
+            ORDER BY COALESCE(return_5d_pct, return_3d_pct, return_1d_pct) DESC
+            LIMIT 20
+        `, [days]);
+
+        // Traded tickers that lost the most — what did the score get wrong?
+        const worstTradedRes = await query(`
+            SELECT scan_date, symbol, ai_score, recommendation, sector, setup_family, regime, blocked_reason,
+                   price_at_scan, return_1d_pct, return_3d_pct, return_5d_pct
+            FROM market_review_snapshots
+            WHERE scan_date >= CURRENT_DATE - ($1 * INTERVAL '1 day')
+              AND was_traded = true
+              AND return_1d_pct IS NOT NULL
+            ORDER BY return_1d_pct ASC
+            LIMIT 20
+        `, [days]);
+
+        // Which market regime actually produced the best forward returns across the whole
+        // scanned universe? One regime label applies to all tickers captured that day.
+        const regimeRes = await query(`
+            SELECT
+                COALESCE(regime, 'UNKNOWN')                                                  AS regime,
+                COUNT(DISTINCT scan_date)                                                     AS days,
+                COUNT(*)                                                                      AS count,
+                ROUND(AVG(return_1d_pct)::numeric, 2)                                         AS avg_return_1d,
+                ROUND(AVG(return_5d_pct)::numeric, 2)                                         AS avg_return_5d,
+                ROUND(
+                    (COUNT(*) FILTER (WHERE return_1d_pct > 0))::numeric /
+                    NULLIF(COUNT(*) FILTER (WHERE return_1d_pct IS NOT NULL), 0) * 100, 1
+                )                                                                             AS win_rate_1d
+            FROM market_review_snapshots
+            WHERE scan_date >= CURRENT_DATE - ($1 * INTERVAL '1 day')
+            GROUP BY regime
+            ORDER BY avg_return_1d DESC NULLS LAST
+        `, [days]);
+
+        // Full raw list for this period — lets the UI answer "did we even look at ticker X"
+        // regardless of whether it ended up in the missed/worst-traded highlight lists.
+        const allRes = await query(`
+            SELECT scan_date, symbol, ai_score, recommendation, sector, setup_family, regime, blocked_reason,
+                   price_at_scan, return_1d_pct, return_3d_pct, return_5d_pct, was_traded
+            FROM market_review_snapshots
+            WHERE scan_date >= CURRENT_DATE - ($1 * INTERVAL '1 day')
+            ORDER BY scan_date DESC, ai_score DESC NULLS LAST
+            LIMIT 2000
+        `, [days]);
+
+        const mapRow = (r) => ({
+            scanDate:       r.scan_date,
+            symbol:         r.symbol,
+            aiScore:        r.ai_score != null ? parseFloat(r.ai_score) : null,
+            recommendation: r.recommendation,
+            sector:         r.sector,
+            setupFamily:    r.setup_family,
+            regime:         r.regime || null,
+            blockedReason:  r.blocked_reason || null,
+            priceAtScan:    r.price_at_scan != null ? parseFloat(r.price_at_scan) : null,
+            return1d:       r.return_1d_pct != null ? parseFloat(r.return_1d_pct) : null,
+            return3d:       r.return_3d_pct != null ? parseFloat(r.return_3d_pct) : null,
+            return5d:       r.return_5d_pct != null ? parseFloat(r.return_5d_pct) : null,
+        });
+
+        res.json({
+            days,
+            bucketSummary: bucketRes.rows.map(r => ({
+                recommendation: r.recommendation,
+                count:          parseInt(r.count),
+                count1d:        parseInt(r.count_1d),
+                avgReturn1d:    r.avg_return_1d != null ? parseFloat(r.avg_return_1d) : null,
+                avgReturn3d:    r.avg_return_3d != null ? parseFloat(r.avg_return_3d) : null,
+                avgReturn5d:    r.avg_return_5d != null ? parseFloat(r.avg_return_5d) : null,
+                winRate1d:      r.win_rate_1d != null ? parseFloat(r.win_rate_1d) : null,
+            })),
+            missedOpportunities: missedRes.rows.map(mapRow),
+            worstTraded:         worstTradedRes.rows.map(mapRow),
+            allRows:             allRes.rows.map(r => ({ ...mapRow(r), wasTraded: r.was_traded })),
+            regimeSummary: regimeRes.rows.map(r => ({
+                regime:      r.regime,
+                days:        parseInt(r.days),
+                count:       parseInt(r.count),
+                avgReturn1d: r.avg_return_1d != null ? parseFloat(r.avg_return_1d) : null,
+                avgReturn5d: r.avg_return_5d != null ? parseFloat(r.avg_return_5d) : null,
+                winRate1d:   r.win_rate_1d != null ? parseFloat(r.win_rate_1d) : null,
+            })),
+        });
+    } catch (err) {
+        const logger = require('../utils/logger');
+        logger.error('Market review endpoint error', { error: err.message });
         res.status(500).json({ error: err.message });
     }
 });

@@ -269,6 +269,18 @@ async function initializeDatabase() {
         // holdings.created_at — required by positionReconciliationService SHADOW fix
         await query(`ALTER TABLE holdings ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW()`);
 
+        // holdings.atr — ATR at time of entry; used by getDynamicTrailingStop to set ATR-aware trail width
+        // Without this, trailing stops use only gain-percentage tiers and ignore each stock's actual volatility.
+        await query(`ALTER TABLE holdings ADD COLUMN IF NOT EXISTS atr DECIMAL(10, 4)`);
+
+        // Quality score decay — periodic re-scoring of open positions (2026-07-06).
+        // last_rescore_score/at: most recent AI re-score and when it ran (throttled to ~1x/day).
+        // low_score_streak: consecutive re-scores below the decay-exit floor; exit fires at streak >= 2
+        // to avoid reacting to one noisy recalculation.
+        await query(`ALTER TABLE holdings ADD COLUMN IF NOT EXISTS last_rescore_score DECIMAL(5, 2)`);
+        await query(`ALTER TABLE holdings ADD COLUMN IF NOT EXISTS last_rescore_at TIMESTAMPTZ`);
+        await query(`ALTER TABLE holdings ADD COLUMN IF NOT EXISTS low_score_streak INTEGER DEFAULT 0`);
+
         await query(`
             CREATE TABLE IF NOT EXISTS worker_runtime_status (
                 worker_name VARCHAR(100) PRIMARY KEY,
@@ -853,6 +865,93 @@ async function initializeDatabase() {
             ON calibration_suggestions(user_id, created_at DESC)
         `);
         console.log('✓ Created calibration_suggestions table');
+
+        // Market Review — daily snapshot of the FULL scan universe (every ticker analyzed,
+        // not just ones traded) with forward returns backfilled once time has passed.
+        // Purpose: compare AI score/recommendation against what the market actually did,
+        // independent of what the bot chose to trade — used to validate/recalibrate scoring
+        // logic against real outcomes (2026-07-06).
+        await query(`
+            CREATE TABLE IF NOT EXISTS market_review_snapshots (
+                id               BIGSERIAL     PRIMARY KEY,
+                scan_date        DATE          NOT NULL,
+                symbol           VARCHAR(20)   NOT NULL,
+                ai_score         DECIMAL(5, 2),
+                recommendation   VARCHAR(20),
+                sector           VARCHAR(100),
+                setup_family     VARCHAR(50),
+                tier             INTEGER,
+                regime           VARCHAR(30),
+                price_at_scan    DECIMAL(12, 4),
+                was_traded       BOOLEAN       DEFAULT FALSE,
+                close_1d         DECIMAL(12, 4),
+                return_1d_pct    DECIMAL(8, 4),
+                close_3d         DECIMAL(12, 4),
+                return_3d_pct    DECIMAL(8, 4),
+                close_5d         DECIMAL(12, 4),
+                return_5d_pct    DECIMAL(8, 4),
+                created_at       TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+                updated_at       TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+                UNIQUE(scan_date, symbol)
+            )
+        `);
+        // regime added after initial table creation — needed by existing installs
+        await query(`ALTER TABLE market_review_snapshots ADD COLUMN IF NOT EXISTS regime VARCHAR(30)`);
+        // blocked_reason added 2026-07-07 — see trade_rejection_log below
+        await query(`ALTER TABLE market_review_snapshots ADD COLUMN IF NOT EXISTS blocked_reason VARCHAR(40)`);
+        await query(`
+            CREATE INDEX IF NOT EXISTS idx_market_review_scan_date
+            ON market_review_snapshots(scan_date)
+        `);
+        await query(`
+            CREATE INDEX IF NOT EXISTS idx_market_review_symbol
+            ON market_review_snapshots(symbol)
+        `);
+        console.log('✓ Created market_review_snapshots table');
+
+        // Trade Rejection Log — "shadow portfolio" groundwork (2026-07-07).
+        // Records the specific gate that blocked a candidate that had already cleared the
+        // score threshold (i.e. was a real BUY/STRONG BUY opportunity, not just noise).
+        // One row per (date, symbol) — last gate to reject it that day wins via upsert.
+        // Market Review's daily capture LEFT JOINs this so "why wasn't this bought" can be
+        // measured against the ticker's actual forward return, not guessed at.
+        await query(`
+            CREATE TABLE IF NOT EXISTS trade_rejection_log (
+                id               BIGSERIAL     PRIMARY KEY,
+                rejection_date   DATE          NOT NULL,
+                symbol           VARCHAR(20)   NOT NULL,
+                reason           VARCHAR(40)   NOT NULL,
+                detail           TEXT,
+                updated_at       TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+                UNIQUE(rejection_date, symbol)
+            )
+        `);
+        await query(`
+            CREATE INDEX IF NOT EXISTS idx_trade_rejection_log_date
+            ON trade_rejection_log(rejection_date)
+        `);
+        console.log('✓ Created trade_rejection_log table');
+
+        // Holding Re-score History — durable log of every Quality Score Decay re-score
+        // (2026-07-07). holdings.last_rescore_score only keeps the latest value; this table
+        // keeps the full trajectory so a future pass can distinguish "score steadily declining"
+        // from "one noisy low reading" — separate from the existing 2-strike exit rule, which
+        // is unchanged. Kept even after the position closes (unlike holdings, which is deleted
+        // on exit) so decay-trend-vs-actual-outcome can be studied later.
+        await query(`
+            CREATE TABLE IF NOT EXISTS holding_rescore_history (
+                id             BIGSERIAL     PRIMARY KEY,
+                user_id        VARCHAR(50)   NOT NULL,
+                symbol         VARCHAR(20)   NOT NULL,
+                score          DECIMAL(5, 2) NOT NULL,
+                scored_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+            )
+        `);
+        await query(`
+            CREATE INDEX IF NOT EXISTS idx_holding_rescore_history_user_symbol
+            ON holding_rescore_history(user_id, symbol, scored_at DESC)
+        `);
+        console.log('✓ Created holding_rescore_history table');
 
         console.log('\n✓ Database initialization completed successfully!\n');
         return true;

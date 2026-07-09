@@ -447,10 +447,32 @@ schedule.scheduleJob({
   }
 });
 
+// ── MARKET REVIEW: Daily capture of the full scan universe + forward-return backfill ──
+// Runs after close (4:25 PM ET) so the day's trades are already recorded. Read-only
+// analytics — captures every scanned ticker's score/outcome regardless of whether the
+// bot traded it, and backfills 1d/3d/5d forward returns for older snapshots once the
+// price data exists. Used to validate scoring logic against real market outcomes.
+schedule.scheduleJob({
+  rule: '25 16 * * 1-5',
+  tz: 'America/New_York'
+}, async () => {
+  const marketReviewService = require('./services/marketReviewService');
+  console.log(`[${new Date().toISOString()}] 4:25 PM - Running daily market review capture...`);
+  logger.info('[Telegram Reports Scheduler] 4:25 PM - Daily market review capture');
+  try {
+    const result = await marketReviewService.runDailyMarketReview();
+    logger.info('[Telegram Reports Scheduler] Market review capture complete', result);
+  } catch (error) {
+    logger.error('[Telegram Reports Scheduler] Market review capture failed', { error: error.message });
+    console.error('[MarketReview] Failed:', error.message);
+  }
+});
+
 console.log('  ✓ Scheduled: Mon-Fri at 4:15 AM (early warmup) → 6:30 AM (refresh warmup) → 7:00 AM (send daily report)');
 console.log('  ✓ Scheduled: Saturday at 8:00 AM (weekend prep report)');
 console.log('  ✓ Scheduled: Mon-Fri at 4:15 PM (AI bot daily summary)');
 console.log('  ✓ Scheduled: Sunday at 9:00 AM (My Performance weekly recap)');
+console.log('  ✓ Scheduled: Mon-Fri at 4:25 PM (market review capture + forward-return backfill)');
 logger.info('[Telegram Reports Scheduler] ✓ Daily schedule registered (Mon-Fri)');
 logger.info('[Telegram Reports Scheduler] ✓ Weekend schedule registered (Saturday 8:00 AM EST)');
 logger.info('[Telegram Reports Scheduler] ✓ Performance reports scheduled (Mon-Fri 4:15 PM + Sunday 9 AM)');

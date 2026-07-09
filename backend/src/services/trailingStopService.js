@@ -75,6 +75,19 @@ async function _cancelOrder(keyId, secretKey, base, orderId) {
     });
 }
 
+async function _getPosition(keyId, secretKey, base, symbol) {
+    try {
+        const resp = await axios.get(`${base}/positions/${symbol}`, {
+            headers: _headers(keyId, secretKey),
+            timeout: 10000
+        });
+        return resp.data;
+    } catch (err) {
+        if (err.response?.status === 404) return null; // no position — the normal "already closed" case
+        throw err;
+    }
+}
+
 async function _createStopOrder(keyId, secretKey, base, symbol, qty, stopPrice) {
     // Alpaca does not support GTC stop orders for fractional quantities — use 'day' instead.
     // The trailing stop service re-places day stops on every cycle so fractional positions
@@ -146,6 +159,24 @@ async function adjustForUser(userId) {
             continue;
         }
         if (!currentPrice || currentPrice <= 0) continue;
+
+        // Live position guard (2026-07-06 EAT incident): `holdingsRes` is a DB snapshot taken at
+        // the top of this function. If the position's own stop fired in the moments between that
+        // snapshot and this cycle reaching it, every "no stop found → place one" branch below would
+        // treat a now-closed position as unprotected and place a fresh stop — which then sells into
+        // shares the account no longer owns, opening a naked short. Confirm the position is still
+        // actually live at the broker before any create-stop logic runs for this symbol.
+        let livePositionQty = null;
+        try {
+            const livePosition = await _getPosition(keyId, secretKey, base, symbol);
+            livePositionQty = livePosition ? parseFloat(livePosition.qty) : 0;
+        } catch (err) {
+            logger.debug('[TrailingStop] Live position check failed — proceeding with DB snapshot', { userId, symbol, err: err.message });
+        }
+        if (livePositionQty === 0) {
+            logger.warn('[TrailingStop] Skipping — DB shows a holding but broker position is already closed', { userId, symbol });
+            continue;
+        }
 
         const gainPct    = ((currentPrice - entryPrice) / entryPrice) * 100;
         const isFractional = parseFloat(row.quantity) !== Math.floor(parseFloat(row.quantity));

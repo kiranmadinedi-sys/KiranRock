@@ -113,6 +113,92 @@ interface HealthData {
     summary: { passing: number; warning: number; failing: number; na: number };
 }
 
+interface ExitRow {
+    exitType: string;
+    trades: number;
+    winners: number;
+    winRate: number;
+    avgReturnPct: number;
+    avgPnlUsd: number;
+    totalPnlUsd: number;
+}
+
+interface ExitBreakdown {
+    days: number;
+    rows: ExitRow[];
+}
+
+interface HoldbackSummary {
+    count: number;
+    tooEarly: number;
+    correct: number;
+    totalDelta: number;
+    avgHoldbackPct: number;
+    verdict: string;
+}
+
+interface HoldbackTrade {
+    exitType: string;
+    symbol: string;
+    exitDate: string;
+    exitPrice: number;
+    nextDayPrice: number;
+    actualPnl: number;
+    holdbackDelta: number;
+    holdbackPct: number;
+}
+
+interface HoldbackSim {
+    days: number;
+    trailing:  HoldbackSummary | null;
+    breakeven: HoldbackSummary | null;
+    trades: HoldbackTrade[];
+}
+
+interface ScoreBucketReturn {
+    recommendation: string;
+    count: number;
+    count1d: number;
+    avgReturn1d: number | null;
+    avgReturn3d: number | null;
+    avgReturn5d: number | null;
+    winRate1d: number | null;
+}
+
+interface RegimeReturn {
+    regime: string;
+    days: number;
+    count: number;
+    avgReturn1d: number | null;
+    avgReturn5d: number | null;
+    winRate1d: number | null;
+}
+
+interface MarketReviewRow {
+    scanDate: string;
+    symbol: string;
+    aiScore: number | null;
+    recommendation: string | null;
+    sector: string | null;
+    setupFamily: string | null;
+    regime: string | null;
+    blockedReason: string | null;
+    priceAtScan: number | null;
+    return1d: number | null;
+    return3d: number | null;
+    return5d: number | null;
+    wasTraded?: boolean;
+}
+
+interface MarketReview {
+    days: number;
+    bucketSummary: ScoreBucketReturn[];
+    regimeSummary: RegimeReturn[];
+    missedOpportunities: MarketReviewRow[];
+    worstTraded: MarketReviewRow[];
+    allRows: MarketReviewRow[];
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const fmtPct = (n: number | null) => n == null ? '—' : `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
@@ -207,7 +293,7 @@ function AggTable({ title, rows }: { title: string; rows: AggRow[] }) {
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
-type Tab = 'trades' | 'score' | 'hold' | 'health' | 'equity';
+type Tab = 'trades' | 'score' | 'hold' | 'health' | 'equity' | 'exits' | 'review';
 type SortKey = 'closedAt' | 'symbol' | 'pnlPct' | 'aiScore' | 'holdHours';
 type SortDir = 'asc' | 'desc';
 
@@ -244,6 +330,19 @@ export default function AnalyticsPage() {
     // Equity curve state
     const [equity, setEquity]           = useState<EquityData | null>(null);
     const [loadingEquity, setLoadingEquity] = useState(false);
+
+    // Exit breakdown state
+    const [exitBreakdown, setExitBreakdown] = useState<ExitBreakdown | null>(null);
+    const [loadingExits, setLoadingExits]   = useState(false);
+
+    // Holdback simulation state
+    const [holdbackSim, setHoldbackSim]     = useState<HoldbackSim | null>(null);
+
+    // Market review state (AI score vs actual market outcome, full scan universe)
+    const [marketReview, setMarketReview]         = useState<MarketReview | null>(null);
+    const [loadingMarketReview, setLoadingMarketReview] = useState(false);
+    const [reviewDays, setReviewDays]             = useState(7);
+    const [reviewSymbolSearch, setReviewSymbolSearch] = useState('');
 
     // Filters
     const [filterOutcome,  setFilterOutcome]  = useState('');
@@ -321,6 +420,33 @@ export default function AnalyticsPage() {
         }
     }, [days]);
 
+    const fetchExits = useCallback(async (token: string) => {
+        setLoadingExits(true);
+        try {
+            const [bRes, hRes] = await Promise.all([
+                fetch(`${getApiBaseUrl()}/api/performance/exit-breakdown?days=${days}`,  { headers: { Authorization: `Bearer ${token}` } }),
+                fetch(`${getApiBaseUrl()}/api/performance/holdback-sim?days=${days}`,    { headers: { Authorization: `Bearer ${token}` } }),
+            ]);
+            if (bRes.ok) { const d = await bRes.json(); setExitBreakdown(d); }
+            if (hRes.ok) { const d = await hRes.json(); setHoldbackSim(d); }
+        } finally {
+            setLoadingExits(false);
+        }
+    }, [days]);
+
+    const fetchMarketReview = useCallback(async (token: string) => {
+        setLoadingMarketReview(true);
+        try {
+            const res = await fetch(
+                `${getApiBaseUrl()}/api/performance/market-review?days=${reviewDays}`,
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+            if (res.ok) { const d = await res.json(); setMarketReview(d); }
+        } finally {
+            setLoadingMarketReview(false);
+        }
+    }, [reviewDays]);
+
     const fetchSummary = useCallback(async () => {
         const token = getAuthToken();
         if (!token) return;
@@ -359,7 +485,9 @@ export default function AnalyticsPage() {
         fetchBuckets(token);
         fetchHealth(token);
         fetchEquity(token);
-    }, [fetchTradeLog, fetchBuckets, fetchHealth, fetchEquity, router]);
+        fetchExits(token);
+        fetchMarketReview(token);
+    }, [fetchTradeLog, fetchBuckets, fetchHealth, fetchEquity, fetchExits, fetchMarketReview, router]);
 
     // Client-side filters
     const filtered = trades.filter(t => {
@@ -415,7 +543,9 @@ export default function AnalyticsPage() {
         { id: 'equity', label: 'Equity Curve' },
         { id: 'score',  label: 'Score Analysis' },
         { id: 'hold',   label: 'Hold Time' },
+        { id: 'exits',  label: 'Exit Breakdown' },
         { id: 'health', label: 'Strategy Health' },
+        { id: 'review', label: 'Market Review' },
     ];
 
     return (
@@ -1012,6 +1142,399 @@ export default function AnalyticsPage() {
                                     ChatGPT recommends 100+ trades for reliable signal.
                                 </div>
                             )}
+                        </>
+                    )}
+                </div>
+            )}
+
+            {/* ── Exit Breakdown ──────────────────────────────────────────────── */}
+            {tab === 'exits' && (
+                <div className="space-y-4">
+                    <p className="text-sm text-gray-400">
+                        Which exit mechanism is generating profit — and which is eroding it?
+                        Each row shows how that exit type performed over the last <strong className="text-white">{days} days</strong>.
+                    </p>
+
+                    {loadingExits ? (
+                        <div className="flex items-center justify-center h-40 text-gray-400">Loading exit data…</div>
+                    ) : !exitBreakdown || exitBreakdown.rows.length === 0 ? (
+                        <div className="bg-gray-800 border border-gray-700 rounded-xl p-8 text-center text-gray-400">
+                            No closed trades found for this period.
+                        </div>
+                    ) : (
+                        <>
+                            {/* Summary cards */}
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                {(() => {
+                                    const profitable = exitBreakdown.rows.filter(r => r.totalPnlUsd > 0);
+                                    const draining   = exitBreakdown.rows.filter(r => r.totalPnlUsd < 0);
+                                    const bestExit   = exitBreakdown.rows.reduce((a, b) => b.totalPnlUsd > a.totalPnlUsd ? b : a, exitBreakdown.rows[0]);
+                                    const worstExit  = exitBreakdown.rows.reduce((a, b) => b.totalPnlUsd < a.totalPnlUsd ? b : a, exitBreakdown.rows[0]);
+                                    return (
+                                        <>
+                                            <StatCard label="Best Exit Type"   value={bestExit.exitType}  sub={`+$${bestExit.totalPnlUsd.toFixed(2)} total`} color="text-green-400" />
+                                            <StatCard label="Worst Exit Type"  value={worstExit.exitType} sub={`-$${Math.abs(worstExit.totalPnlUsd).toFixed(2)} total`} color="text-red-400" />
+                                            <StatCard label="Profitable Types" value={String(profitable.length)} sub="exit types making money" color="text-green-400" />
+                                            <StatCard label="Draining Types"   value={String(draining.length)}   sub="exit types losing money" color="text-red-400" />
+                                        </>
+                                    );
+                                })()}
+                            </div>
+
+                            {/* Main breakdown table */}
+                            <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
+                                <div className="px-4 py-3 border-b border-gray-700">
+                                    <h3 className="text-sm font-semibold text-gray-200">Performance by Exit Type</h3>
+                                    <p className="text-xs text-gray-500 mt-0.5">Sorted by total P&L — identifies which exits preserve profit and which destroy it</p>
+                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-xs">
+                                        <thead>
+                                            <tr className="text-gray-400 border-b border-gray-700 bg-gray-800/80">
+                                                <th className="text-left px-4 py-2.5">Exit Type</th>
+                                                <th className="text-right px-3 py-2.5">Trades</th>
+                                                <th className="text-right px-3 py-2.5">Win %</th>
+                                                <th className="text-right px-3 py-2.5">Avg Return</th>
+                                                <th className="text-right px-3 py-2.5">Avg P&L</th>
+                                                <th className="text-right px-4 py-2.5">Total P&L</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {exitBreakdown.rows.map((r, i) => {
+                                                const exitColor = r.totalPnlUsd > 0 ? 'border-l-2 border-green-500' : r.totalPnlUsd < 0 ? 'border-l-2 border-red-500' : '';
+                                                return (
+                                                    <tr key={i} className={`border-b border-gray-700/40 hover:bg-gray-700/30 ${exitColor}`}>
+                                                        <td className="px-4 py-3 font-semibold text-white">{r.exitType}</td>
+                                                        <td className="text-right px-3 py-3 text-gray-300">{r.trades}</td>
+                                                        <td className={`text-right px-3 py-3 font-medium ${r.winRate >= 55 ? 'text-green-400' : r.winRate >= 40 ? 'text-yellow-400' : 'text-red-400'}`}>
+                                                            {r.winRate.toFixed(0)}%
+                                                        </td>
+                                                        <td className={`text-right px-3 py-3 ${pnlColor(r.avgReturnPct)}`}>
+                                                            {r.avgReturnPct >= 0 ? '+' : ''}{r.avgReturnPct.toFixed(2)}%
+                                                        </td>
+                                                        <td className={`text-right px-3 py-3 ${pnlColor(r.avgPnlUsd)}`}>
+                                                            {r.avgPnlUsd >= 0 ? '+$' : '-$'}{Math.abs(r.avgPnlUsd).toFixed(2)}
+                                                        </td>
+                                                        <td className={`text-right px-4 py-3 font-bold ${pnlColor(r.totalPnlUsd)}`}>
+                                                            {r.totalPnlUsd >= 0 ? '+$' : '-$'}{Math.abs(r.totalPnlUsd).toFixed(2)}
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <div className="bg-blue-900/20 border border-blue-700/40 rounded-xl p-4 text-sm text-blue-300">
+                                <strong>How to read this:</strong> "Initial Stop" rows with large negative total P&L
+                                mean the strategy is getting stopped out too often. "Trailing Stop" and "Break-even Stop"
+                                with positive returns confirm those exits are working. Use this table — not gut feel —
+                                to decide which exit parameters to tune.
+                            </div>
+
+                            {/* ── Holdback Simulation ─────────────────────────────────────── */}
+                            {holdbackSim && holdbackSim.trades.length > 0 && (
+                                <div className="space-y-3">
+                                    <div>
+                                        <h3 className="text-sm font-semibold text-white">Were Exits Too Early?</h3>
+                                        <p className="text-xs text-gray-400 mt-0.5">
+                                            For each trailing/break-even exit, compares actual exit price to next trading day close.
+                                            Positive = left money on the table. Negative = exit was correct (stock fell after).
+                                        </p>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                        {[
+                                            { label: 'Trailing Stop', data: holdbackSim.trailing },
+                                            { label: 'Break-even Stop', data: holdbackSim.breakeven },
+                                        ].filter(x => x.data).map(({ label, data }) => {
+                                            if (!data) return null;
+                                            const isEarly = data.totalDelta > 0;
+                                            return (
+                                                <div key={label} className={`rounded-xl p-4 border ${isEarly ? 'bg-amber-900/20 border-amber-700/40' : 'bg-green-900/20 border-green-700/40'}`}>
+                                                    <div className="flex items-start justify-between mb-2">
+                                                        <p className="text-sm font-semibold text-white">{label}</p>
+                                                        <span className={`text-xs px-2 py-0.5 rounded font-medium ${isEarly ? 'bg-amber-800 text-amber-200' : 'bg-green-800 text-green-200'}`}>
+                                                            {isEarly ? '⚡ Exits too early' : '✓ Exits correctly'}
+                                                        </span>
+                                                    </div>
+                                                    <div className="grid grid-cols-3 gap-2 text-xs">
+                                                        <div>
+                                                            <p className="text-gray-400">Sampled</p>
+                                                            <p className="text-white font-bold">{data.count} exits</p>
+                                                        </div>
+                                                        <div>
+                                                            <p className="text-gray-400">Left on table</p>
+                                                            <p className={`font-bold ${isEarly ? 'text-amber-400' : 'text-green-400'}`}>
+                                                                {isEarly ? `+$${data.totalDelta.toFixed(2)}` : `-$${Math.abs(data.totalDelta).toFixed(2)} saved`}
+                                                            </p>
+                                                        </div>
+                                                        <div>
+                                                            <p className="text-gray-400">Early exits</p>
+                                                            <p className="text-white font-bold">{data.tooEarly}/{data.count}</p>
+                                                        </div>
+                                                    </div>
+                                                    <p className="text-xs text-gray-500 mt-2">Avg next-day move after exit: {data.avgHoldbackPct >= 0 ? '+' : ''}{data.avgHoldbackPct.toFixed(2)}%</p>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+
+                                    {/* Per-trade table */}
+                                    <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
+                                        <div className="px-4 py-2.5 border-b border-gray-700 flex items-center justify-between">
+                                            <p className="text-xs font-semibold text-gray-300">Trade-by-trade holdback detail</p>
+                                            <p className="text-xs text-gray-500">+delta = stock rose after exit (we sold too early) | −delta = stock fell (exit was right)</p>
+                                        </div>
+                                        <div className="overflow-x-auto max-h-64 overflow-y-auto">
+                                            <table className="w-full text-xs">
+                                                <thead className="sticky top-0 bg-gray-800">
+                                                    <tr className="text-gray-400 border-b border-gray-700">
+                                                        <th className="text-left px-3 py-2">Symbol</th>
+                                                        <th className="text-left px-3 py-2">Exit Type</th>
+                                                        <th className="text-right px-3 py-2">Exit Price</th>
+                                                        <th className="text-right px-3 py-2">Next Day</th>
+                                                        <th className="text-right px-3 py-2">Δ %</th>
+                                                        <th className="text-right px-3 py-2">$ Left/Saved</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {holdbackSim.trades.map((t, i) => (
+                                                        <tr key={i} className="border-b border-gray-700/40 hover:bg-gray-700/30">
+                                                            <td className="px-3 py-2 font-semibold text-white">{t.symbol}</td>
+                                                            <td className="px-3 py-2 text-gray-400">{t.exitType}</td>
+                                                            <td className="text-right px-3 py-2 text-gray-300">${t.exitPrice.toFixed(2)}</td>
+                                                            <td className="text-right px-3 py-2 text-gray-300">${t.nextDayPrice.toFixed(2)}</td>
+                                                            <td className={`text-right px-3 py-2 font-medium ${t.holdbackPct > 0 ? 'text-amber-400' : 'text-green-400'}`}>
+                                                                {t.holdbackPct > 0 ? '+' : ''}{t.holdbackPct.toFixed(2)}%
+                                                            </td>
+                                                            <td className={`text-right px-3 py-2 font-medium ${t.holdbackDelta > 0 ? 'text-amber-400' : 'text-green-400'}`}>
+                                                                {t.holdbackDelta > 0 ? '+$' : '-$'}{Math.abs(t.holdbackDelta).toFixed(2)}
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </>
+                    )}
+                </div>
+            )}
+
+            {/* ── Market Review: AI score vs real market outcome, full scan universe ──── */}
+            {tab === 'review' && (
+                <div className="space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                        <p className="text-sm text-gray-400 max-w-2xl">
+                            Every ticker the nightly scan analyzed — not just what the bot traded — compared
+                            against what it actually did afterward. Answers: does a high score predict a good
+                            outcome, and what did we pass on?
+                        </p>
+                        <div className="flex items-center gap-2">
+                            {([7, 14, 30] as const).map(d => (
+                                <button key={d} onClick={() => setReviewDays(d)}
+                                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                                        reviewDays === d ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                                    }`}>{d}d</button>
+                            ))}
+                        </div>
+                    </div>
+
+                    {loadingMarketReview ? (
+                        <div className="flex items-center justify-center h-40 text-gray-400">Loading market review…</div>
+                    ) : !marketReview || marketReview.allRows.length === 0 ? (
+                        <div className="bg-gray-800 border border-gray-700 rounded-xl p-8 text-center text-gray-400">
+                            No scan data captured yet for this period — the daily capture job runs after each
+                            market close (4:25 PM ET). Check back tomorrow.
+                        </div>
+                    ) : (
+                        <>
+                            {/* Regime summary */}
+                            {marketReview.regimeSummary.length > 0 && (
+                                <div>
+                                    <h3 className="text-sm font-semibold text-white mb-2">Performance by Market Regime</h3>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                        {marketReview.regimeSummary.map((r) => (
+                                            <div key={r.regime} className="bg-gray-800 border border-gray-700 rounded-xl p-4">
+                                                <p className="text-xs text-gray-400">{r.regime}</p>
+                                                <p className={`text-lg font-bold ${pnlColor(r.avgReturn1d)}`}>{fmtPct(r.avgReturn1d)}</p>
+                                                <p className="text-xs text-gray-500 mt-1">{r.count} tickers over {r.days}d{r.winRate1d != null ? ` · ${r.winRate1d}% win` : ''}</p>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Score bucket vs actual return */}
+                            <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
+                                <div className="px-4 py-3 border-b border-gray-700">
+                                    <h3 className="text-sm font-semibold text-gray-200">Score Bucket vs Actual Forward Return</h3>
+                                    <p className="text-xs text-gray-500 mt-0.5">If the model is well-calibrated, STRONG BUY should out-return HOLD/SELL — this is the data to check that against.</p>
+                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-xs">
+                                        <thead>
+                                            <tr className="text-gray-400 border-b border-gray-700 bg-gray-800/80">
+                                                <th className="text-left px-4 py-2.5">Recommendation</th>
+                                                <th className="text-right px-3 py-2.5">Tickers</th>
+                                                <th className="text-right px-3 py-2.5">Win % (1d)</th>
+                                                <th className="text-right px-3 py-2.5">Avg 1d</th>
+                                                <th className="text-right px-3 py-2.5">Avg 3d</th>
+                                                <th className="text-right px-4 py-2.5">Avg 5d</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {marketReview.bucketSummary.map((b) => (
+                                                <tr key={b.recommendation} className="border-b border-gray-700/40 hover:bg-gray-700/30">
+                                                    <td className="px-4 py-3 font-semibold text-white">{b.recommendation}</td>
+                                                    <td className="text-right px-3 py-3 text-gray-300">{b.count}</td>
+                                                    <td className="text-right px-3 py-3 text-gray-300">{b.winRate1d != null ? `${b.winRate1d}%` : '—'}</td>
+                                                    <td className={`text-right px-3 py-3 font-medium ${pnlColor(b.avgReturn1d)}`}>{fmtPct(b.avgReturn1d)}</td>
+                                                    <td className={`text-right px-3 py-3 ${pnlColor(b.avgReturn3d)}`}>{fmtPct(b.avgReturn3d)}</td>
+                                                    <td className={`text-right px-4 py-3 ${pnlColor(b.avgReturn5d)}`}>{fmtPct(b.avgReturn5d)}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            {/* Missed opportunities */}
+                            {marketReview.missedOpportunities.length > 0 && (
+                                <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
+                                    <div className="px-4 py-3 border-b border-gray-700">
+                                        <h3 className="text-sm font-semibold text-gray-200">Biggest Movers We Didn't Trade</h3>
+                                        <p className="text-xs text-gray-500 mt-0.5">Highest forward return among scanned tickers the bot never bought — what did the score miss?</p>
+                                    </div>
+                                    <div className="overflow-x-auto max-h-64 overflow-y-auto">
+                                        <table className="w-full text-xs">
+                                            <thead className="sticky top-0 bg-gray-800">
+                                                <tr className="text-gray-400 border-b border-gray-700">
+                                                    <th className="text-left px-3 py-2">Symbol</th>
+                                                    <th className="text-left px-3 py-2">Score</th>
+                                                    <th className="text-left px-3 py-2">Rec</th>
+                                                    <th className="text-left px-3 py-2">Sector</th>
+                                                    <th className="text-left px-3 py-2">Blocked By</th>
+                                                    <th className="text-right px-3 py-2">1d</th>
+                                                    <th className="text-right px-3 py-2">5d</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {marketReview.missedOpportunities.map((r, i) => (
+                                                    <tr key={i} className="border-b border-gray-700/40 hover:bg-gray-700/30">
+                                                        <td className="px-3 py-2 font-semibold text-white">{r.symbol}</td>
+                                                        <td className="px-3 py-2 text-gray-300">{r.aiScore ?? '—'}</td>
+                                                        <td className="px-3 py-2 text-gray-400">{r.recommendation ?? '—'}</td>
+                                                        <td className="px-3 py-2 text-gray-400">{r.sector ?? '—'}</td>
+                                                        <td className="px-3 py-2 text-amber-400">{r.blockedReason ?? '—'}</td>
+                                                        <td className={`text-right px-3 py-2 font-medium ${pnlColor(r.return1d)}`}>{fmtPct(r.return1d)}</td>
+                                                        <td className={`text-right px-3 py-2 font-medium ${pnlColor(r.return5d)}`}>{fmtPct(r.return5d)}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Worst traded */}
+                            {marketReview.worstTraded.length > 0 && (
+                                <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
+                                    <div className="px-4 py-3 border-b border-gray-700">
+                                        <h3 className="text-sm font-semibold text-gray-200">Traded Tickers That Hurt Most</h3>
+                                        <p className="text-xs text-gray-500 mt-0.5">Bot-traded tickers with the worst 1-day forward return — what did the score get wrong?</p>
+                                    </div>
+                                    <div className="overflow-x-auto max-h-64 overflow-y-auto">
+                                        <table className="w-full text-xs">
+                                            <thead className="sticky top-0 bg-gray-800">
+                                                <tr className="text-gray-400 border-b border-gray-700">
+                                                    <th className="text-left px-3 py-2">Symbol</th>
+                                                    <th className="text-left px-3 py-2">Score</th>
+                                                    <th className="text-left px-3 py-2">Rec</th>
+                                                    <th className="text-left px-3 py-2">Sector</th>
+                                                    <th className="text-right px-3 py-2">1d</th>
+                                                    <th className="text-right px-3 py-2">5d</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {marketReview.worstTraded.map((r, i) => (
+                                                    <tr key={i} className="border-b border-gray-700/40 hover:bg-gray-700/30">
+                                                        <td className="px-3 py-2 font-semibold text-white">{r.symbol}</td>
+                                                        <td className="px-3 py-2 text-gray-300">{r.aiScore ?? '—'}</td>
+                                                        <td className="px-3 py-2 text-gray-400">{r.recommendation ?? '—'}</td>
+                                                        <td className="px-3 py-2 text-gray-400">{r.sector ?? '—'}</td>
+                                                        <td className={`text-right px-3 py-2 font-medium ${pnlColor(r.return1d)}`}>{fmtPct(r.return1d)}</td>
+                                                        <td className={`text-right px-3 py-2 font-medium ${pnlColor(r.return5d)}`}>{fmtPct(r.return5d)}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Symbol lookup — e.g. "did we pick AAPL this week?" */}
+                            <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
+                                <div className="px-4 py-3 border-b border-gray-700 flex items-center justify-between gap-3 flex-wrap">
+                                    <div>
+                                        <h3 className="text-sm font-semibold text-gray-200">Look Up Any Ticker</h3>
+                                        <p className="text-xs text-gray-500 mt-0.5">e.g. "Apple did well this week — did our scan pick it up?"</p>
+                                    </div>
+                                    <input
+                                        type="text"
+                                        value={reviewSymbolSearch}
+                                        onChange={(e) => setReviewSymbolSearch(e.target.value.toUpperCase())}
+                                        placeholder="Symbol, e.g. AAPL"
+                                        className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white w-40 focus:outline-none focus:border-blue-500"
+                                    />
+                                </div>
+                                <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                                    <table className="w-full text-xs">
+                                        <thead className="sticky top-0 bg-gray-800">
+                                            <tr className="text-gray-400 border-b border-gray-700">
+                                                <th className="text-left px-3 py-2">Date</th>
+                                                <th className="text-left px-3 py-2">Symbol</th>
+                                                <th className="text-left px-3 py-2">Score</th>
+                                                <th className="text-left px-3 py-2">Rec</th>
+                                                <th className="text-left px-3 py-2">Regime</th>
+                                                <th className="text-left px-3 py-2">Traded?</th>
+                                                <th className="text-left px-3 py-2">Blocked By</th>
+                                                <th className="text-right px-3 py-2">1d</th>
+                                                <th className="text-right px-3 py-2">5d</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {(reviewSymbolSearch
+                                                ? marketReview.allRows.filter(r => r.symbol.includes(reviewSymbolSearch))
+                                                : marketReview.allRows.slice(0, 50)
+                                            ).map((r, i) => (
+                                                <tr key={i} className="border-b border-gray-700/40 hover:bg-gray-700/30">
+                                                    <td className="px-3 py-2 text-gray-400">{new Date(r.scanDate).toLocaleDateString()}</td>
+                                                    <td className="px-3 py-2 font-semibold text-white">{r.symbol}</td>
+                                                    <td className="px-3 py-2 text-gray-300">{r.aiScore ?? '—'}</td>
+                                                    <td className="px-3 py-2 text-gray-400">{r.recommendation ?? '—'}</td>
+                                                    <td className="px-3 py-2 text-gray-400">{r.regime ?? '—'}</td>
+                                                    <td className="px-3 py-2">
+                                                        {r.wasTraded
+                                                            ? <span className="text-green-400 font-medium">Yes</span>
+                                                            : <span className="text-gray-500">No</span>}
+                                                    </td>
+                                                    <td className="px-3 py-2 text-amber-400">{r.blockedReason ?? '—'}</td>
+                                                    <td className={`text-right px-3 py-2 font-medium ${pnlColor(r.return1d)}`}>{fmtPct(r.return1d)}</td>
+                                                    <td className={`text-right px-3 py-2 font-medium ${pnlColor(r.return5d)}`}>{fmtPct(r.return5d)}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                    {!reviewSymbolSearch && marketReview.allRows.length > 50 && (
+                                        <p className="text-xs text-gray-500 text-center py-2">Showing 50 of {marketReview.allRows.length} — search a symbol to find a specific ticker</p>
+                                    )}
+                                </div>
+                            </div>
                         </>
                     )}
                 </div>

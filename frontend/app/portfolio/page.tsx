@@ -40,6 +40,7 @@ function PortfolioPage() {
     const router = useRouter();
     const [token, setToken] = useState<string | null>(null);
     const [_loading, setLoading] = useState(false);
+    const [initialLoading, setInitialLoading] = useState(true);
     const [cashBalance, setCashBalance] = useState(0);
     const [holdings, setHoldings] = useState<any[]>([]);
     const [tradeSymbol, setTradeSymbol] = useState('');
@@ -77,6 +78,9 @@ function PortfolioPage() {
     const [resetAmount, setResetAmount] = useState('');
     const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
     const autoRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Chart scrubbing — touch/drag over the chart to see the value at that point in time
+    const [scrubIndex, setScrubIndex] = useState<number | null>(null);
+    const scrubXRef = useRef<number | null>(null);
     // Position detail sheet
     const [selectedPosition, setSelectedPosition] = useState<any | null>(null);
     const [showPositionSheet, setShowPositionSheet] = useState(false);
@@ -142,16 +146,17 @@ function PortfolioPage() {
         if (token) fetchPortfolioHistory(chartRange);
     }, [token, chartRange]);
 
-    // Auto-refresh: 30 s during market hours, 5 min outside
+    // Auto-refresh every 30 s — summary + the active chart range, so the line itself
+    // moves in near-real-time instead of only the hero number (2026-07-08 request).
     useEffect(() => {
         if (!token) return;
         let cancelled = false;
 
         const schedule = () => {
-            const delay = 60_000; // always refresh every 1 minute
+            const delay = 30_000;
             autoRefreshRef.current = setTimeout(async () => {
                 if (cancelled) return;
-                await silentRefreshPortfolio();
+                await Promise.all([silentRefreshPortfolio(), fetchPortfolioHistory(chartRange)]);
                 if (!cancelled) schedule();
             }, delay);
         };
@@ -161,7 +166,7 @@ function PortfolioPage() {
             cancelled = true;
             if (autoRefreshRef.current) clearTimeout(autoRefreshRef.current);
         };
-    }, [token, silentRefreshPortfolio]);
+    }, [token, silentRefreshPortfolio, chartRange]);
 
     const fetchAISettings = async () => {
         setSettingsLoading(true);
@@ -227,7 +232,7 @@ function PortfolioPage() {
     const loadData = async () => {
         setLoading(true);
         try { await Promise.all([fetchPortfolio(), fetchTradeHistory(), fetchPerformance(), fetchLedger()]); }
-        catch (e) { console.error(e); } finally { setLoading(false); }
+        catch (e) { console.error(e); } finally { setLoading(false); setInitialLoading(false); }
     };
 
     const fetchLedger = async () => {
@@ -438,15 +443,45 @@ function PortfolioPage() {
         responsive: true, maintainAspectRatio: false,
         plugins: {
             legend: { display: false },
-            tooltip: {
-                mode: 'index' as const, intersect: false,
-                filter: (item: any) => item.datasetIndex === 0,
-                callbacks: { label: (ctx: any) => ` $${ctx.parsed.y.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` }
-            }
+            // The floating Chart.js tooltip box is replaced by the hero number updating
+            // live as the user scrubs (Robinhood-style) — see onHover below.
+            tooltip: { enabled: false },
         },
         scales: { x: { display: false }, y: { display: false } },
         interaction: { mode: 'index' as const, intersect: false },
+        onHover: (_event: any, elements: any[]) => {
+            if (elements && elements.length > 0) {
+                scrubXRef.current = elements[0].element.x;
+                setScrubIndex(elements[0].index);
+            } else {
+                scrubXRef.current = null;
+                setScrubIndex(null);
+            }
+        },
     };
+
+    // Thin dashed crosshair at the scrubbed point — Chart.js has no built-in equivalent,
+    // and pulling in the annotation plugin for one line isn't worth the bundle weight.
+    const scrubLinePlugin = {
+        id: 'scrubLine',
+        afterDraw: (chart: any) => {
+            const x = scrubXRef.current;
+            const { ctx, chartArea } = chart;
+            if (x == null || !chartArea) return;
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(x, chartArea.top);
+            ctx.lineTo(x, chartArea.bottom);
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = 'rgba(148,163,184,0.7)';
+            ctx.setLineDash([4, 4]);
+            ctx.stroke();
+            ctx.restore();
+        },
+    };
+
+    const resetScrub = () => { scrubXRef.current = null; setScrubIndex(null); };
+    const scrubbedPoint = scrubIndex != null ? portfolioHistory[scrubIndex] : null;
 
     // ── Mini sparkline SVG — Robinhood style (deterministic noise + trend) ──
     const MiniSparkline = ({ symbol, plPct }: { symbol: string; plPct: number }) => {
@@ -773,6 +808,52 @@ function PortfolioPage() {
         );
     };
 
+    // ── Loading skeleton — shown only on first load, never on silent refresh ──
+    const Shimmer = ({ className }: { className: string }) => (
+        <div className={`animate-pulse rounded-lg bg-[var(--color-bg-tertiary)] ${className}`} />
+    );
+    const PortfolioSkeleton = () => (
+        <div className="lg:flex lg:items-start w-full">
+            <div className="flex-1 min-w-0 lg:border-r lg:border-[var(--color-border)]">
+                <div className="px-4 lg:px-10 pt-8">
+                    <Shimmer className="h-3 w-20 mb-3" />
+                    <Shimmer className="h-11 w-56 mb-3" />
+                    <Shimmer className="h-4 w-40" />
+                </div>
+                <div className="px-4 lg:px-10 mt-6">
+                    <Shimmer className="h-52 sm:h-64 lg:h-72 w-full rounded-2xl" />
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 border-y border-[var(--color-border)] mt-6">
+                    {Array.from({ length: 6 }).map((_, i) => (
+                        <div key={i} className="px-3 lg:px-6 py-3.5">
+                            <Shimmer className="h-2.5 w-16 mb-2" />
+                            <Shimmer className="h-4 w-20 mb-1.5" />
+                            <Shimmer className="h-2.5 w-24" />
+                        </div>
+                    ))}
+                </div>
+                <div className="lg:hidden px-4 py-5 space-y-4">
+                    {Array.from({ length: 3 }).map((_, i) => (
+                        <div key={i} className="flex items-center gap-3">
+                            <Shimmer className="h-9 w-24" />
+                            <Shimmer className="h-8 flex-1" />
+                            <Shimmer className="h-9 w-24 rounded-2xl" />
+                        </div>
+                    ))}
+                </div>
+            </div>
+            <div className="hidden lg:block w-80 xl:w-96 px-4 py-5 space-y-4">
+                {Array.from({ length: 4 }).map((_, i) => (
+                    <div key={i} className="flex items-center gap-3">
+                        <Shimmer className="h-9 w-24" />
+                        <Shimmer className="h-8 flex-1" />
+                        <Shimmer className="h-9 w-24 rounded-2xl" />
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+
     // ── Holdings panel ────────────────────────────────────────────────────────
     const holdingsPanel = (
         <div className="pb-2">
@@ -831,8 +912,18 @@ function PortfolioPage() {
     );
 
     // ── Render ──────────────────────────────────────────────────────────────────
+    if (initialLoading) {
+        return (
+            <div className="min-h-screen bg-[var(--color-bg-primary)] safe-bottom">
+                <div className="max-w-7xl mx-auto">
+                    <PortfolioSkeleton />
+                </div>
+            </div>
+        );
+    }
+
     return (
-        <div className="min-h-screen bg-[var(--color-bg-primary)]">
+        <div className="min-h-screen bg-[var(--color-bg-primary)] safe-bottom">
 
         {/* Position detail bottom sheet */}
         {showPositionSheet && <PositionDetailSheet />}
@@ -849,13 +940,35 @@ function PortfolioPage() {
                     <p className="text-[11px] font-bold uppercase tracking-[0.22em] text-[var(--color-text-secondary)] mb-2">Investing</p>
 
                     <div className="text-5xl font-bold text-[var(--color-text-primary)] tabular-nums leading-none">
-                        {usd(totalPortfolioValue)}
+                        {usd(scrubbedPoint ? scrubbedPoint.value : totalPortfolioValue)}
                     </div>
 
                     {(() => {
-                        // When market is closed, the chart-range delta is misleading ("Today" actually
-                        // spans days/weeks). Show unrealized P&L instead, clearly labelled.
-                        const showUnrealized = !isMarketHours();
+                        // While scrubbing the chart, show the value/change AS OF the touched
+                        // point instead of the live figures — matches the Robinhood-style
+                        // "drag to see history" behavior requested 2026-07-08.
+                        if (scrubbedPoint) {
+                            const base = openValue ?? scrubbedPoint.value;
+                            const scrubChangeValue = scrubbedPoint.value - base;
+                            const scrubChangePct = base > 0 ? (scrubChangeValue / base) * 100 : 0;
+                            const isPos = scrubChangeValue >= 0;
+                            return (
+                                <div className={`mt-2 flex items-center gap-1.5 text-sm font-semibold ${isPos ? 'text-green-500' : 'text-red-500'}`}>
+                                    <span className="text-base leading-none">{isPos ? '▲' : '▼'}</span>
+                                    <span>{signedUsd(scrubChangeValue)}</span>
+                                    <span className="opacity-80">({signedPct(scrubChangePct)})</span>
+                                    <span className="text-[var(--color-text-secondary)] font-normal text-xs ml-1">{scrubbedPoint.time}</span>
+                                </div>
+                            );
+                        }
+
+                        // "Today" is ambiguous when the market's closed (it'd span back to last
+                        // close, maybe days over a weekend) — show Unrealized P&L instead for that
+                        // one case. But 1W/1M/3M/YTD/1Y are well-defined date ranges regardless of
+                        // whether the market happens to be open right now — always show the real
+                        // period change for those, or switching periods would look like nothing
+                        // changes (2026-07-08 report: selecting 1W kept showing a static $0.00).
+                        const showUnrealized = !isMarketHours() && chartRange === '1D';
                         const displayVal     = showUnrealized ? totalUnrealizedPL : portfolioChange.value;
                         const displayPct     = showUnrealized
                             ? (totalHoldingsValue > 0 ? (totalUnrealizedPL / (totalHoldingsValue - totalUnrealizedPL)) * 100 : 0)
@@ -876,7 +989,7 @@ function PortfolioPage() {
                     <div className="mt-2 flex items-center gap-1.5">
                         <span className={`inline-block w-1.5 h-1.5 rounded-full ${isMarketHours() ? 'bg-green-400 animate-pulse' : 'bg-gray-500'}`} />
                         <span className="text-[11px] text-[var(--color-text-secondary)]">
-                            {isMarketHours() ? 'Live · updates every 1 min' : 'Market closed · updates every 1 min'}
+                            {isMarketHours() ? 'Live · updates every 30 sec' : 'Market closed · updates every 30 sec'}
                             {lastRefreshed && (
                                 <span className="ml-1 opacity-60">
                                     · {lastRefreshed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
@@ -887,27 +1000,36 @@ function PortfolioPage() {
                 </div>
 
                 {/* ── Chart — edge-to-edge on mobile ── */}
-                <div className="relative h-52 sm:h-64 lg:h-72 mt-6 -mx-0">
-                    <Line data={chartData} options={chartOptions} />
+                <div className="relative h-52 sm:h-64 lg:h-72 mt-6 -mx-0"
+                    onMouseLeave={resetScrub} onTouchEnd={resetScrub} onTouchCancel={resetScrub}>
+                    <Line data={chartData} options={chartOptions} plugins={[scrubLinePlugin]} />
                 </div>
 
-                {/* ── Period selector — Robinhood tab style ── */}
-                <div className="flex items-center gap-0 overflow-x-auto scrollbar-hide border-b border-[var(--color-border)] px-4 lg:px-10">
+                {/* ── Period selector — filled pill on the active range so selection is
+                     unmistakable at a glance (a thin underline was too subtle in light mode,
+                     per 2026-07-08 feedback) ── */}
+                <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-hide border-b border-[var(--color-border)] px-4 lg:px-10 py-2.5">
                     {/* LIVE dot */}
                     <button onClick={() => setChartRange('1D')}
-                        className={`flex items-center gap-1.5 px-3 py-3 text-xs font-bold whitespace-nowrap relative transition-colors ${chartRange === '1D' ? 'text-green-500' : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'}`}>
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-colors ${
+                            chartRange === '1D'
+                                ? 'bg-green-500 text-white shadow-sm'
+                                : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)]'
+                        }`}>
                         <span className="relative flex h-1.5 w-1.5 flex-shrink-0">
-                            {chartRange === '1D' && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />}
-                            <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${chartRange === '1D' ? 'bg-green-500' : 'bg-[var(--color-text-secondary)]'}`} />
+                            {chartRange === '1D' && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75" />}
+                            <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${chartRange === '1D' ? 'bg-white' : 'bg-[var(--color-text-secondary)]'}`} />
                         </span>
                         LIVE
-                        {chartRange === '1D' && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-green-500" />}
                     </button>
                     {['1D','1W','1M','3M','YTD','1Y'].map(r => (
                         <button key={r} onClick={() => setChartRange(r)}
-                            className={`px-3 py-3 text-xs font-bold whitespace-nowrap relative transition-colors ${chartRange === r && r !== '1D' ? 'text-[var(--color-text-primary)]' : chartRange !== r ? 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]' : 'text-[var(--color-text-primary)]'}`}>
+                            className={`px-3 py-1.5 rounded-full text-xs font-bold whitespace-nowrap transition-colors ${
+                                chartRange === r
+                                    ? 'bg-[var(--color-accent)] text-white shadow-sm'
+                                    : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)]'
+                            }`}>
                             {r}
-                            {chartRange === r && <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-[var(--color-accent)]" />}
                         </button>
                     ))}
                 </div>
@@ -931,8 +1053,8 @@ function PortfolioPage() {
                     </div>
                 </div>
 
-                {/* ── Stats grid — 6 cells, 3×2, plain-English labels ── */}
-                <div className="grid grid-cols-3 border-b border-[var(--color-border)]">
+                {/* ── Stats grid — 6 cells, 2×3 on phones / 3×2 from sm: up, plain-English labels ── */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 divide-x divide-y divide-[var(--color-border)] border-b border-[var(--color-border)]">
                     {[
                         {
                             label: 'Portfolio Value',
@@ -982,16 +1104,11 @@ function PortfolioPage() {
                             sub: 'Open positions · live',
                             subColor: 'text-[var(--color-text-secondary)]',
                         },
-                    ].map((stat, i) => (
-                        <div key={stat.label}
-                            title={stat.tooltip}
-                            className={`px-3 lg:px-6 py-3.5 cursor-help
-                                ${i % 3 !== 2 ? 'border-r border-[var(--color-border)]' : ''}
-                                ${i >= 3 ? 'border-t border-[var(--color-border)]' : ''}
-                            `}>
+                    ].map((stat) => (
+                        <div key={stat.label} title={stat.tooltip} className="px-3 lg:px-6 py-3.5 cursor-help">
                             <div className="text-[9px] font-bold uppercase tracking-wider text-[var(--color-text-secondary)] mb-1 leading-tight">{stat.label}</div>
-                            <div className={`text-sm font-bold tabular-nums ${stat.valueColor}`}>{stat.value}</div>
-                            <div className={`text-[10px] mt-0.5 leading-tight ${stat.subColor}`}>{stat.sub}</div>
+                            <div className={`text-sm font-bold tabular-nums ${stat.valueColor} truncate`}>{stat.value}</div>
+                            <div className={`text-[10px] mt-0.5 leading-tight ${stat.subColor} truncate`}>{stat.sub}</div>
                         </div>
                     ))}
                 </div>
@@ -1082,8 +1199,62 @@ function PortfolioPage() {
 
                         {tradeHistory.length === 0 ? (
                             <div className="text-center py-16 text-[var(--color-text-secondary)]">No transactions yet.</div>
-                        ) : (
-                            <div className="bg-[var(--color-card)] border border-[var(--color-border)] rounded-2xl overflow-hidden">
+                        ) : (() => {
+                            const sortedHistory = sortSymbol
+                                ? [...tradeHistory].sort((a, b) => {
+                                    const sa = (a.symbol ?? '').toUpperCase();
+                                    const sb = (b.symbol ?? '').toUpperCase();
+                                    return sortSymbol === 'asc' ? sa.localeCompare(sb) : sb.localeCompare(sa);
+                                  })
+                                : tradeHistory;
+                            return (
+                            <>
+                            {/* ═══ Mobile: card list — a scrolling 8-column table doesn't read as a real app ═══ */}
+                            <div className="lg:hidden space-y-2">
+                                {sortedHistory.map(trade => {
+                                    const badge = trade.type === 'BUY' ? 'bg-green-500/15 text-green-600' : trade.type === 'SELL' ? 'bg-red-500/15 text-red-600' : trade.type === 'DEPOSIT' ? 'bg-blue-500/15 text-blue-600' : trade.type === 'WITHDRAWAL' ? 'bg-amber-500/15 text-amber-600' : 'bg-gray-500/15 text-[var(--color-text-secondary)]';
+                                    const isCash = trade.type === 'DEPOSIT' || trade.type === 'WITHDRAWAL';
+                                    const amount = trade.total ?? ((trade.price ?? 0) * (trade.quantity ?? 0));
+                                    const hasPnl      = trade.pnl != null;
+                                    const hasUnrealized = !hasPnl && trade.unrealizedPL != null;
+                                    const plValue     = hasPnl ? trade.pnl : (hasUnrealized ? trade.unrealizedPL : null);
+                                    const plPct       = hasPnl ? trade.pnlPercent : (hasUnrealized ? trade.unrealizedPLPercent : null);
+                                    const plColor     = plValue == null ? 'text-[var(--color-text-secondary)]'
+                                        : plValue >= 0 ? 'text-green-500' : 'text-red-500';
+                                    return (
+                                        <div key={trade.id} className="bg-[var(--color-card)] border border-[var(--color-border)] rounded-xl px-4 py-3 active:bg-[var(--color-bg-tertiary)] transition-colors">
+                                            <div className="flex items-center justify-between mb-1.5">
+                                                <div className="flex items-center gap-2 min-w-0">
+                                                    <span className={`px-2 py-0.5 text-[10px] font-bold rounded-full flex-shrink-0 ${badge}`}>{trade.type}</span>
+                                                    {!isCash && <span className="font-bold text-[var(--color-text-primary)] truncate">{trade.symbol}</span>}
+                                                    {trade.aiScore != null && (
+                                                        <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded-full flex-shrink-0 ${trade.aiScore >= 80 ? 'bg-green-500/15 text-green-600' : trade.aiScore >= 60 ? 'bg-yellow-500/15 text-yellow-600' : 'bg-gray-500/15 text-[var(--color-text-secondary)]'}`}>{trade.aiScore}</span>
+                                                    )}
+                                                </div>
+                                                <span className="text-[11px] text-[var(--color-text-secondary)] flex-shrink-0 ml-2">{new Date(trade.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>
+                                            </div>
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-xs text-[var(--color-text-secondary)]">
+                                                    {isCash ? new Date(trade.timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : `${trade.quantity} sh @ $${(trade.price ?? 0).toFixed(2)}`}
+                                                </span>
+                                                <div className="text-right">
+                                                    <span className="font-semibold text-[var(--color-text-primary)] text-sm tabular-nums">${(amount ?? 0).toFixed(2)}</span>
+                                                    {plValue != null && (
+                                                        <span className={`ml-2 text-xs font-semibold tabular-nums ${plColor}`}>
+                                                            {plValue >= 0 ? '+' : '-'}${Math.abs(plValue).toFixed(2)}
+                                                            {plPct != null && ` (${plPct >= 0 ? '+' : ''}${plPct.toFixed(1)}%)`}
+                                                            {hasUnrealized && <span className="ml-1 text-[9px] uppercase text-amber-600">unrl</span>}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+
+                            {/* ═══ Desktop: full table ═══ */}
+                            <div className="hidden lg:block bg-[var(--color-card)] border border-[var(--color-border)] rounded-2xl overflow-hidden">
                                 <div className="overflow-x-auto">
                                     <table className="min-w-full text-sm">
                                         <thead>
@@ -1108,14 +1279,7 @@ function PortfolioPage() {
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-[var(--color-border)]">
-                                            {(sortSymbol
-                                                ? [...tradeHistory].sort((a, b) => {
-                                                    const sa = (a.symbol ?? '').toUpperCase();
-                                                    const sb = (b.symbol ?? '').toUpperCase();
-                                                    return sortSymbol === 'asc' ? sa.localeCompare(sb) : sb.localeCompare(sa);
-                                                  })
-                                                : tradeHistory
-                                            ).map(trade => {
+                                            {sortedHistory.map(trade => {
                                                 const badge = trade.type === 'BUY' ? 'bg-green-500/15 text-green-600' : trade.type === 'SELL' ? 'bg-red-500/15 text-red-600' : trade.type === 'DEPOSIT' ? 'bg-blue-500/15 text-blue-600' : trade.type === 'WITHDRAWAL' ? 'bg-amber-500/15 text-amber-600' : 'bg-gray-500/15 text-[var(--color-text-secondary)]';
                                                 const isCash = trade.type === 'DEPOSIT' || trade.type === 'WITHDRAWAL';
                                                 const amount = trade.total ?? ((trade.price ?? 0) * (trade.quantity ?? 0));
@@ -1163,7 +1327,9 @@ function PortfolioPage() {
                                     </table>
                                 </div>
                             </div>
-                        )}
+                            </>
+                            );
+                        })()}
 
                         {showLedgerTrades && ledgerTrades.length > 0 && (
                             <div className="mt-4 bg-[var(--color-card)] border border-[var(--color-border)] rounded-2xl overflow-hidden">
@@ -1244,9 +1410,14 @@ function PortfolioPage() {
                             </form>
                         </div>
 
-                        {holdings.length > 0 && (
-                            <div className="mt-6">
-                                <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--color-text-secondary)] mb-3">Quick Sell from Holdings</h3>
+                        <div className="mt-6">
+                            <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--color-text-secondary)] mb-3">Quick Sell from Holdings</h3>
+                            {holdings.length === 0 ? (
+                                <div className="py-8 text-center rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-tertiary)]/40">
+                                    <p className="text-sm font-semibold text-[var(--color-text-secondary)]">No positions to sell</p>
+                                    <p className="text-xs text-[var(--color-text-secondary)] opacity-70 mt-1">Buy a stock above and it'll show up here</p>
+                                </div>
+                            ) : (
                                 <div className="space-y-2">
                                     {holdings.map(h => (
                                         <button key={h.symbol} onClick={() => { setTradeSymbol(h.symbol); setTradeType('sell'); fetchQuote(h.symbol); }}
@@ -1262,8 +1433,8 @@ function PortfolioPage() {
                                         </button>
                                     ))}
                                 </div>
-                            </div>
-                        )}
+                            )}
+                        </div>
                     </div>
                 )}
 

@@ -1,6 +1,6 @@
 # KiranRock AI Trading Platform — Feature Reference
 
-> **Last updated:** 2026-06-20  
+> **Last updated:** 2026-07-07  
 > **Stack:** Node.js + Express (backend) · Next.js 14 App Router (frontend) · PostgreSQL · PM2  
 > **Data providers:** Polygon.io (primary) · Yahoo Finance (fallback) · Alpaca (brokerage)  
 > **Ports:** Backend `3001` · Frontend `3000`
@@ -24,6 +24,7 @@
 13. [API Endpoints Reference](#13-api-endpoints-reference)
 14. [Known Limitations & Roadmap](#14-known-limitations--roadmap)
 15. [Signal & Pick Logic — Deep Dive](#15-signal--pick-logic--deep-dive)
+16. [Session Updates — 2026-07-06](#16-session-updates--2026-07-06)
 
 ---
 
@@ -210,6 +211,11 @@ Intraday mean-reversion and momentum scalps. Uses 5-minute bars from Polygon.
 - **VIX gate (options):** Options bot checks VIX regime (LOW/NORMAL/HIGH/EXTREME) and adjusts strategy mix
 - **Earnings guard:** Queries `earnings_calendar` table; blocks entry within 3 days of earnings
 
+### Adaptive Position Management (added 2026-07-06 — see [§16](#16-session-updates--2026-07-06) for full detail)
+- **Quality Score Decay:** Open positions are periodically re-scored (~every 20h) with the same PANTHEON engine used at entry. Score <65 for 2 consecutive re-scores forces an exit; intermediate tiers progressively tighten the trailing stop.
+- **Portfolio Heat Gate:** Aggregate dollar-risk-to-stop across all open + newly-sized positions is capped as a % of equity (`MAX_PORTFOLIO_RISK_PCT`, default 2.5%). New positions shrink to fit remaining budget rather than being rejected outright.
+- **Regime Transition Response:** On a detected regime *downgrade* (not just any change), pending buy orders are cancelled immediately and trailing stops get an extra temporary tightening — rather than waiting for the next scheduled re-evaluation.
+
 ---
 
 ## 6. Performance & Analytics
@@ -342,6 +348,7 @@ Per-user Telegram chat ID configured in profile. Alerts sent for:
 | `/portfolio` | Portfolio | Open positions, P&L, account value, allocation chart |
 | `/dashboard` | Dashboard | Selected stock deep-dive, AI signals, chart |
 | `/performance` | Performance | P&L history, Trade Attribution, Weekly Reports |
+| `/analytics` | Trade Review | Trade Log, Equity Curve, Score Analysis, Hold Time, Exit Breakdown, Holdback Simulation, **Market Review** (added 2026-07-06) |
 | `/recommendations` | Picks | Nightly scan top picks by AI score |
 | `/alerts` | Alerts | In-app notification center |
 | `/news` | News | News aggregation with sentiment scores |
@@ -420,6 +427,10 @@ Sent via Telegram each weekday morning after nightly scan completes:
 | `earnings_calendar` | Upcoming earnings dates (used for earnings guard) |
 | `market_regime_history` | Historical regime records |
 | `nightly_scan_history` | Audit log of scan runs |
+| `calibration_suggestions` | Daily score-threshold recommendations from `scoreCalibratorService.js` (recommend-only by default; see §16) |
+| `market_review_snapshots` | Daily capture of the **full** scan universe (every ticker analyzed, not just traded) with 1d/3d/5d forward returns backfilled — added 2026-07-06, see §16 |
+
+**`holdings` columns added 2026-07-06:** `last_rescore_score`, `last_rescore_at`, `low_score_streak` — support Quality Score Decay (§16).
 
 ---
 
@@ -442,6 +453,7 @@ All times Eastern US.
 | 3:15 PM | Mon–Fri | Stock bot scan #6 |
 | 3:45 PM | Fridays | Weekly report generation |
 | 4:15 PM | Mon–Fri | Daily summary Telegram + options summary |
+| 4:25 PM | Mon–Fri | **Market Review capture** — snapshots full scan universe + backfills forward returns (added 2026-07-06, see §16) |
 | 5:00 PM | Mon–Fri | Position monitoring / reconciliation |
 | 6:00 PM | Mon–Fri | Options chain evening refresh |
 
@@ -473,6 +485,10 @@ All times Eastern US.
 | GET | `/api/performance/trade-attribution` | Full attribution with aggregations |
 | GET | `/api/performance/weekly` | Weekly report list |
 | GET | `/api/performance/weekly/:weekId` | Single week report |
+| GET | `/api/performance/exit-breakdown?days=` | Closed-trade P&L grouped by exit type |
+| GET | `/api/performance/holdback-sim?days=` | Simulates holding trailing/break-even exits one extra day |
+| GET | `/api/performance/market-review?days=` | Score vs actual forward-return comparison across the **full** scan universe — added 2026-07-06, see §16 |
+| GET | `/api/performance/calibration` | Score-bucket profit-factor/expectancy report from `scoreCalibratorService.js` |
 
 ### Options
 | Method | Path | Purpose |
@@ -1052,3 +1068,79 @@ expectancy = winRate × avgWin% − lossRate × |avgLoss%|
 This creates a closed feedback loop: the platform improves entry selection based on its own trade history, without any manual intervention.
 
 Every evaluated candidate (including rejections) is written to `trade_candidates` — building a supervised learning dataset for future ML model training.
+
+---
+
+## 16. Session Updates — 2026-07-06
+
+Five functional additions and two bug fixes made in this session, all reviewed against a ChatGPT-authored strategy critique before implementation. Three items from that critique turned out to already exist in the codebase (correlation filter, Kelly/expectancy sizing, gap-chase guard) and needed no changes — noted here for context, not re-documented.
+
+### 16.1 Quality Score Decay
+
+**File:** `enhancedAITradingBot.js` → `manageExistingPositions()`
+
+Previously, once a position opened, every exit decision was purely price-driven — the rich entry score (technicals + news + AI overlays) was never revisited. Now each open position is re-scored with the same `analyzeStockWithAI()` engine used at entry, throttled to once per ~20 hours per symbol (persisted via new `holdings` columns: `last_rescore_score`, `last_rescore_at`, `low_score_streak`).
+
+**Tiered response:**
+| Re-score | Effect |
+|---|---|
+| ≥ 85 | Normal — no change |
+| 75–84 | Trailing stop tightened ×0.7 |
+| 65–74 | Trailing stop tightened ×0.5 |
+| < 65, 2 consecutive re-scores | Forced exit, regardless of hold-time guard |
+
+Requiring **two consecutive** low re-scores (not one) before exiting avoids reacting to a single noisy recalculation. Confirmed live on 2026-07-06: CL and AMGN both flagged in the decay tier closed as small wins instead of round-tripping further — the tightening working as designed on its first day live.
+
+### 16.2 Portfolio Heat Gate
+
+**File:** `enhancedAITradingBot.js` → buy loop in `runTradingSession()`
+
+A read-only dashboard endpoint (`/api/ai-trading/portfolio-heat`) already computed aggregate dollar-risk-to-stop across open positions but never enforced it. Now wired into the buy loop: before sizing any new position, aggregate risk (existing holdings + this cycle's new sizes) is checked against a budget (`MAX_PORTFOLIO_RISK_PCT` env var, default 2.5% of equity — shared with the dashboard so what's displayed is what's enforced). A qualifying trade that would exceed budget is **shrunk to fit** rather than rejected outright; once budget is fully exhausted, no further new positions open that cycle.
+
+### 16.3 Regime Transition Response
+
+**File:** `enhancedAITradingBot.js` — extends the existing `_lastRegimePerUser` regime-shift tracker
+
+The regime-shift detector previously only sent a Telegram alert on transition. It now also distinguishes a genuine **downgrade** (via an ordinal rank: BULL_STRONG > BULL > NEUTRAL/CHOPPY > BEAR_MILD > BEAR/RISK_OFF/PANIC) and reacts immediately:
+- Cancels any pending unfilled buy orders for that user
+- Applies an extra 25% trailing-stop tightening for a 2-hour window (stacks with the Quality Score Decay multiplier)
+
+Regime-scaled exit thresholds already recompute every cycle from current regime — this addition is specifically for reacting to the *moment of transition* rather than waiting for the next scheduled evaluation.
+
+### 16.4 Score Calibration — confirmed already built, not re-implemented
+
+`scoreCalibratorService.js` already implements sector-specific score floors, exit-reason attribution, confidence-bucket calibration, and score×signal-clarity cross-analysis — considerably more sophisticated than initially assumed. Runs daily, persists to `calibration_suggestions`, sends a Telegram report, and has a stability-gated (3-day same-suggestion, ±2 max step) Phase 2 auto-apply — **disabled by default** (`AUTO_ACCEPT_THRESHOLD_CHANGES` env flag, confirmed unset). No code changes made; documented here so it isn't mistaken for a gap in future reviews.
+
+### 16.5 Market Review — full scan universe vs. actual outcome
+
+**New table:** `market_review_snapshots` — see §11  
+**New service:** `marketReviewService.js` (`captureDailySnapshot()`, `backfillForwardReturns()`, `runDailyMarketReview()`)  
+**New scheduled job:** 4:25 PM ET daily, in `scheduleTelegramReport.js` — see §12  
+**New endpoint:** `GET /api/performance/market-review?days=` — see §13  
+**New UI:** "Market Review" tab on `/analytics` — see §9
+
+Motivated by a real observed gap: on 2026-07-06, several memory/semiconductor names (AMD +8.97%, WDC +7.35%, MU +3.64%) rallied hard while the bot's actual holdings (TREX, EAT) went negative — and the scan had in fact evaluated and passed on all of the rallying names (scored 36–56, below the BUY threshold) because its momentum component penalizes stocks with a recent sharp decline, missing the snapback. Market Review captures **every** scanned ticker daily (not just traded ones) with 1d/3d/5d forward returns and the regime at scan time, so score-vs-outcome and regime-vs-outcome can be validated with real data over time instead of single-day anecdotes.
+
+### 16.6 Bug fix — stale Alpaca IEX quote could block all new buys for hours
+
+**File:** `dataProvider.js`
+
+QQQ's real intraday price stayed in a 720–726 range all day on 2026-07-06 (verified via actual 15-min bars), yet `[QQQGate]` — which blocks all new buys bot-wide on a red QQQ day — logged a constant, incorrect "‑1.76%" reading for 6+ hours, spanning a mid-day backend restart (ruling out our own 60-second quote cache as the cause). Root cause: Alpaca's free-tier IEX snapshot feed served a stuck trade. Fix: a staleness guard scoped to `QQQ`/`SPY` (the two gate-critical symbols) rejects an IEX quote whose `LatestTrade` hasn't updated in 5+ minutes during regular market hours, falling back to Polygon automatically via the existing fallback path — no changes needed to any calling code.
+
+### 16.7 Bug fix — duplicate stop order created a naked short position
+
+**Files:** `enhancedAITradingBot.js` (`[StopRepair]` block), `trailingStopService.js`
+
+A real-money incident on the live account: EAT's stop-loss fired and correctly closed a 2-share long position at 14:43:55 UTC. Three minutes later, the stop-repair cycle — working off a holdings snapshot taken *before* that fill was reconciled — saw "no stop order" for EAT and placed a fresh one. That duplicate order sat resting and fired again three hours later against zero remaining shares, opening an **unmonitored naked short** (invisible to the `holdings` table, no stop protecting it).
+
+This exact class of bug (time-of-check-to-time-of-use race between a DB snapshot and live broker state) existed independently in **two separate places**:
+1. `enhancedAITradingBot.js`'s `[StopRepair]` block
+2. `trailingStopService.js` — a wholly separate service, also on a 5-minute cycle, with three of its own "no stop found → create one" branches
+
+Both were fixed the same way: a live `getPosition()` check immediately before placing any "missing stop" order, skipping if the broker's live quantity doesn't match the snapshot. Fixing only one would have left the other as a live path for the identical failure mode.
+
+The naked short itself required manual closing (not something a code fix can undo) — a buy order to flatten it was placed manually via the Alpaca dashboard, pending fill at next market open.
+
+### 16.8 Operational note — nightly scan resilience under real network outages
+
+Two separate wifi/DNS outages hit during this session's nightly scan window, degrading `daily_universe_analysis` coverage (as low as 368/556 valid scores at one point). Recovery used the scan service's existing `missingOnly: true` resume mode (`runNightlyUniverseScan({ missingOnly: true })`) — re-processing only symbols still missing a score rather than a wasteful full re-scan, and deliberately *not* run concurrently with the worker's own in-progress scan to avoid doubling load on already rate-limited external APIs (Yahoo/Gemini/X News). No code changes; documented as an operational pattern for the next time this happens.

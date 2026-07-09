@@ -58,6 +58,24 @@
   --navbar-bg: #0f172a;
   --navbar-text: #f8fafc;
   --navbar-border: rgba(255,255,255,0.08);
+
+  /* --color-* aliases — several pages (portfolio, profile, dashboard, etc.) reference
+     this naming scheme directly via bg-[var(--color-accent)] etc. It was dropped from
+     this file in commit 89f75ac's globals.css rewrite without updating those call sites,
+     so every var(--color-*) resolved to nothing — an invisible/transparent fill wherever
+     it set a background (e.g. the selected period pill on the portfolio chart, reported
+     2026-07-08 as a "light color overlap" making the label disappear). Restored here with
+     the same values this app used before that regression. */
+  --color-bg-primary: #ffffff;
+  --color-bg-secondary: #f8fafc;
+  --color-bg-tertiary: #f1f5f9;
+  --color-card: #ffffff;
+  --color-text-primary: #0f172a;
+  --color-text-secondary: #64748b;
+  --color-border: #e2e8f0;
+  --color-success: #10b981;
+  --color-danger: #ef4444;
+  --color-accent: #6366f1;
 }
 
 .dark {
@@ -89,6 +107,17 @@
   --info: #60a5fa;
   --info-bg: rgba(59,130,246,0.1);
   --info-border: rgba(59,130,246,0.3);
+
+  --color-bg-primary: #0f172a;
+  --color-bg-secondary: #1e293b;
+  --color-bg-tertiary: #334155;
+  --color-card: #1e293b;
+  --color-text-primary: #f8fafc;
+  --color-text-secondary: #cbd5e1;
+  --color-border: #334155;
+  --color-success: #34d399;
+  --color-danger: #f87171;
+  --color-accent: #818cf8;
 
   --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
   --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.4), 0 2px 4px -1px rgba(0,0,0,0.3);

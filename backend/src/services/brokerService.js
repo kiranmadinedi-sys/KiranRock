@@ -123,7 +123,9 @@ const simulatedBroker = (() => {
             userId, symbol, quantity,
             meta.executedBy || 'AI_BOT',
             meta.aiScore    || null,
-            meta.sector     || null
+            meta.sector     || null,
+            null, null, null,
+            meta.atr        || null
         );
 
         return {
@@ -261,7 +263,9 @@ const alpacaBroker = (() => {
             userId, symbol, quantity,
             `ALPACA_${isPaper ? 'PAPER' : 'LIVE'}`,
             meta.aiScore || null,
-            meta.sector  || null
+            meta.sector  || null,
+            null, null, null,
+            meta.atr || null
         );
 
         const buyMarketFinalStatus = filled.status || 'submitted';
@@ -403,7 +407,9 @@ const alpacaBroker = (() => {
                     targetPrice,
                     bracketOrder: true
                 }),
-                fillPrice
+                fillPrice,
+                null,  // entryRegime (passed via notes JSON above)
+                meta.atr || null  // ATR at entry — enables ATR-aware trailing stops in position management
             ).catch(err => {
                 // DB write failed AFTER the broker order was confirmed filled.
                 // Log at error level and fire a Telegram alert — morning reconciliation
@@ -536,7 +542,9 @@ const alpacaBroker = (() => {
                     targetPrice:   effectiveTarget,
                     fractional:    true
                 }),
-                fillPrice
+                fillPrice,
+                null,
+                meta.atr || null
             ).catch(err => {
                 logger.error('[Broker:Alpaca] buyFractional DB record failed — order filled but not in DB', {
                     symbol, filledQty, fillPrice, orderId: order.id, err: err.message
@@ -780,7 +788,12 @@ const alpacaBroker = (() => {
 
         for (const activityType of [...depositTypes, ...withdrawalTypes]) {
             try {
-                const activities = await client.getAccountActivities({ activityType });
+                // Alpaca SDK's param is `activityTypes` (plural) — passing `activityType`
+                // (singular) silently drops the filter entirely, so every call returns the
+                // FULL unfiltered activity list. That's why totalDeposited and totalWithdrawn
+                // always came out equal: both were really "sum of every activity", not
+                // deposits vs withdrawals specifically (found 2026-07-08).
+                const activities = await client.getAccountActivities({ activityTypes: activityType });
                 for (const a of (activities || [])) {
                     const amount = Math.abs(parseFloat(a.net_amount || a.amount || 0));
                     if (amount <= 0) continue;
@@ -799,7 +812,43 @@ const alpacaBroker = (() => {
         return { totalDeposited, totalWithdrawn };
     }
 
-    return { buyMarket, buyBracket, buyFractional, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, getNetDeposits, placeStopOrder, cancelOrder, name: 'Alpaca Markets' };
+    /**
+     * Same as getNetDeposits, but scoped to activities between [afterDate, untilDate]
+     * (ISO date strings, inclusive-ish per Alpaca's `after`/`until` activity filters).
+     * Used to strip cash-flow effects out of a period's investment-return calculation —
+     * without this, a deposit made mid-period reads as "portfolio gain" (found 2026-07-08,
+     * see portfolioHistoryService.js buildPortfolioHistory).
+     */
+    async function getNetDepositsInRange(userId, afterDate, untilDate) {
+        const { client } = await getClientForUser(userId);
+        let totalDeposited = 0;
+        let totalWithdrawn = 0;
+
+        const depositTypes    = ['CSD', 'JNLC'];
+        const withdrawalTypes = ['CSW', 'JNLS'];
+
+        for (const activityType of [...depositTypes, ...withdrawalTypes]) {
+            try {
+                const activities = await client.getAccountActivities({
+                    activityTypes: activityType,
+                    after: afterDate,
+                    until: untilDate
+                });
+                for (const a of (activities || [])) {
+                    const amount = Math.abs(parseFloat(a.net_amount || a.amount || 0));
+                    if (amount <= 0) continue;
+                    if (depositTypes.includes(activityType))    totalDeposited += amount;
+                    if (withdrawalTypes.includes(activityType)) totalWithdrawn += amount;
+                }
+            } catch (err) {
+                logger.debug(`[Broker:Alpaca] getNetDepositsInRange skipping ${activityType}: ${err.message}`);
+            }
+        }
+
+        return { totalDeposited, totalWithdrawn };
+    }
+
+    return { buyMarket, buyBracket, buyFractional, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, getNetDeposits, getNetDepositsInRange, placeStopOrder, cancelOrder, name: 'Alpaca Markets' };
 })();
 
 // ─── ACTIVE BROKER SELECTION ─────────────────────────────────────────────────
@@ -1065,6 +1114,15 @@ module.exports = {
     getNetDeposits: (userId) =>
                         activeBroker.getNetDeposits
                             ? activeBroker.getNetDeposits(userId)
+                            : Promise.resolve({ totalDeposited: null, totalWithdrawn: null }),
+
+    /**
+     * Same as getNetDeposits, scoped to a date range — used to exclude cash-flow
+     * effects (deposits/withdrawals) from a period's investment-return calculation.
+     */
+    getNetDepositsInRange: (userId, afterDate, untilDate) =>
+                        activeBroker.getNetDepositsInRange
+                            ? activeBroker.getNetDepositsInRange(userId, afterDate, untilDate)
                             : Promise.resolve({ totalDeposited: null, totalWithdrawn: null }),
 
     brokerName:     activeBroker.name,

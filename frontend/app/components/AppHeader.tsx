@@ -365,8 +365,6 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
                 </>
             )}
 
-            {/* Spacer for mobile bottom nav */}
-            <div className="lg:hidden h-16" />
         </>
     );
 };

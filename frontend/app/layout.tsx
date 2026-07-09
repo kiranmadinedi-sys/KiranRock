@@ -46,6 +46,12 @@ export default function RootLayout({
             <AuthGuard>
               <AppHeader />
               {children}
+              {/* Reserves space below page content so the fixed mobile bottom nav
+                  (rendered inside AppHeader) doesn't cover the last bit of it. Was
+                  previously placed inside AppHeader itself, which renders BEFORE
+                  {children} here — landing the gap above every page's content
+                  instead of below it (found 2026-07-09). */}
+              <div className="lg:hidden h-16" />
             </AuthGuard>
           </NotificationProvider>
         </ThemeProvider>

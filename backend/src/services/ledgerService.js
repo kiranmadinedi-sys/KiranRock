@@ -1,22 +1,26 @@
 const { query } = require('../config/database');
 const { Parser } = require('json2csv');
 const axios = require('axios');
+const userDb = require('./userDatabaseService');
 
 async function getAlpacaClient(userId) {
-    const res = await query(
-        'SELECT alpaca_key_id, alpaca_secret_key, alpaca_paper FROM users WHERE id=$1',
-        [userId]
-    );
-    const row = res.rows[0];
-    if (!row) throw new Error('No user record');
-    const base = row.alpaca_paper === false
+    // Was reading alpaca_key_id/secret straight off the users row, which is NULL for
+    // accounts that rely on the shared .env credentials (no per-user keys saved) — that
+    // sent a null API key to Alpaca, got a 401, and silently fell back to summing the
+    // KiranRock DB's own (stale, divergent) trades table instead of the real deposit
+    // history. userDatabaseService.getUserAlpacaCredentials() already implements the
+    // correct env fallback and is what brokerService uses for the same account (found
+    // 2026-07-09: this mismatch made a $100k paper seed show as only $60k deposited).
+    const creds = await userDb.getUserAlpacaCredentials(userId);
+    if (!creds.keyId || !creds.secretKey) throw new Error('Alpaca keys not configured');
+    const base = creds.isPaper === false
         ? 'https://api.alpaca.markets'
         : 'https://paper-api.alpaca.markets';
     return {
         base,
         headers: {
-            'APCA-API-KEY-ID': row.alpaca_key_id,
-            'APCA-API-SECRET-KEY': row.alpaca_secret_key,
+            'APCA-API-KEY-ID': creds.keyId,
+            'APCA-API-SECRET-KEY': creds.secretKey,
         },
     };
 }
@@ -42,8 +46,12 @@ async function getLedgerSummary(userId) {
     try {
         const { base, headers } = await getAlpacaClient(userId);
 
-        // CSD = cash deposit, CSW = cash withdrawal, FILL = order fill, PTC = pass-through charge
-        const activities = await fetchAlpacaActivities(base, headers, ['CSD', 'CSW', 'FILL', 'PTC', 'DIV']);
+        // CSD = cash deposit, CSW = cash withdrawal (live accounts)
+        // JNLC/JNLS = journal credit/debit — the deposit/withdrawal types paper accounts
+        // actually use for seed funding and top-ups. Omitting these meant every paper
+        // account's real deposit history was invisible here (found 2026-07-09).
+        // FILL = order fill, PTC = pass-through charge
+        const activities = await fetchAlpacaActivities(base, headers, ['CSD', 'CSW', 'JNLC', 'JNLS', 'FILL', 'PTC', 'DIV']);
 
         let totalDeposits    = 0;
         let totalWithdrawals = 0;
@@ -55,8 +63,8 @@ async function getLedgerSummary(userId) {
         for (const a of activities) {
             const amt = Math.abs(parseFloat(a.net_amount || a.price * a.qty || 0));
             switch (a.activity_type) {
-                case 'CSD': totalDeposits    += amt; break;
-                case 'CSW': totalWithdrawals += amt; break;
+                case 'CSD': case 'JNLC': totalDeposits    += amt; break;
+                case 'CSW': case 'JNLS': totalWithdrawals += amt; break;
                 case 'DIV': totalDividends   += amt; break;
                 case 'PTC': totalCommission  += amt; break;
                 case 'FILL':

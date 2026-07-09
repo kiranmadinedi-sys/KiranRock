@@ -39,6 +39,7 @@ router.post('/deposit', async (req, res) => {
         }
         
         const result = await tradingAccountService.depositFunds(req.userId, parseFloat(amount));
+        require('../services/portfolioHistoryService').invalidateDepositEventsCache(req.userId);
         res.json(result);
     } catch (error) {
         res.status(400).json({ error: error.message });
@@ -58,6 +59,7 @@ router.post('/withdraw', async (req, res) => {
         }
         
         const result = await tradingAccountService.withdrawFunds(req.userId, parseFloat(amount));
+        require('../services/portfolioHistoryService').invalidateDepositEventsCache(req.userId);
         res.json(result);
     } catch (error) {
         res.status(400).json({ error: error.message });
@@ -80,6 +82,7 @@ router.post('/reset-balance', async (req, res) => {
             return res.status(400).json({ error: 'Invalid reset amount' });
         }
         const result = await tradingAccountService.resetBalance(req.userId, amount);
+        require('../services/portfolioHistoryService').invalidateDepositEventsCache(req.userId);
         res.json(result);
     } catch (error) {
         res.status(500).json({ error: error.message });

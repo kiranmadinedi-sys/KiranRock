@@ -468,10 +468,39 @@ schedule.scheduleJob({
   }
 });
 
+// ── PORTFOLIO SNAPSHOT: every 30 min, independent of anyone having the app open ──
+// Portfolio chart history previously only got saved as a side effect of the frontend's
+// own auto-refresh (buildPortfolioHistory calls savePortfolioSnapshot on every chart
+// request) — meaning historical density depended entirely on whether someone had the
+// page open. That left gaps overnight or whenever the app was closed, which the 1M/3M
+// chart's 30-min bucketing (added 2026-07-09) now depends on for a usable scrub
+// experience. This runs unconditionally so the data exists regardless of viewership.
+// savePortfolioSnapshot already dedupes (skips the insert if a same-value snapshot was
+// saved in the last 15 min), so this is a no-op most of the time when the app is active.
+schedule.scheduleJob('*/30 * * * *', async () => {
+  const { query } = require('./config/database');
+  const portfolioTrackingService = require('./services/portfolioTrackingService');
+  try {
+    const users = await query('SELECT id FROM users');
+    for (const { id: userId } of users.rows) {
+      try {
+        const { summary } = await portfolioTrackingService.getPortfolioSummary(userId);
+        const { savePortfolioSnapshot } = require('./services/portfolioSnapshotService');
+        await savePortfolioSnapshot(userId, summary, { source: 'scheduled-30min' });
+      } catch (userError) {
+        logger.debug('[Telegram Reports Scheduler] 30-min snapshot failed for user', { userId, error: userError.message });
+      }
+    }
+  } catch (error) {
+    logger.error('[Telegram Reports Scheduler] 30-min portfolio snapshot job failed', { error: error.message });
+  }
+});
+
 console.log('  ✓ Scheduled: Mon-Fri at 4:15 AM (early warmup) → 6:30 AM (refresh warmup) → 7:00 AM (send daily report)');
 console.log('  ✓ Scheduled: Saturday at 8:00 AM (weekend prep report)');
 console.log('  ✓ Scheduled: Mon-Fri at 4:15 PM (AI bot daily summary)');
 console.log('  ✓ Scheduled: Sunday at 9:00 AM (My Performance weekly recap)');
+console.log('  ✓ Scheduled: Every 30 min (portfolio snapshot capture for chart history)');
 console.log('  ✓ Scheduled: Mon-Fri at 4:25 PM (market review capture + forward-return backfill)');
 logger.info('[Telegram Reports Scheduler] ✓ Daily schedule registered (Mon-Fri)');
 logger.info('[Telegram Reports Scheduler] ✓ Weekend schedule registered (Saturday 8:00 AM EST)');

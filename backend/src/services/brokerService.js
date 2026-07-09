@@ -813,42 +813,42 @@ const alpacaBroker = (() => {
     }
 
     /**
-     * Same as getNetDeposits, but scoped to activities between [afterDate, untilDate]
-     * (ISO date strings, inclusive-ish per Alpaca's `after`/`until` activity filters).
-     * Used to strip cash-flow effects out of a period's investment-return calculation —
-     * without this, a deposit made mid-period reads as "portfolio gain" (found 2026-07-08,
-     * see portfolioHistoryService.js buildPortfolioHistory).
+     * Raw, dated list of every deposit/withdrawal activity, fetched once and returned
+     * as { date: Date, amount: number } (positive = deposit, negative = withdrawal),
+     * sorted ascending. Lets a caller compute net cash flow over ANY sub-range (e.g.
+     * "deposits between this chart point and now") locally, without a separate Alpaca
+     * call per range — used by portfolioHistoryService to annotate every bucketed
+     * point so the frontend can show a valid deposit-adjusted change while scrubbing
+     * the chart, not just for the period as a whole (found 2026-07-09: reusing a
+     * single period-level total wasn't enough — each point needs its own).
      */
-    async function getNetDepositsInRange(userId, afterDate, untilDate) {
+    async function getDepositActivities(userId) {
         const { client } = await getClientForUser(userId);
-        let totalDeposited = 0;
-        let totalWithdrawn = 0;
+        const events = [];
 
         const depositTypes    = ['CSD', 'JNLC'];
         const withdrawalTypes = ['CSW', 'JNLS'];
 
         for (const activityType of [...depositTypes, ...withdrawalTypes]) {
             try {
-                const activities = await client.getAccountActivities({
-                    activityTypes: activityType,
-                    after: afterDate,
-                    until: untilDate
-                });
+                const activities = await client.getAccountActivities({ activityTypes: activityType });
                 for (const a of (activities || [])) {
                     const amount = Math.abs(parseFloat(a.net_amount || a.amount || 0));
                     if (amount <= 0) continue;
-                    if (depositTypes.includes(activityType))    totalDeposited += amount;
-                    if (withdrawalTypes.includes(activityType)) totalWithdrawn += amount;
+                    const date = new Date(a.date || a.transaction_time || a.settle_date);
+                    if (Number.isNaN(date.getTime())) continue;
+                    events.push({ date, amount: withdrawalTypes.includes(activityType) ? -amount : amount });
                 }
             } catch (err) {
-                logger.debug(`[Broker:Alpaca] getNetDepositsInRange skipping ${activityType}: ${err.message}`);
+                logger.debug(`[Broker:Alpaca] getDepositActivities skipping ${activityType}: ${err.message}`);
             }
         }
 
-        return { totalDeposited, totalWithdrawn };
+        events.sort((a, b) => a.date.getTime() - b.date.getTime());
+        return events;
     }
 
-    return { buyMarket, buyBracket, buyFractional, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, getNetDeposits, getNetDepositsInRange, placeStopOrder, cancelOrder, name: 'Alpaca Markets' };
+    return { buyMarket, buyBracket, buyFractional, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, getNetDeposits, getDepositActivities, placeStopOrder, cancelOrder, name: 'Alpaca Markets' };
 })();
 
 // ─── ACTIVE BROKER SELECTION ─────────────────────────────────────────────────
@@ -1117,13 +1117,14 @@ module.exports = {
                             : Promise.resolve({ totalDeposited: null, totalWithdrawn: null }),
 
     /**
-     * Same as getNetDeposits, scoped to a date range — used to exclude cash-flow
-     * effects (deposits/withdrawals) from a period's investment-return calculation.
+     * Raw dated list of every deposit/withdrawal activity: [{ date, amount }], amount
+     * signed (+ deposit, - withdrawal). Lets a caller net out cash flow over any
+     * sub-range locally instead of one Alpaca call per range.
      */
-    getNetDepositsInRange: (userId, afterDate, untilDate) =>
-                        activeBroker.getNetDepositsInRange
-                            ? activeBroker.getNetDepositsInRange(userId, afterDate, untilDate)
-                            : Promise.resolve({ totalDeposited: null, totalWithdrawn: null }),
+    getDepositActivities: (userId) =>
+                        activeBroker.getDepositActivities
+                            ? activeBroker.getDepositActivities(userId)
+                            : Promise.resolve([]),
 
     brokerName:     activeBroker.name,
     brokerKey:      BROKER,

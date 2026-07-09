@@ -953,6 +953,21 @@ async function initializeDatabase() {
         `);
         console.log('✓ Created holding_rescore_history table');
 
+        // Deposit Events Cache — durable backing for portfolioHistoryService's in-memory
+        // deposit/withdrawal cache (2026-07-09). The in-memory Map is fast but empty after
+        // every restart, forcing a slow Alpaca refetch for the first request; this table lets
+        // a cold start load the last-known-good events instantly while a background refresh
+        // (or the next cache-miss) brings it current. Deposits are rare, so a stale-by-a-few-
+        // minutes row here is a non-issue.
+        await query(`
+            CREATE TABLE IF NOT EXISTS deposit_events_cache (
+                user_id      VARCHAR(50)  PRIMARY KEY,
+                events       JSONB        NOT NULL,
+                computed_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+            )
+        `);
+        console.log('✓ Created deposit_events_cache table');
+
         console.log('\n✓ Database initialization completed successfully!\n');
         return true;
 

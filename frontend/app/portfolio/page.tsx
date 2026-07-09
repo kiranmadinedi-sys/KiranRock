@@ -377,7 +377,15 @@ function PortfolioPage() {
         const date = new Date(timestamp);
         if (Number.isNaN(date.getTime())) return String(timestamp);
         if (range === '1D') return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-        if (range === '1W' || range === '1M') return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+        // 1M/3M are now bucketed every 30 min (2026-07-09) — date-only would show the
+        // same label for every point on the same day, with no way to tell them apart
+        // while scrubbing.
+        if (range === '1M' || range === '3M') {
+            return `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+        }
+        // 1Y is now bucketed weekly (was monthly) — needs the day, not just month+year,
+        // or every week within the same month would show an identical label.
+        if (range === '1W' || range === '1Y') return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
         return date.toLocaleDateString([], { month: 'short', year: '2-digit' });
     };
 
@@ -388,7 +396,7 @@ function PortfolioPage() {
             if (!res.ok) throw new Error('Failed');
             const payload = await res.json();
             const history = Array.isArray(payload) ? payload : (payload.history || []);
-            const normalized = history.map((p: any) => ({ time: formatHistoryLabel(p.time, range), value: Number(p.value) || 0 })).filter((p: any) => Number.isFinite(p.value));
+            const normalized = history.map((p: any) => ({ time: formatHistoryLabel(p.time, range), value: Number(p.value) || 0, depositsSince: Number(p.depositsSince) || 0 })).filter((p: any) => Number.isFinite(p.value));
             setPortfolioHistory(normalized);
             if (typeof payload?.changeValue === 'number') {
                 setPortfolioChange({ value: payload.changeValue, percent: payload.changePercent, label: CHANGE_LABELS[range] || 'Change' });
@@ -944,13 +952,20 @@ function PortfolioPage() {
                     </div>
 
                     {(() => {
-                        // While scrubbing the chart, show the value/change AS OF the touched
-                        // point instead of the live figures — matches the Robinhood-style
-                        // "drag to see history" behavior requested 2026-07-08.
+                        // While scrubbing, show the change from the touched point to now — using
+                        // depositsSince (deposits/withdrawals between that point and now, computed
+                        // server-side per-point) to net out cash flow, same as the backend's own
+                        // changeValue. A naive value-only diff here reproduced the exact "+990%"
+                        // deposit-as-profit bug client-side (found 2026-07-09); this mirrors the
+                        // backend's all-time-anchor safeguard for points that predate the account's
+                        // real funding (e.g. a stale seed snapshot before the first real deposit).
                         if (scrubbedPoint) {
-                            const base = openValue ?? scrubbedPoint.value;
-                            const scrubChangeValue = scrubbedPoint.value - base;
-                            const scrubChangePct = base > 0 ? (scrubChangeValue / base) * 100 : 0;
+                            const totalDepositedAllTime = totalInvested;
+                            const depositsSince = scrubbedPoint.depositsSince || 0;
+                            const scrubChangeValue = (totalDepositedAllTime > 0 && depositsSince >= totalDepositedAllTime - 0.01)
+                                ? totalPortfolioValue - totalDepositedAllTime
+                                : (totalPortfolioValue - scrubbedPoint.value) - depositsSince;
+                            const scrubChangePct = totalDepositedAllTime > 0 ? (scrubChangeValue / totalDepositedAllTime) * 100 : 0;
                             const isPos = scrubChangeValue >= 0;
                             return (
                                 <div className={`mt-2 flex items-center gap-1.5 text-sm font-semibold ${isPos ? 'text-green-500' : 'text-red-500'}`}>

@@ -133,8 +133,26 @@ async function getSnapshotsInRange(userId, startDate, endDate) {
     return result.rows;
 }
 
+/** Nearest snapshot strictly before `date`, regardless of how large the gap is — used to
+ *  give outlier detection a reference point even when there's a real multi-hour/day gap
+ *  in snapshot history right before the requested range (2026-07-11). */
+async function getNearestSnapshotBefore(userId, date) {
+    await ensureSchema();
+    const result = await query(`
+        SELECT total_portfolio_value AS "totalPortfolioValue",
+               captured_at AS "capturedAt"
+        FROM portfolio_snapshots
+        WHERE user_id = $1
+          AND captured_at < $2
+        ORDER BY captured_at DESC
+        LIMIT 1
+    `, [userId, date]);
+    return result.rows[0] || null;
+}
+
 module.exports = {
     ensureSchema,
+    getNearestSnapshotBefore,
     getLatestSnapshot,
     savePortfolioSnapshot,
     getSnapshotsInRange

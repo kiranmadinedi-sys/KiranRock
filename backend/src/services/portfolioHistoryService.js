@@ -1,6 +1,7 @@
 const {
     savePortfolioSnapshot,
-    getSnapshotsInRange
+    getSnapshotsInRange,
+    getNearestSnapshotBefore
 } = require('./portfolioSnapshotService');
 const brokerService = require('./brokerService');
 const { query } = require('../config/database');
@@ -83,8 +84,14 @@ function invalidateDepositEventsCache(userId) {
 }
 
 const RANGE_CONFIG = {
-    '1D': { lookbackMs: 24 * 60 * 60 * 1000, bucketMs: 60 * 60 * 1000 },
-    '1W': { lookbackMs: 7 * 24 * 60 * 60 * 1000, bucketMs: 24 * 60 * 60 * 1000 },
+    // 1D/1W bucketed to 30 SECONDS (was hourly/daily) — matches the actual auto-refresh/
+    // snapshot-save cadence, so the chart reflects every real data point captured instead
+    // of down-sampling into coarser steps. bucketSnapshots() only emits a point for
+    // buckets that actually have a snapshot, so this doesn't pad the series with empty
+    // points during quiet stretches — it just stops throwing away real density that
+    // exists (requested 2026-07-11, clarified from an initial 30-min guess).
+    '1D': { lookbackMs: 24 * 60 * 60 * 1000, bucketMs: 30 * 1000 },
+    '1W': { lookbackMs: 7 * 24 * 60 * 60 * 1000, bucketMs: 30 * 1000 },
     // 1M/3M bucketed to 30 min (was daily/weekly) so scrubbing lands on a value every
     // 30 min instead of once a day/week — feasible now that snapshots are captured on
     // every 30s auto-refresh, not just once per page load (requested 2026-07-09).
@@ -103,6 +110,56 @@ function getStartDate(range) {
 
     const config = RANGE_CONFIG[range] || RANGE_CONFIG['1D'];
     return new Date(Date.now() - config.lookbackMs);
+}
+
+// Filters out transient "V-shaped" blips — a snapshot that dips or spikes sharply and
+// then reverts within about an hour, with no real cash-flow to explain it. Found
+// 2026-07-11: a pending order can temporarily hold cash on Alpaca's side, causing
+// getPortfolioSummary's cash+holdings fallback (used when Alpaca's own equity figure is
+// momentarily unavailable) to read low for a few minutes before recovering — e.g. June 24
+// showed $2,998.71 for ~5 min between two $5,435+ readings. Coarser daily/weekly buckets
+// used to average this away by chance; finer 30-min/30-sec buckets (added this week) can
+// land squarely on the blip and surface it directly on the chart. Only filters a point
+// when it deviates sharply from BOTH a ~1h-earlier AND ~1h-later reference AND those two
+// references agree with each other — a genuine sustained move wouldn't have neighbors on
+// both sides converging back to the same value, so this shouldn't mask real volatility.
+const OUTLIER_DEVIATION_THRESHOLD = 0.15; // 15%
+const OUTLIER_REFERENCE_WINDOW_MS = 60 * 60 * 1000; // ~1 hour
+
+function filterOutlierSnapshots(snapshots) {
+    if (!Array.isArray(snapshots) || snapshots.length < 3) return snapshots;
+
+    return snapshots.filter((snap, i) => {
+        const val = Number(snap.totalPortfolioValue || 0);
+        if (val <= 0) return true; // let existing zero/negative handling elsewhere deal with this
+
+        const t = new Date(snap.capturedAt).getTime();
+        const before = [...snapshots.slice(0, i)].reverse().find(s => t - new Date(s.capturedAt).getTime() >= OUTLIER_REFERENCE_WINDOW_MS);
+        const after = snapshots.slice(i + 1).find(s => new Date(s.capturedAt).getTime() - t >= OUTLIER_REFERENCE_WINDOW_MS);
+
+        // No reference on one side (e.g. near the very start/end of the lookback window) —
+        // can't confirm this is transient, so don't filter it.
+        if (!before || !after) return true;
+
+        const beforeVal = Number(before.totalPortfolioValue || 0);
+        const afterVal = Number(after.totalPortfolioValue || 0);
+        if (beforeVal <= 0 || afterVal <= 0) return true;
+
+        const devFromBefore = Math.abs(val - beforeVal) / beforeVal;
+        const devFromAfter = Math.abs(val - afterVal) / afterVal;
+        const referencesAgree = Math.abs(beforeVal - afterVal) / beforeVal < OUTLIER_DEVIATION_THRESHOLD;
+
+        const isTransientBlip = devFromBefore > OUTLIER_DEVIATION_THRESHOLD
+            && devFromAfter > OUTLIER_DEVIATION_THRESHOLD
+            && referencesAgree;
+
+        if (isTransientBlip) {
+            logger.debug('[PortfolioHistory] Filtered transient outlier snapshot', {
+                capturedAt: snap.capturedAt, value: val, beforeVal, afterVal
+            });
+        }
+        return !isTransientBlip;
+    });
 }
 
 function bucketSnapshots(snapshots, bucketMs) {
@@ -136,7 +193,18 @@ async function buildPortfolioHistory(userId, range, summary) {
 
     await savePortfolioSnapshot(userId, summary, { source: `portfolio-history-${normalizedRange}` });
 
-    const snapshots = await getSnapshotsInRange(userId, startDate, endDate);
+    // Outlier detection needs a "before" reference for snapshots right at the start of the
+    // range, or a blip there has nothing earlier to compare against and slips through
+    // unfiltered — it would become the period's "first value" and corrupt the whole return
+    // figure. A fixed time buffer isn't reliable here: this account has genuine multi-hour
+    // gaps in snapshot history (no one had the app open), so fetch the single nearest real
+    // snapshot before the range instead of guessing how far back to look (found 2026-07-11:
+    // a ~41h gap meant a 1h buffer still found nothing, and the blip right after the gap
+    // went unfiltered).
+    const anchorSnapshot = await getNearestSnapshotBefore(userId, startDate);
+    const rawSnapshots = await getSnapshotsInRange(userId, startDate, endDate);
+    const withAnchor = anchorSnapshot ? [anchorSnapshot, ...rawSnapshots] : rawSnapshots;
+    const snapshots = filterOutlierSnapshots(withAnchor).filter(s => new Date(s.capturedAt).getTime() >= startDate.getTime());
     let history = bucketSnapshots(snapshots, RANGE_CONFIG[normalizedRange].bucketMs);
 
     if (history.length === 0) {

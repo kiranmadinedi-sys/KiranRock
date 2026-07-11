@@ -377,15 +377,15 @@ function PortfolioPage() {
         const date = new Date(timestamp);
         if (Number.isNaN(date.getTime())) return String(timestamp);
         if (range === '1D') return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-        // 1M/3M are now bucketed every 30 min (2026-07-09) — date-only would show the
-        // same label for every point on the same day, with no way to tell them apart
+        // 1W/1M/3M are now all bucketed every 30 min (2026-07-11) — date-only would show
+        // the same label for every point on the same day, with no way to tell them apart
         // while scrubbing.
-        if (range === '1M' || range === '3M') {
+        if (range === '1W' || range === '1M' || range === '3M') {
             return `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
         }
-        // 1Y is now bucketed weekly (was monthly) — needs the day, not just month+year,
-        // or every week within the same month would show an identical label.
-        if (range === '1W' || range === '1Y') return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+        // 1Y is bucketed weekly (was monthly) — needs the day, not just month+year, or
+        // every week within the same month would show an identical label.
+        if (range === '1Y') return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
         return date.toLocaleDateString([], { month: 'short', year: '2-digit' });
     };
 

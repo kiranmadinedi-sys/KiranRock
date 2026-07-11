@@ -7,6 +7,7 @@ const helmet = require('helmet');
 const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const authRoutes = require('./routes/authRoutes');
+const adminRoutes = require('./routes/adminRoutes');
 const stockRoutes = require('./routes/stockRoutes');
 const reportRoutes = require('./routes/reportRoutes');
 const indicatorRoutes = require('./routes/indicatorRoutes');
@@ -157,6 +158,7 @@ app.use(bodyParser.json());
 app.use(requestTracing);
 
 app.use('/api/auth', authRoutes);
+app.use('/api/admin', adminRoutes);
 app.use('/api/stocks', stockRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/indicator', indicatorRoutes);

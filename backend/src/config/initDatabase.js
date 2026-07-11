@@ -39,6 +39,10 @@ async function initializeDatabase() {
         await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS alpaca_secret_key TEXT`);
         await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS alpaca_paper BOOLEAN DEFAULT true`);
 
+        // Admin flag — gates /api/admin/* (all-users portfolio overview). Not self-service;
+        // only ever set directly in the DB for the app owner (2026-07-11).
+        await query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT false`);
+
         // 2. Create Trading Accounts table
         await query(`
             CREATE TABLE IF NOT EXISTS trading_accounts (
@@ -967,6 +971,25 @@ async function initializeDatabase() {
             )
         `);
         console.log('✓ Created deposit_events_cache table');
+
+        // Login History — users.last_login only keeps the single most recent timestamp,
+        // which can't answer "how often does this person actually log in" (needed for the
+        // admin users overview, 2026-07-11). One row per successful login, going forward
+        // only — there's no way to retroactively know login frequency before this table
+        // existed.
+        await query(`
+            CREATE TABLE IF NOT EXISTS login_history (
+                id          BIGSERIAL     PRIMARY KEY,
+                user_id     VARCHAR(50)   NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                logged_in_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+                ip_address  VARCHAR(64)
+            )
+        `);
+        await query(`
+            CREATE INDEX IF NOT EXISTS idx_login_history_user_time
+            ON login_history(user_id, logged_in_at DESC)
+        `);
+        console.log('✓ Created login_history table');
 
         console.log('\n✓ Database initialization completed successfully!\n');
         return true;

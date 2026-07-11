@@ -34,15 +34,35 @@ const login = async (req, res) => {
         const isValidPassword = await bcrypt.compare(password, user.password);
         
         if (isValidPassword) {
+            // Deactivated accounts (admin "delete" — soft, see adminRoutes.js) can't log in.
+            // The AI bot already respected is_active for auto-trading; login didn't, which
+            // meant a deactivated user could still log in and trade manually (2026-07-11).
+            if (user.is_active === false) {
+                console.log('Login blocked — account deactivated:', username);
+                return res.status(403).json({ error: 'This account has been deactivated.' });
+            }
+
             // Update last login
             await userDb.updateLastLogin(user.id);
-            
+
+            // Log this login for the admin usage/frequency view — users.last_login only
+            // keeps the single latest timestamp, this table keeps every event (2026-07-11).
+            try {
+                const forwardedFor = req.headers['x-forwarded-for'];
+                const rawIp = Array.isArray(forwardedFor) ? forwardedFor[0] : (forwardedFor || req.ip || req.connection?.remoteAddress || '');
+                const ip = String(rawIp).split(',')[0].trim();
+                const { query } = require('../config/database');
+                await query('INSERT INTO login_history (user_id, ip_address) VALUES ($1, $2)', [user.id, ip || null]);
+            } catch (logErr) {
+                console.error('[Login] Failed to record login history:', logErr.message);
+            }
+
             // Sign a token with user id
             const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
             console.log('Login successful for user:', username);
             
             // Return token and user details
-            res.json({ 
+            res.json({
                 token,
                 user: {
                     id: user.id,
@@ -50,7 +70,8 @@ const login = async (req, res) => {
                     email: user.email || '',
                     firstName: user.full_name?.split(' ')[0] || '',
                     lastName: user.full_name?.split(' ').slice(1).join(' ') || '',
-                    phone: user.phone || ''
+                    phone: user.phone || '',
+                    isAdmin: user.is_admin === true
                 }
             });
         } else {

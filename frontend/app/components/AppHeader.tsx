@@ -104,6 +104,7 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
         { href: '/universe',        label: 'Universe',   icon: '🔭' },
         { href: '/signals',         label: 'Signals',    icon: '⭐' },
         { href: '/live-readiness',  label: 'SENTINEL',   icon: '🛡️' },
+        ...(user?.isAdmin ? [{ href: '/admin', label: 'Admin', icon: '🛠️' }] : []),
     ];
 
     const renderBadge = (count: number) => {

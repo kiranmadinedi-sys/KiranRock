@@ -47,5 +47,7 @@
   "BNTX": "Healthcare",
   "BILL": "Financial Services",
   "APD": "Basic Materials",
-  "AIG": "Financial Services"
+  "AIG": "Financial Services",
+  "ADSK": "Technology",
+  "ADBE": "Technology"
 }

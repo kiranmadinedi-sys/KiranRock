@@ -19,6 +19,7 @@
 require('dotenv').config({ path: require('path').join(__dirname, '../../.env') });
 const { logger } = require('../utils/logger');
 const { query }  = require('../config/database');
+const tradeIntelligenceService = require('./tradeIntelligenceService');
 
 // ─── Alpaca positions fetch ───────────────────────────────────────────────────
 
@@ -265,6 +266,29 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
                      `Alpaca stop/exit detected by position reconciler — price source: ${priceSource}`,
                      entryScore, entrySector, entryRegime, holdHours]
                 );
+
+                // Also close the matching trade_decision_journal row so this exit shows up in
+                // trade_attribution — the view/analytics (win-rate-by-score-bucket, exit-reason
+                // breakdown, score calibration) all read from that journal, not from `trades`.
+                // Reconciler-detected exits (a stop/target firing between position snapshots)
+                // were writing to `trades` only, so every stop-triggered exit was invisible to
+                // that analysis — found investigating this week's zero trade_attribution rows
+                // despite 6 real exits (2026-07-11).
+                try {
+                    const _outcome = pnlPct > 0.5 ? 'win' : pnlPct < -0.5 ? 'loss' : 'breakeven';
+                    await tradeIntelligenceService.closeLatestOpenExecution(userId, {
+                        botType: 'stock', symbol, exitPrice: fillPrice, pnl, pnlPercent: pnlPct,
+                        outcome: _outcome,
+                        metadata: {
+                            reason: 'Reconciler-detected exit (stop/target fill found on Alpaca, DB still showed position open)',
+                            exitReason: 'reconciler_detected',
+                            winLossReason: _outcome === 'win' ? 'reconciler_detected_gain' : _outcome === 'loss' ? 'reconciler_detected_loss' : 'reconciler_detected_flat',
+                            priceSource
+                        }
+                    });
+                } catch (journalErr) {
+                    logger.debug('[Reconcile] Failed to close trade_decision_journal entry for reconciler exit', { userId, symbol, error: journalErr.message });
+                }
             }
 
             // 3. Close any open stop-order entries in order_audit_log so SENTINEL stays clean.

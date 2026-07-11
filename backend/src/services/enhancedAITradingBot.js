@@ -4101,7 +4101,13 @@ async function executeAutonomousTrading(userId) {
                                 slippagePct: opportunity.price > 0
                                     ? Number(((filledPrice - opportunity.price) / opportunity.price * 100).toFixed(4))
                                     : 0,
-                                autoTags: autoTags.length > 0 ? autoTags : undefined
+                                autoTags: autoTags.length > 0 ? autoTags : undefined,
+                                // Aggregate dollar-risk-to-stop across the whole portfolio (including
+                                // this trade), as a % of equity — answers "was the book already
+                                // stretched thin when this position was added" (2026-07-11, per review).
+                                portfolioHeatPctAtEntry: accountTotalValue > 0
+                                    ? Number((runningHeatUsd / accountTotalValue * 100).toFixed(2))
+                                    : null
                             };
                         })()
                     });

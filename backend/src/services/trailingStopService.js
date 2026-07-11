@@ -175,6 +175,40 @@ async function adjustForUser(userId) {
         }
         if (livePositionQty === 0) {
             logger.warn('[TrailingStop] Skipping — DB shows a holding but broker position is already closed', { userId, symbol });
+            // The position closed since our DB snapshot — one of its exit orders (stop-loss
+            // or, for fractional buys, a standalone take-profit with no OCO link) just
+            // filled. Fractional positions place stop and take-profit as two INDEPENDENT
+            // GTC orders (see buyFractional in brokerService.js — Alpaca's bracket order
+            // class doesn't support notional/fractional orders), so there's no native OCO
+            // to auto-cancel the sibling. Left alone, it sits open and can later fire
+            // against zero shares, opening a naked short — exactly how EAT and the EXC/CL
+            // orphans happened. Cancel any sell orders still open for this symbol right
+            // here, on the very next polling cycle, rather than waiting on the separate
+            // reconciler to catch it after the fact (raised via review, 2026-07-11).
+            const leftoverOrders = openOrders.filter(o => o.symbol === symbol && o.side === 'sell');
+            for (const leftover of leftoverOrders) {
+                try {
+                    await _cancelOrder(keyId, secretKey, base, leftover.id);
+                    logger.info('[TrailingStop] Cancelled orphaned sibling order after position closed', {
+                        userId, symbol, orderId: leftover.id, type: leftover.type
+                    });
+                    // Alpaca's cancel is async and can land in 'pending_cancel' without ever
+                    // resolving (observed with EXC/CL) — verify and retry once if it didn't take.
+                    await new Promise(r => setTimeout(r, 1500));
+                    const afterCancel = await _getOpenOrders(keyId, secretKey, base).catch(() => []);
+                    const stillThere = afterCancel.find(o => o.id === leftover.id);
+                    if (stillThere && stillThere.status !== 'canceled') {
+                        logger.warn('[TrailingStop] Sibling cancel did not resolve — retrying once', {
+                            userId, symbol, orderId: leftover.id, status: stillThere.status
+                        });
+                        await _cancelOrder(keyId, secretKey, base, leftover.id).catch(() => {});
+                    }
+                } catch (err) {
+                    logger.warn('[TrailingStop] Failed to cancel orphaned sibling order — reconciler is the fallback', {
+                        userId, symbol, orderId: leftover.id, err: err.message
+                    });
+                }
+            }
             continue;
         }
 

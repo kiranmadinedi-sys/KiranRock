@@ -181,6 +181,8 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
         // may have been trailed up significantly since the original bracket was placed).
         let exitPrice = parseFloat(dbRow.current_price || 0);
         let priceSource = 'current_price';
+        let exitOrderId = null;
+        let axiosBase = null, axiosHeaders = null;
         try {
             const userDb = require('./userDatabaseService');
             const creds  = await userDb.getUserAlpacaCredentials(userId);
@@ -190,6 +192,7 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
                 'APCA-API-KEY-ID':     creds?.keyId || process.env.ALPACA_KEY_ID,
                 'APCA-API-SECRET-KEY': creds?.secretKey || process.env.ALPACA_SECRET_KEY
             };
+            axiosBase = base; axiosHeaders = headers;
             // Look for the most recent sell FILL for this symbol since the DB entry was created
             const since = dbRow.purchase_date || dbRow.created_at;
             const actRes = await axiosLib.get(`${base}/v2/account/activities`, {
@@ -203,6 +206,7 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
             if (fills.length > 0) {
                 exitPrice   = parseFloat(fills[0].price);
                 priceSource = `alpaca_fill@${fills[0].transaction_time?.slice(0,10)}`;
+                exitOrderId = fills[0].order_id || null;
             }
         } catch (_) {
             // If Alpaca activities call fails, fall through to stored stop price
@@ -216,6 +220,44 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
                 const sp = parseFloat(stopRow.rows[0]?.metadata?.stopPrice || 0);
                 if (sp > 0) { exitPrice = sp; priceSource = 'stop_order_estimate'; }
             } catch (_2) {}
+        }
+
+        // Classify what actually closed the position (stop / trailing stop / target /
+        // partial) instead of lumping every reconciler-caught exit into one generic
+        // bucket — the reconciler already has the fill's order_id, one more lookup gets
+        // the order's real type. Falls back to the generic label if anything's missing
+        // so this can never break the exit-logging path (found via ChatGPT review + our
+        // own follow-up, 2026-07-11: "reconciler_detected" was 75% of all closed trades
+        // and told analytics nothing about WHY the position closed).
+        //
+        // order.type alone isn't trustworthy for 'limit': this codebase places stop-loss
+        // and take-profit as two SEPARATE standalone GTC orders per position (buyMarket,
+        // ~line 504-519), not a linked Alpaca bracket/OCO pair — so a 'limit' order can
+        // fill at a LOSS too (e.g. a repriced/defensive exit), and a real take-profit
+        // should only be labeled as such if the fill actually beat entry price. This also
+        // explains the recurring orphaned-stop-order bug from earlier this week (EXC/CL):
+        // with no OCO link, the sibling order doesn't auto-cancel when one leg fills.
+        let exitReasonTag = 'reconciler_detected';
+        if (exitOrderId && axiosBase) {
+            try {
+                const axiosLib = require('axios');
+                const orderRes = await axiosLib.get(`${axiosBase}/v2/orders/${exitOrderId}`, { headers: axiosHeaders, timeout: 8000 });
+                const order = orderRes.data || {};
+                const filledQty = parseFloat(order.filled_qty || order.qty || 0);
+                const isPartial = filledQty > 0 && dbQty > 0 && filledQty < dbQty * 0.99;
+                const beatEntry = entryPrice > 0 && exitPrice > entryPrice;
+                if (order.type === 'trailing_stop') {
+                    exitReasonTag = 'trailing_stop_reconciled';
+                } else if (order.type === 'stop' || order.type === 'stop_limit') {
+                    exitReasonTag = 'stop_loss_reconciled';
+                } else if (order.type === 'limit') {
+                    exitReasonTag = beatEntry ? (isPartial ? 'partial_profit_reconciled' : 'take_profit_reconciled') : 'protective_limit_reconciled';
+                } else if (order.type === 'market') {
+                    exitReasonTag = 'market_exit_reconciled';
+                }
+            } catch (orderErr) {
+                logger.debug('[Reconcile] Could not classify exit order type — using generic tag', { userId, symbol, exitOrderId, error: orderErr.message });
+            }
         }
 
         try {
@@ -263,7 +305,7 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
                      VALUES ($1, $2, 'SELL', $3, $4, $5, NOW(),
                              'reconciler', $8, $6, $7, 'CLOSED', $9, $10, $11, $12)`,
                     [userId, symbol, dbQty, fillPrice, total, pnl, pnlPct,
-                     `Alpaca stop/exit detected by position reconciler — price source: ${priceSource}`,
+                     `Alpaca stop/exit detected by position reconciler — price source: ${priceSource}, exit type: ${exitReasonTag}`,
                      entryScore, entrySector, entryRegime, holdHours]
                 );
 
@@ -273,16 +315,19 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
                 // Reconciler-detected exits (a stop/target firing between position snapshots)
                 // were writing to `trades` only, so every stop-triggered exit was invisible to
                 // that analysis — found investigating this week's zero trade_attribution rows
-                // despite 6 real exits (2026-07-11).
+                // despite 6 real exits (2026-07-11). exitReasonTag (above) distinguishes the
+                // real mechanism (stop/trailing-stop/target/partial) instead of one generic
+                // "reconciler_detected" bucket that told analytics nothing about why the
+                // position closed (raised in the same follow-up review).
                 try {
                     const _outcome = pnlPct > 0.5 ? 'win' : pnlPct < -0.5 ? 'loss' : 'breakeven';
                     await tradeIntelligenceService.closeLatestOpenExecution(userId, {
                         botType: 'stock', symbol, exitPrice: fillPrice, pnl, pnlPercent: pnlPct,
                         outcome: _outcome,
                         metadata: {
-                            reason: 'Reconciler-detected exit (stop/target fill found on Alpaca, DB still showed position open)',
-                            exitReason: 'reconciler_detected',
-                            winLossReason: _outcome === 'win' ? 'reconciler_detected_gain' : _outcome === 'loss' ? 'reconciler_detected_loss' : 'reconciler_detected_flat',
+                            reason: `Reconciler-detected exit (${exitReasonTag}) — fill found on Alpaca, DB still showed position open`,
+                            exitReason: exitReasonTag,
+                            winLossReason: _outcome === 'win' ? `${exitReasonTag}_gain` : _outcome === 'loss' ? `${exitReasonTag}_loss` : `${exitReasonTag}_flat`,
                             priceSource
                         }
                     });

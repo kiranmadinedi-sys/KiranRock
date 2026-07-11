@@ -1,5 +1,6 @@
 const { query } = require('../config/database');
 const { logger } = require('../utils/logger');
+const { STRATEGY_VERSION } = require('../config/strategyVersion');
 
 const LOOKBACK_DAYS = 180;
 const MIN_SAMPLE_SIZE = 5;
@@ -256,7 +257,11 @@ async function recordExecution(userId, execution) {
                 normalizeNumber(execution.entryPrice),
                 execution.tradeRefType || null,
                 execution.tradeRefId ? String(execution.tradeRefId) : null,
-                JSON.stringify(execution.metadata || {})
+                // strategyVersion stamped here (not at each call site) so every execution
+                // path — stock bot, options bot, any future one — is covered automatically.
+                // Lets future analysis compare win rate across versions instead of
+                // conflating "the strategy changed" with "the market changed" (2026-07-11).
+                JSON.stringify({ ...(execution.metadata || {}), strategyVersion: STRATEGY_VERSION })
             ]
         );
     } catch (error) {

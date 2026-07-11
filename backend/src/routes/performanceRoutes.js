@@ -578,7 +578,8 @@ async function ensureTradeAttributionView(query) {
             (j.metadata->>'atrPct')::numeric    AS atr_pct,
             (j.metadata->>'daysToEarnings')::numeric      AS dte_at_entry,
             (j.metadata->>'daysToEarningsAtExit')::numeric AS dte_at_exit,
-            j.metadata->>'bullBearRatio'        AS bull_bear_ratio
+            j.metadata->>'bullBearRatio'        AS bull_bear_ratio,
+            j.metadata->>'strategyVersion'      AS strategy_version
         FROM trade_decision_journal j
         WHERE j.decision_phase = 'CLOSED'
           AND j.pnl IS NOT NULL
@@ -642,6 +643,7 @@ router.get('/trade-attribution', protect, async (req, res) => {
                 j.metadata->>'daysToEarningsAtExit' AS dte_at_exit,
                 j.metadata->>'bullBearRatio'        AS bull_bear_ratio,
                 j.metadata->'autoTags'              AS auto_tags,
+                j.metadata->>'strategyVersion'       AS strategy_version,
                 -- Post-exit drift: closest daily_bars close >= 5 calendar days after exit
                 (SELECT ROUND(((b5.close - j.exit_price) / NULLIF(j.exit_price,0) * 100)::numeric, 2)
                  FROM daily_bars b5
@@ -656,7 +658,23 @@ router.get('/trade-attribution', protect, async (req, res) => {
                    AND b10.timestamp >= j.closed_at + INTERVAL '10 days'
                    AND b10.timestamp <= j.closed_at + INTERVAL '16 days'
                  ORDER BY b10.timestamp ASC LIMIT 1
-                ) AS post_exit_drift_10d
+                ) AS post_exit_drift_10d,
+                -- MFE/MAE: best/worst the position ever showed WHILE HELD, from daily bar
+                -- highs/lows between entry and exit — answers "did we leave gains on the
+                -- table" or "did the stop save us from something worse" (daily resolution,
+                -- not tick-precise, but enough to see the shape of the trade — added 2026-07-11).
+                (SELECT ROUND(((MAX(bh.high) - j.entry_price) / NULLIF(j.entry_price,0) * 100)::numeric, 2)
+                 FROM daily_bars bh
+                 WHERE bh.symbol = j.symbol
+                   AND bh.timestamp >= j.opened_at
+                   AND bh.timestamp <= j.closed_at
+                ) AS mfe_pct,
+                (SELECT ROUND(((MIN(bl.low) - j.entry_price) / NULLIF(j.entry_price,0) * 100)::numeric, 2)
+                 FROM daily_bars bl
+                 WHERE bl.symbol = j.symbol
+                   AND bl.timestamp >= j.opened_at
+                   AND bl.timestamp <= j.closed_at
+                ) AS mae_pct
             FROM trade_decision_journal j
             WHERE j.user_id = $1
               AND j.decision_phase = 'CLOSED'
@@ -751,7 +769,7 @@ router.get('/trade-attribution', protect, async (req, res) => {
             ORDER BY total DESC
         `, aggParams);
 
-        const [byScore, byConfidence, bySector, byRegime, byExit, byHold, byOutcome] = await Promise.all([
+        const [byScore, byConfidence, bySector, byRegime, byExit, byHold, byOutcome, byVersion] = await Promise.all([
             buildAgg(`CASE
                 WHEN score >= 95 THEN '95-100'
                 WHEN score >= 90 THEN '90-94'
@@ -778,6 +796,7 @@ router.get('/trade-attribution', protect, async (req, res) => {
                 ELSE '15+d'
             END`),
             buildAgg(`COALESCE(outcome, 'unknown')`),
+            buildAgg(`COALESCE(metadata->>'strategyVersion', 'pre-versioning')`),
         ]);
 
         const mapAgg = (rows, includeDrift = false) => rows.map(r => {
@@ -818,6 +837,21 @@ router.get('/trade-attribution', protect, async (req, res) => {
             ? parseFloat((driftRows10.reduce((s, r) => s + parseFloat(r.post_exit_drift_10d), 0) / driftRows10.length).toFixed(2))
             : null;
 
+        // Capture efficiency: of the best move a WINNING trade ever showed (MFE), how much
+        // did we actually keep at exit? Only meaningful for winners — on a losing trade a
+        // tiny favorable excursion (e.g. MFE +1.2%) divided into a real loss (-5.1%) produces
+        // a meaningless triple-digit-negative ratio, which drowns out the actual signal.
+        // Losers are better read via MAE-vs-exit (below): did the stop fire near the trade's
+        // worst point, or well before/after it (added 2026-07-11, per review).
+        const mfeRows = tradesRes.rows.filter(r => r.mfe_pct != null && parseFloat(r.mfe_pct) > 0 && r.pnl_percent != null && parseFloat(r.pnl_percent) > 0);
+        const avgCaptureEfficiencyPct = mfeRows.length
+            ? parseFloat((mfeRows.reduce((s, r) => s + (parseFloat(r.pnl_percent) / parseFloat(r.mfe_pct) * 100), 0) / mfeRows.length).toFixed(1))
+            : null;
+        const maeRows = tradesRes.rows.filter(r => r.mae_pct != null);
+        const avgMaePct = maeRows.length
+            ? parseFloat((maeRows.reduce((s, r) => s + parseFloat(r.mae_pct), 0) / maeRows.length).toFixed(2))
+            : null;
+
         res.json({
             days,
             filters: { symbol, sector, outcome },
@@ -826,6 +860,8 @@ router.get('/trade-attribution', protect, async (req, res) => {
                 avgDrift5d,
                 avgDrift10d,
                 tradesWithDriftData: driftRows.length,
+                avgCaptureEfficiencyPct,
+                avgMaePct,
             },
             trades: tradesRes.rows.map(r => ({
                 id:              r.id,
@@ -853,6 +889,9 @@ router.get('/trade-attribution', protect, async (req, res) => {
                 autoTags:        r.auto_tags || [],
                 postExitDrift5d:  r.post_exit_drift_5d  != null ? parseFloat(r.post_exit_drift_5d)  : null,
                 postExitDrift10d: r.post_exit_drift_10d != null ? parseFloat(r.post_exit_drift_10d) : null,
+                mfePct:          r.mfe_pct != null ? parseFloat(r.mfe_pct) : null,
+                maePct:          r.mae_pct != null ? parseFloat(r.mae_pct) : null,
+                strategyVersion: r.strategy_version,
             })),
             byScore:       mapAgg(byScore.rows),
             byConfidence:  mapAgg(byConfidence.rows),
@@ -861,6 +900,7 @@ router.get('/trade-attribution', protect, async (req, res) => {
             byExit:        mapAgg(byExit.rows, true),  // includes avgDrift5d/10d
             byHold:        mapAgg(byHold.rows),
             byOutcome:     mapAgg(byOutcome.rows),
+            byVersion:     mapAgg(byVersion.rows),
         });
     } catch (err) {
         logger.error('Trade attribution endpoint error', { error: err.message });

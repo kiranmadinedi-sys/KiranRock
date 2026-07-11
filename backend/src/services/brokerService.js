@@ -448,8 +448,16 @@ const alpacaBroker = (() => {
     async function buyFractional(userId, symbol, notionalAmount, meta = {}) {
         // Notional (dollar-amount) market buy for positions where Kelly sizing rounds to 0 whole shares.
         // After fill: places standalone stop-loss GTC + take-profit limit GTC.
-        // The trailing stop service raises the stop-loss exactly as it does for whole-share positions
-        // (standalone stop orders, not bracket legs — no extra handling needed there).
+        //
+        // These are NOT bracket/OCO legs — Alpaca's order_class:'bracket' requires a qty
+        // parameter and does not support notional orders, so there is no native mechanism
+        // linking these two orders. When one fills, Alpaca does NOT automatically cancel
+        // the other. trailingStopService.js's adjustForUser() actively cancels the orphaned
+        // sibling as soon as it detects the position has closed (checked every 5 min), with
+        // the position reconciler as a last-resort backstop if that active cancellation
+        // itself fails. Previously this comment claimed "no extra handling needed" — that
+        // was wrong and caused real naked shorts (EAT, then EXC/CL) before the fix above
+        // existed (corrected 2026-07-11).
         const idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:${userId}:frac`;
 
         if (await isOrderAlreadySubmitted(idemKey)) {

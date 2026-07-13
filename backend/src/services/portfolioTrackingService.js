@@ -234,6 +234,12 @@ const getPortfolioSummary = async (userId) => {
         // explain it). Instead, baseline against the MEDIAN of the last several snapshots in
         // a rolling window — a single bad save (or even a few) can't outvote enough good ones,
         // so the comparison point stays trustworthy even right after a bad save slipped through.
+        // If every retry still disagrees wildly with recent history, the point is left
+        // unconfirmed — skipSnapshotSave keeps it out of portfolio_snapshots entirely rather
+        // than writing a "best guess" that the chart's outlier filter would only clean up an
+        // hour later. The live figure returned to the caller this request is untouched either
+        // way — this only affects whether the number gets written to history.
+        let skipSnapshotSave = false;
         try {
             // Window tuned against the actual 2026-07-13 incident: a 1hr/5-sample window
             // degraded to majority-bad by the 2nd-3rd consecutive bad save (good history
@@ -270,6 +276,11 @@ const getPortfolioSummary = async (userId) => {
                         } else {
                             console.warn(`[PortfolioTracking] Retry ${attempt} did not improve for user ${userId} — ${attempt < MAX_ATTEMPTS ? 'trying again' : 'keeping last value (may be a real move)'}`);
                         }
+                    }
+
+                    if (deviation > 0.25) {
+                        skipSnapshotSave = true;
+                        console.warn(`[PortfolioTracking] Unresolved swing for user ${userId} after ${MAX_ATTEMPTS} attempts (${(deviation * 100).toFixed(1)}% dev vs median ${baselineValue.toFixed(2)}) — skipping snapshot save, not writing an unconfirmed value to history`);
                     }
                 }
             }
@@ -311,10 +322,12 @@ const getPortfolioSummary = async (userId) => {
             }
         };
 
-        try {
-            await savePortfolioSnapshot(userId, portfolioSummary.summary, { source: 'portfolio-summary' });
-        } catch (snapshotError) {
-            console.error('Error saving portfolio snapshot:', snapshotError.message);
+        if (!skipSnapshotSave) {
+            try {
+                await savePortfolioSnapshot(userId, portfolioSummary.summary, { source: 'portfolio-summary' });
+            } catch (snapshotError) {
+                console.error('Error saving portfolio snapshot:', snapshotError.message);
+            }
         }
 
         return portfolioSummary;

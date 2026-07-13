@@ -110,15 +110,14 @@ const StockSearch: React.FC<StockSearchProps> = ({ onSelectStock }) => {
     };
 
     return (
-    <div className="relative w-full isolate" style={{ zIndex: 99999 }}>
+    <div className="relative w-full">
       <input
         ref={inputRef}
         type="text"
         value={searchTerm}
         onChange={(e) => setSearchTerm(e.target.value)}
         placeholder="Search stocks..."
-        className="w-full p-2 border border-[var(--color-border)] rounded-md bg-[var(--color-bg-secondary)] text-[var(--color-text-primary)] placeholder-[var(--color-text-secondary)] focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent relative"
-        style={{ zIndex: 1 }}
+        className="w-full p-2 border border-[var(--color-border)] rounded-md bg-[var(--color-bg-secondary)] text-[var(--color-text-primary)] placeholder-[var(--color-text-secondary)] focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
       />
             {isLoading && (
                 <div className="absolute w-full mt-1 text-center text-[var(--color-text-secondary)] bg-[var(--color-card)] border border-[var(--color-border)] rounded-md p-2 shadow-2xl" style={{ zIndex: 999999 }}>Loading...</div>

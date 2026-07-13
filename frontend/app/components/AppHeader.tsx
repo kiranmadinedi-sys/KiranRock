@@ -86,6 +86,7 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
     const navItems = [
         { href: '/portfolio',       label: 'Portfolio',  icon: '💼' },
         { href: '/dashboard',       label: 'Dashboard',  icon: '📊' },
+        { href: '/most-active',     label: 'Most Active',icon: '🔥' },
         { href: '/performance',     label: 'Performance',icon: '📈' },
         { href: '/analytics',       label: 'Analytics',  icon: '🔍' },
         { href: '/recommendations', label: 'Picks',      icon: '🎯' },

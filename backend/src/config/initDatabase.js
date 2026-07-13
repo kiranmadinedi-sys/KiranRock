@@ -991,6 +991,18 @@ async function initializeDatabase() {
         `);
         console.log('✓ Created login_history table');
 
+        // Company Name Cache — permanent cache (names essentially never change) so the
+        // Most Active page doesn't need a fresh Polygon reference-lookup per ticker on
+        // every load; only uncached symbols get fetched (2026-07-12).
+        await query(`
+            CREATE TABLE IF NOT EXISTS ticker_company_names (
+                symbol      VARCHAR(20)  PRIMARY KEY,
+                name        TEXT         NOT NULL,
+                cached_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+            )
+        `);
+        console.log('✓ Created ticker_company_names table');
+
         console.log('\n✓ Database initialization completed successfully!\n');
         return true;
 

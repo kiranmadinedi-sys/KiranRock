@@ -243,23 +243,27 @@ const getCurrentPrice = async (symbol) => {
 
 const searchSymbols = async (query) => {
     try {
-        // Try Yahoo Finance autocomplete API for real symbol search
-        const results = await yfClient.search(query);
-        if (results && results.quotes && results.quotes.length > 0) {
-            // Return objects with symbol and name (exclude currency pairs, etc.)
-            return results.quotes
-                .filter(q => q.symbol && q.exchange && /^[A-Z.]+$/.test(q.symbol) && !q.symbol.includes('='))
-                .slice(0, 10) // Limit to top 10 results
-                .map(q => ({
-                    symbol: q.symbol,
-                    name: q.shortname || q.longname || q.symbol,
-                    type: q.quoteType || 'EQUITY',
-                    exchange: q.exchange
-                }));
+        // dataProvider.searchSymbols already tries Polygon's reference/tickers endpoint
+        // first (matches ticker OR company name, and covers far more than the ~50-name
+        // hardcoded list below) with an automatic Yahoo fallback baked in — this is more
+        // reliable than calling Yahoo directly here, since Yahoo alone has repeatedly hit
+        // 429 rate limits this app has seen elsewhere (2026-07-12).
+        const results = await dataProvider.searchSymbols(query);
+        if (results && results.length > 0) {
+            // Polygon's search ranks by relevance across ticker+name+description, which
+            // can bury the exact ticker itself under unrelated products whose NAME merely
+            // contains the query (e.g. searching "NVDA" returned leveraged/inverse ETFs
+            // with "NVDA" in their name before the real NVDA stock). Someone who typed the
+            // exact symbol almost always wants that symbol first (found 2026-07-12).
+            const q = query.trim().toUpperCase();
+            const exactMatch = results.find(r => r.symbol?.toUpperCase() === q);
+            const rest = results.filter(r => r.symbol?.toUpperCase() !== q);
+            const ordered = exactMatch ? [exactMatch, ...rest] : results;
+            return ordered.slice(0, 10);
         }
-        // No results from Yahoo — fall through to local fallback
+        // No results — fall through to local fallback
     } catch (error) {
-        console.warn(`Yahoo search failed for "${query}" (${error.message}), using local fallback`);
+        console.warn(`Symbol search failed for "${query}" (${error.message}), using local fallback`);
         // Fall through to local fallback below
     }
 

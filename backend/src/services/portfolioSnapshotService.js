@@ -150,10 +150,29 @@ async function getNearestSnapshotBefore(userId, date) {
     return result.rows[0] || null;
 }
 
+/** Last `limit` snapshots within `withinMs` — used to build a baseline that a single bad
+ *  save can't poison, unlike comparing against just the one most-recent snapshot
+ *  (2026-07-13: a bad read got saved, then sat as the trusted baseline for the next
+ *  90 minutes, making every subsequent good reading look like the anomaly). */
+async function getRecentSnapshots(userId, { limit = 5, withinMs = 2 * 60 * 60 * 1000 } = {}) {
+    await ensureSchema();
+    const result = await query(`
+        SELECT total_portfolio_value AS "totalPortfolioValue",
+               captured_at AS "capturedAt"
+        FROM portfolio_snapshots
+        WHERE user_id = $1
+          AND captured_at >= NOW() - ($2 || ' milliseconds')::interval
+        ORDER BY captured_at DESC
+        LIMIT $3
+    `, [userId, withinMs, limit]);
+    return result.rows;
+}
+
 module.exports = {
     ensureSchema,
     getNearestSnapshotBefore,
     getLatestSnapshot,
+    getRecentSnapshots,
     savePortfolioSnapshot,
     getSnapshotsInRange
 };

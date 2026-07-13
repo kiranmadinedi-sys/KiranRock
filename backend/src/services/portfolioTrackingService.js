@@ -2,7 +2,7 @@ const tradingService = require('./tradingService');
 const marketQuoteService = require('./marketQuoteService');
 const tradingAccountService = require('./tradingAccountService');
 const tradesDb = require('./tradesDatabaseService');
-const { savePortfolioSnapshot, getLatestSnapshot } = require('./portfolioSnapshotService');
+const { savePortfolioSnapshot, getRecentSnapshots } = require('./portfolioSnapshotService');
 const { buildPortfolioHistory } = require('./portfolioHistoryService');
 const brokerService = require('./brokerService');
 const { getLedgerSummary } = require('./ledgerService');
@@ -224,26 +224,36 @@ const getPortfolioSummary = async (userId) => {
 
         // Sanity guard: a transient Alpaca read (cash/equity briefly out of sync — e.g. a
         // pending order momentarily holding cash, or Alpaca's own account-side reconciliation
-        // hiccups, seen 2026-07-13 with zero orders anywhere near the bad read) has repeatedly
-        // produced snapshots wildly below the account's real value (25+ instances found across
-        // this account's history, 2026-07-11), which then sat permanently in portfolio_snapshots
-        // until filtered out downstream at chart-render time. Catch it here instead, before
-        // it's ever saved: compare against the last known-good snapshot, and if the deviation
-        // is implausible for real trading in this account, force fresh (uncached) Alpaca
-        // re-fetches — up to 3 attempts, spaced out, since a single immediate retry can still
-        // land inside the same few-second-wide bad-read window (confirmed 2026-07-13: one retry
-        // wasn't enough to clear a blip). Best-effort only — never blocks a real portfolio fetch
-        // if the check itself fails, and only overrides when a retry actually looks better.
+        // hiccups) has repeatedly produced snapshots wildly below the account's real value
+        // (25+ instances found across this account's history, 2026-07-11). Comparing only
+        // against the single most-recent snapshot has a poisoning problem, confirmed
+        // 2026-07-13: once one bad reading gets saved, it becomes the baseline for the next
+        // comparison too — so a real recovery back to the correct value can look like *it's*
+        // the anomaly, and the bad value can persist for many cycles (that day, cash reading
+        // sat wrong for 90 minutes across 4 separate snapshots, market hours, zero orders to
+        // explain it). Instead, baseline against the MEDIAN of the last several snapshots in
+        // a rolling window — a single bad save (or even a few) can't outvote enough good ones,
+        // so the comparison point stays trustworthy even right after a bad save slipped through.
         try {
-            const lastSnapshot = await getLatestSnapshot(userId);
-            const lastValue = lastSnapshot ? parseFloat(lastSnapshot.totalPortfolioValue || 0) : null;
-            const lastAgeMs = lastSnapshot ? Date.now() - new Date(lastSnapshot.capturedAt).getTime() : Infinity;
-            // Only compare against a recent baseline — across a real multi-hour/day gap a
-            // large swing may be entirely legitimate, not a glitch.
-            if (lastValue > 0 && lastAgeMs < 60 * 60 * 1000) {
-                let deviation = Math.abs(totalPortfolioValue - lastValue) / lastValue;
+            // Window tuned against the actual 2026-07-13 incident: a 1hr/5-sample window
+            // degraded to majority-bad by the 2nd-3rd consecutive bad save (good history
+            // aged out too quickly); 3hr/10-samples kept the median correctly anchored on
+            // the true value through all 4 consecutive bad reads that day.
+            const recentSnapshots = await getRecentSnapshots(userId, { limit: 10, withinMs: 3 * 60 * 60 * 1000 });
+            const recentValues = recentSnapshots
+                .map(s => parseFloat(s.totalPortfolioValue || 0))
+                .filter(v => v > 0)
+                .sort((a, b) => a - b);
+
+            if (recentValues.length > 0) {
+                const mid = Math.floor(recentValues.length / 2);
+                const baselineValue = recentValues.length % 2 === 0
+                    ? (recentValues[mid - 1] + recentValues[mid]) / 2
+                    : recentValues[mid];
+
+                let deviation = Math.abs(totalPortfolioValue - baselineValue) / baselineValue;
                 if (deviation > 0.25) {
-                    console.warn(`[PortfolioTracking] Suspicious value swing for user ${userId}: ${totalPortfolioValue.toFixed(2)} vs last known ${lastValue.toFixed(2)} (${(deviation * 100).toFixed(1)}% dev) — retrying with fresh Alpaca fetches`);
+                    console.warn(`[PortfolioTracking] Suspicious value swing for user ${userId}: ${totalPortfolioValue.toFixed(2)} vs recent median ${baselineValue.toFixed(2)} (n=${recentValues.length}, ${(deviation * 100).toFixed(1)}% dev) — retrying with fresh Alpaca fetches`);
                     const MAX_ATTEMPTS = 3;
                     const RETRY_DELAY_MS = 2000;
                     for (let attempt = 1; attempt <= MAX_ATTEMPTS && deviation > 0.25; attempt++) {
@@ -251,7 +261,7 @@ const getPortfolioSummary = async (userId) => {
                         const fresh = await _getAlpacaData(userId, true);
                         const retriedCashBalance = fresh.cash ?? account.balance;
                         const retriedTotalPortfolioValue = fresh.equity ?? (retriedCashBalance + totalCurrentValue);
-                        const retriedDeviation = Math.abs(retriedTotalPortfolioValue - lastValue) / lastValue;
+                        const retriedDeviation = Math.abs(retriedTotalPortfolioValue - baselineValue) / baselineValue;
                         if (retriedDeviation < deviation) {
                             cashBalance = retriedCashBalance;
                             totalPortfolioValue = retriedTotalPortfolioValue;

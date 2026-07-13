@@ -223,14 +223,17 @@ const getPortfolioSummary = async (userId) => {
         let totalPortfolioValue = alpacaEquity ?? (cashBalance + totalCurrentValue);
 
         // Sanity guard: a transient Alpaca read (cash/equity briefly out of sync — e.g. a
-        // pending order momentarily holding cash) has repeatedly produced snapshots wildly
-        // below the account's real value (25+ instances found across this account's history,
-        // 2026-07-11), which then sat permanently in portfolio_snapshots until filtered out
-        // downstream at chart-render time. Catch it here instead, before it's ever saved:
-        // compare against the last known-good snapshot, and if the deviation is implausible
-        // for real trading in this account, force one fresh (uncached) Alpaca re-fetch before
-        // trusting the number. Best-effort only — never blocks a real portfolio fetch if the
-        // check itself fails, and only overrides when the retry actually looks better.
+        // pending order momentarily holding cash, or Alpaca's own account-side reconciliation
+        // hiccups, seen 2026-07-13 with zero orders anywhere near the bad read) has repeatedly
+        // produced snapshots wildly below the account's real value (25+ instances found across
+        // this account's history, 2026-07-11), which then sat permanently in portfolio_snapshots
+        // until filtered out downstream at chart-render time. Catch it here instead, before
+        // it's ever saved: compare against the last known-good snapshot, and if the deviation
+        // is implausible for real trading in this account, force fresh (uncached) Alpaca
+        // re-fetches — up to 3 attempts, spaced out, since a single immediate retry can still
+        // land inside the same few-second-wide bad-read window (confirmed 2026-07-13: one retry
+        // wasn't enough to clear a blip). Best-effort only — never blocks a real portfolio fetch
+        // if the check itself fails, and only overrides when a retry actually looks better.
         try {
             const lastSnapshot = await getLatestSnapshot(userId);
             const lastValue = lastSnapshot ? parseFloat(lastSnapshot.totalPortfolioValue || 0) : null;
@@ -238,19 +241,25 @@ const getPortfolioSummary = async (userId) => {
             // Only compare against a recent baseline — across a real multi-hour/day gap a
             // large swing may be entirely legitimate, not a glitch.
             if (lastValue > 0 && lastAgeMs < 60 * 60 * 1000) {
-                const deviation = Math.abs(totalPortfolioValue - lastValue) / lastValue;
+                let deviation = Math.abs(totalPortfolioValue - lastValue) / lastValue;
                 if (deviation > 0.25) {
-                    console.warn(`[PortfolioTracking] Suspicious value swing for user ${userId}: ${totalPortfolioValue.toFixed(2)} vs last known ${lastValue.toFixed(2)} (${(deviation * 100).toFixed(1)}% dev) — retrying with a fresh Alpaca fetch`);
-                    const fresh = await _getAlpacaData(userId, true);
-                    const retriedCashBalance = fresh.cash ?? account.balance;
-                    const retriedTotalPortfolioValue = fresh.equity ?? (retriedCashBalance + totalCurrentValue);
-                    const retriedDeviation = Math.abs(retriedTotalPortfolioValue - lastValue) / lastValue;
-                    if (retriedDeviation < deviation) {
-                        cashBalance = retriedCashBalance;
-                        totalPortfolioValue = retriedTotalPortfolioValue;
-                        console.warn(`[PortfolioTracking] Retry corrected value to ${totalPortfolioValue.toFixed(2)} for user ${userId}`);
-                    } else {
-                        console.warn(`[PortfolioTracking] Retry did not improve — keeping original value (may be a real move) for user ${userId}`);
+                    console.warn(`[PortfolioTracking] Suspicious value swing for user ${userId}: ${totalPortfolioValue.toFixed(2)} vs last known ${lastValue.toFixed(2)} (${(deviation * 100).toFixed(1)}% dev) — retrying with fresh Alpaca fetches`);
+                    const MAX_ATTEMPTS = 3;
+                    const RETRY_DELAY_MS = 2000;
+                    for (let attempt = 1; attempt <= MAX_ATTEMPTS && deviation > 0.25; attempt++) {
+                        if (attempt > 1) await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+                        const fresh = await _getAlpacaData(userId, true);
+                        const retriedCashBalance = fresh.cash ?? account.balance;
+                        const retriedTotalPortfolioValue = fresh.equity ?? (retriedCashBalance + totalCurrentValue);
+                        const retriedDeviation = Math.abs(retriedTotalPortfolioValue - lastValue) / lastValue;
+                        if (retriedDeviation < deviation) {
+                            cashBalance = retriedCashBalance;
+                            totalPortfolioValue = retriedTotalPortfolioValue;
+                            deviation = retriedDeviation;
+                            console.warn(`[PortfolioTracking] Retry ${attempt} corrected value to ${totalPortfolioValue.toFixed(2)} for user ${userId} (${(deviation * 100).toFixed(1)}% dev remaining)`);
+                        } else {
+                            console.warn(`[PortfolioTracking] Retry ${attempt} did not improve for user ${userId} — ${attempt < MAX_ATTEMPTS ? 'trying again' : 'keeping last value (may be a real move)'}`);
+                        }
                     }
                 }
             }

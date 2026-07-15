@@ -5,11 +5,17 @@ const tradesDb = require('./tradesDatabaseService');
 const { savePortfolioSnapshot, getRecentSnapshots } = require('./portfolioSnapshotService');
 const { buildPortfolioHistory } = require('./portfolioHistoryService');
 const brokerService = require('./brokerService');
+const userDb = require('./userDatabaseService');
 const { getLedgerSummary } = require('./ledgerService');
 
 // Per-user Alpaca data cache — avoids hammering Alpaca on every 30-second frontend poll.
 // TTL: 20s during market hours (fresh enough for live display), 5 min outside.
 const _alpacaCache = new Map(); // userId -> { positions, equity, cash, fetchedAt }
+
+// Snapshot-guard alert dedup — an unresolved swing can recur across many consecutive
+// polls during a sustained episode (e.g. 2026-07-13 had 4 occurrences ~30 min apart);
+// one Telegram message per user per hour is enough to know it's happening.
+const _lastSnapshotGuardAlert = new Map(); // userId -> timestamp
 
 // Deposit history cache — Alpaca ledger activities rarely change (new deposit = rare event).
 // TTL: 24h. Automatically refreshed on the next portfolio fetch after expiry.
@@ -259,28 +265,62 @@ const getPortfolioSummary = async (userId) => {
 
                 let deviation = Math.abs(totalPortfolioValue - baselineValue) / baselineValue;
                 if (deviation > 0.25) {
-                    console.warn(`[PortfolioTracking] Suspicious value swing for user ${userId}: ${totalPortfolioValue.toFixed(2)} vs recent median ${baselineValue.toFixed(2)} (n=${recentValues.length}, ${(deviation * 100).toFixed(1)}% dev) — retrying with fresh Alpaca fetches`);
-                    const MAX_ATTEMPTS = 3;
-                    const RETRY_DELAY_MS = 2000;
-                    for (let attempt = 1; attempt <= MAX_ATTEMPTS && deviation > 0.25; attempt++) {
-                        if (attempt > 1) await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
-                        const fresh = await _getAlpacaData(userId, true);
-                        const retriedCashBalance = fresh.cash ?? account.balance;
-                        const retriedTotalPortfolioValue = fresh.equity ?? (retriedCashBalance + totalCurrentValue);
-                        const retriedDeviation = Math.abs(retriedTotalPortfolioValue - baselineValue) / baselineValue;
-                        if (retriedDeviation < deviation) {
-                            cashBalance = retriedCashBalance;
-                            totalPortfolioValue = retriedTotalPortfolioValue;
-                            deviation = retriedDeviation;
-                            console.warn(`[PortfolioTracking] Retry ${attempt} corrected value to ${totalPortfolioValue.toFixed(2)} for user ${userId} (${(deviation * 100).toFixed(1)}% dev remaining)`);
-                        } else {
-                            console.warn(`[PortfolioTracking] Retry ${attempt} did not improve for user ${userId} — ${attempt < MAX_ATTEMPTS ? 'trying again' : 'keeping last value (may be a real move)'}`);
-                        }
+                    console.warn(`[PortfolioTracking] Suspicious value swing for user ${userId}: ${totalPortfolioValue.toFixed(2)} vs recent median ${baselineValue.toFixed(2)} (n=${recentValues.length}, ${(deviation * 100).toFixed(1)}% dev)`);
+
+                    // Cross-check against Alpaca's own activity ledger — a genuine swing this
+                    // large always has a matching fill/deposit/withdrawal behind it; a live
+                    // "current cash" read with zero corroborating activity is strong independent
+                    // evidence the READ itself is bad, not the account. Confirmed 2026-07-13
+                    // twice: both incidents had zero orders or activities anywhere near them.
+                    const oldestRecentAt = recentSnapshots.length > 0
+                        ? recentSnapshots[recentSnapshots.length - 1].capturedAt
+                        : new Date(Date.now() - 3 * 60 * 60 * 1000);
+                    let corroboratingActivity = [];
+                    try {
+                        corroboratingActivity = await brokerService.getRecentActivity(userId, oldestRecentAt);
+                    } catch (activityErr) {
+                        console.warn(`[PortfolioTracking] Activity cross-check failed for user ${userId}: ${activityErr.message} — proceeding on retries alone`);
                     }
 
-                    if (deviation > 0.25) {
-                        skipSnapshotSave = true;
-                        console.warn(`[PortfolioTracking] Unresolved swing for user ${userId} after ${MAX_ATTEMPTS} attempts (${(deviation * 100).toFixed(1)}% dev vs median ${baselineValue.toFixed(2)}) — skipping snapshot save, not writing an unconfirmed value to history`);
+                    if (corroboratingActivity.length > 0) {
+                        console.warn(`[PortfolioTracking] Swing corroborated by ${corroboratingActivity.length} real activity event(s) for user ${userId} — treating as a genuine move, not retrying/skipping`);
+                    } else {
+                        console.warn(`[PortfolioTracking] No corroborating activity found for user ${userId} — retrying with fresh Alpaca fetches`);
+                        const MAX_ATTEMPTS = 3;
+                        const RETRY_DELAY_MS = 2000;
+                        for (let attempt = 1; attempt <= MAX_ATTEMPTS && deviation > 0.25; attempt++) {
+                            if (attempt > 1) await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+                            const fresh = await _getAlpacaData(userId, true);
+                            const retriedCashBalance = fresh.cash ?? account.balance;
+                            const retriedTotalPortfolioValue = fresh.equity ?? (retriedCashBalance + totalCurrentValue);
+                            const retriedDeviation = Math.abs(retriedTotalPortfolioValue - baselineValue) / baselineValue;
+                            if (retriedDeviation < deviation) {
+                                cashBalance = retriedCashBalance;
+                                totalPortfolioValue = retriedTotalPortfolioValue;
+                                deviation = retriedDeviation;
+                                console.warn(`[PortfolioTracking] Retry ${attempt} corrected value to ${totalPortfolioValue.toFixed(2)} for user ${userId} (${(deviation * 100).toFixed(1)}% dev remaining)`);
+                            } else {
+                                console.warn(`[PortfolioTracking] Retry ${attempt} did not improve for user ${userId} — ${attempt < MAX_ATTEMPTS ? 'trying again' : 'no corroborating activity and no successful retry'}`);
+                            }
+                        }
+
+                        if (deviation > 0.25) {
+                            skipSnapshotSave = true;
+                            console.warn(`[PortfolioTracking] Unresolved, uncorroborated swing for user ${userId} after ${MAX_ATTEMPTS} attempts (${(deviation * 100).toFixed(1)}% dev vs median ${baselineValue.toFixed(2)}) — skipping snapshot save, not writing an unconfirmed value to history`);
+
+                            const lastAlerted = _lastSnapshotGuardAlert.get(userId) || 0;
+                            if (Date.now() - lastAlerted > 60 * 60 * 1000) {
+                                _lastSnapshotGuardAlert.set(userId, Date.now());
+                                try {
+                                    const tg = require('./telegramAlertService');
+                                    await tg.sendMessage(userId,
+                                        `⚠️ *Portfolio Data Guard*\n\n` +
+                                        `A suspicious account-value reading ($${totalPortfolioValue.toFixed(2)} vs recent median $${baselineValue.toFixed(2)}, ${(deviation * 100).toFixed(1)}% off) couldn't be confirmed after ${MAX_ATTEMPTS} retries, and no matching order/deposit/withdrawal explains it — most likely a momentary broker-side or connectivity glitch.\n\n` +
+                                        `Skipped saving it to your chart history rather than showing a possibly-wrong number. Your actual funds are unaffected — this only concerns what gets displayed.`
+                                    );
+                                } catch (_alertErr) { /* best-effort */ }
+                            }
+                        }
                     }
                 }
             }
@@ -321,6 +361,23 @@ const getPortfolioSummary = async (userId) => {
                 depositsSource: alpacaDeposits ? 'alpaca' : 'db'
             }
         };
+
+        // A brand-new user has no personal Alpaca keys yet until they add them in
+        // Settings — until then, getClientForUser silently falls back to the shared
+        // .env paper account, whose balance has nothing to do with this user. Saving a
+        // snapshot in that window pollutes their history with someone else's account
+        // balance the moment they land on their first dashboard load (confirmed
+        // 2026-07-15: a new user's very first snapshot showed the shared paper account's
+        // $98,729.11 before their real $1,000 account was even attached).
+        if (!skipSnapshotSave && !brokerService.isSimulated) {
+            try {
+                const creds = await userDb.getUserAlpacaCredentials(userId);
+                if (creds.source === 'env') {
+                    skipSnapshotSave = true;
+                    console.log(`[PortfolioTracking] Skipping snapshot save for user ${userId} — no personal Alpaca credentials yet, would save the shared fallback account's balance`);
+                }
+            } catch (_credsErr) { /* best-effort — never block a real portfolio fetch on this check */ }
+        }
 
         if (!skipSnapshotSave) {
             try {

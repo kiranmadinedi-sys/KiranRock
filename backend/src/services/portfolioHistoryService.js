@@ -1,7 +1,6 @@
 const {
-    savePortfolioSnapshot,
     getSnapshotsInRange,
-    getNearestSnapshotBefore
+    getSnapshotsBeforeDate
 } = require('./portfolioSnapshotService');
 const brokerService = require('./brokerService');
 const { query } = require('../config/database');
@@ -125,6 +124,20 @@ function getStartDate(range) {
 // both sides converging back to the same value, so this shouldn't mask real volatility.
 const OUTLIER_DEVIATION_THRESHOLD = 0.15; // 15%
 const OUTLIER_REFERENCE_WINDOW_MS = 60 * 60 * 1000; // ~1 hour
+// Tuned against an unusually bad 2026-07-13 (6 separate bad points across one day, likely
+// home-internet instability — see brokerService.getRecentActivity). N=5 let 3 clustered
+// bad points dominate a later point's "before" reference; N=10 fixed that but then hit an
+// exact 5-good/5-bad tie for a different point, where a plain median averages the two
+// disagreeing sides into a meaningless midpoint instead of picking one. N=15 breaks that
+// tie decisively (10 good vs 5 bad) — good readings still vastly outnumber bad ones over
+// any window wide enough, so a large enough N always resolves in their favor eventually.
+const OUTLIER_REFERENCE_MAX_CANDIDATES = 15;
+
+function median(values) {
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
 
 function filterOutlierSnapshots(snapshots) {
     if (!Array.isArray(snapshots) || snapshots.length < 3) return snapshots;
@@ -134,16 +147,30 @@ function filterOutlierSnapshots(snapshots) {
         if (val <= 0) return true; // let existing zero/negative handling elsewhere deal with this
 
         const t = new Date(snap.capturedAt).getTime();
-        const before = [...snapshots.slice(0, i)].reverse().find(s => t - new Date(s.capturedAt).getTime() >= OUTLIER_REFERENCE_WINDOW_MS);
-        const after = snapshots.slice(i + 1).find(s => new Date(s.capturedAt).getTime() - t >= OUTLIER_REFERENCE_WINDOW_MS);
+
+        // Robust reference: median of up to 5 points at least 1hr away on each side, not
+        // just the single nearest one. Confirmed 2026-07-13: when bad points cluster within
+        // a couple hours of each other, the single nearest "before"/"after" pick can itself
+        // land on another bad point — poisoning the reference so the agreement check always
+        // fails and neither bad point ever gets filtered. A lone bad point can't dominate a
+        // median of several candidates the way it could win a single "nearest" lookup.
+        const beforeVals = [...snapshots.slice(0, i)].reverse()
+            .filter(s => t - new Date(s.capturedAt).getTime() >= OUTLIER_REFERENCE_WINDOW_MS)
+            .slice(0, OUTLIER_REFERENCE_MAX_CANDIDATES)
+            .map(s => Number(s.totalPortfolioValue || 0))
+            .filter(v => v > 0);
+        const afterVals = snapshots.slice(i + 1)
+            .filter(s => new Date(s.capturedAt).getTime() - t >= OUTLIER_REFERENCE_WINDOW_MS)
+            .slice(0, OUTLIER_REFERENCE_MAX_CANDIDATES)
+            .map(s => Number(s.totalPortfolioValue || 0))
+            .filter(v => v > 0);
 
         // No reference on one side (e.g. near the very start/end of the lookback window) —
         // can't confirm this is transient, so don't filter it.
-        if (!before || !after) return true;
+        if (beforeVals.length === 0 || afterVals.length === 0) return true;
 
-        const beforeVal = Number(before.totalPortfolioValue || 0);
-        const afterVal = Number(after.totalPortfolioValue || 0);
-        if (beforeVal <= 0 || afterVal <= 0) return true;
+        const beforeVal = median(beforeVals);
+        const afterVal = median(afterVals);
 
         const devFromBefore = Math.abs(val - beforeVal) / beforeVal;
         const devFromAfter = Math.abs(val - afterVal) / afterVal;
@@ -191,7 +218,12 @@ async function buildPortfolioHistory(userId, range, summary) {
     const startDate = getStartDate(normalizedRange);
     const endDate = new Date();
 
-    await savePortfolioSnapshot(userId, summary, { source: `portfolio-history-${normalizedRange}` });
+    // Deliberately NOT calling savePortfolioSnapshot here — this function's only caller
+    // (getPortfolioHistory) already calls getPortfolioSummary() just before this, which
+    // saves internally through its own sanity guard (median baseline + activity
+    // cross-check + skip-if-unresolved). Saving again here with the same summary bypassed
+    // that guard entirely — confirmed 2026-07-13: a swing correctly skipped by the guard
+    // still got written to history through this second, unconditional save.
 
     // Outlier detection needs a "before" reference for snapshots right at the start of the
     // range, or a blip there has nothing earlier to compare against and slips through
@@ -200,10 +232,15 @@ async function buildPortfolioHistory(userId, range, summary) {
     // gaps in snapshot history (no one had the app open), so fetch the single nearest real
     // snapshot before the range instead of guessing how far back to look (found 2026-07-11:
     // a ~41h gap meant a 1h buffer still found nothing, and the blip right after the gap
-    // went unfiltered).
-    const anchorSnapshot = await getNearestSnapshotBefore(userId, startDate);
+    // went unfiltered). A single anchor point isn't enough on its own, though — every
+    // request's start boundary slides forward (e.g. "1D" is a rolling 24h window, not a
+    // calendar day), so a bad point sitting just past that boundary can end up with only
+    // one or two anchor candidates once the good history before it ages out of range —
+    // too few for a robust median (confirmed 2026-07-14). Fetch a real pool of anchor
+    // points instead of just the nearest one.
+    const anchorSnapshots = await getSnapshotsBeforeDate(userId, startDate, OUTLIER_REFERENCE_MAX_CANDIDATES);
     const rawSnapshots = await getSnapshotsInRange(userId, startDate, endDate);
-    const withAnchor = anchorSnapshot ? [anchorSnapshot, ...rawSnapshots] : rawSnapshots;
+    const withAnchor = [...anchorSnapshots, ...rawSnapshots];
     const snapshots = filterOutlierSnapshots(withAnchor).filter(s => new Date(s.capturedAt).getTime() >= startDate.getTime());
     let history = bucketSnapshots(snapshots, RANGE_CONFIG[normalizedRange].bucketMs);
 

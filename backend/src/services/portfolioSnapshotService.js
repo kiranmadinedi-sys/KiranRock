@@ -150,6 +150,28 @@ async function getNearestSnapshotBefore(userId, date) {
     return result.rows[0] || null;
 }
 
+/** Up to `limit` snapshots strictly before `date`, ascending — a real anchor POOL rather
+ *  than the single nearest point. A range's start boundary slides forward every request
+ *  (e.g. "1D" is a rolling 24h window, not a calendar day), so a bad point sitting just
+ *  after that boundary can end up with only one or two anchor candidates once the good
+ *  history before it has aged out of range — not enough for a robust median (confirmed
+ *  2026-07-14: a single-anchor point tied 1-good/1-bad, same failure mode as too few
+ *  candidates elsewhere in the filter). Fetching several points here, independent of the
+ *  displayed range, gives the filter real headroom regardless of where the window starts. */
+async function getSnapshotsBeforeDate(userId, date, limit = 15) {
+    await ensureSchema();
+    const result = await query(`
+        SELECT total_portfolio_value AS "totalPortfolioValue",
+               captured_at AS "capturedAt"
+        FROM portfolio_snapshots
+        WHERE user_id = $1
+          AND captured_at < $2
+        ORDER BY captured_at DESC
+        LIMIT $3
+    `, [userId, date, limit]);
+    return result.rows.reverse();
+}
+
 /** Last `limit` snapshots within `withinMs` — used to build a baseline that a single bad
  *  save can't poison, unlike comparing against just the one most-recent snapshot
  *  (2026-07-13: a bad read got saved, then sat as the trusted baseline for the next
@@ -171,6 +193,7 @@ async function getRecentSnapshots(userId, { limit = 5, withinMs = 2 * 60 * 60 * 
 module.exports = {
     ensureSchema,
     getNearestSnapshotBefore,
+    getSnapshotsBeforeDate,
     getLatestSnapshot,
     getRecentSnapshots,
     savePortfolioSnapshot,

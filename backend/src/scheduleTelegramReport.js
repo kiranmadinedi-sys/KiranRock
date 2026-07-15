@@ -469,14 +469,13 @@ schedule.scheduleJob({
 });
 
 // ── PORTFOLIO SNAPSHOT: every 30 min, independent of anyone having the app open ──
-// Portfolio chart history previously only got saved as a side effect of the frontend's
-// own auto-refresh (buildPortfolioHistory calls savePortfolioSnapshot on every chart
-// request) — meaning historical density depended entirely on whether someone had the
-// page open. That left gaps overnight or whenever the app was closed, which the 1M/3M
-// chart's 30-min bucketing (added 2026-07-09) now depends on for a usable scrub
-// experience. This runs unconditionally so the data exists regardless of viewership.
-// savePortfolioSnapshot already dedupes (skips the insert if a same-value snapshot was
-// saved in the last 15 min), so this is a no-op most of the time when the app is active.
+// Ensures chart history keeps getting recorded even when no one has the page open (the
+// 1M/3M chart's 30-min bucketing depends on this for a usable scrub experience).
+// getPortfolioSummary() already saves a snapshot internally through its own sanity guard
+// (median baseline + activity cross-check + skip-if-unresolved) — this job used to ALSO
+// call savePortfolioSnapshot directly afterward with the same summary, which bypassed
+// that guard entirely and could write an already-rejected bad value straight to history
+// (confirmed 2026-07-13). Just calling getPortfolioSummary() is sufficient on its own now.
 schedule.scheduleJob('*/30 * * * *', async () => {
   const { query } = require('./config/database');
   const portfolioTrackingService = require('./services/portfolioTrackingService');
@@ -484,9 +483,7 @@ schedule.scheduleJob('*/30 * * * *', async () => {
     const users = await query('SELECT id FROM users');
     for (const { id: userId } of users.rows) {
       try {
-        const { summary } = await portfolioTrackingService.getPortfolioSummary(userId);
-        const { savePortfolioSnapshot } = require('./services/portfolioSnapshotService');
-        await savePortfolioSnapshot(userId, summary, { source: 'scheduled-30min' });
+        await portfolioTrackingService.getPortfolioSummary(userId);
       } catch (userError) {
         logger.debug('[Telegram Reports Scheduler] 30-min snapshot failed for user', { userId, error: userError.message });
       }

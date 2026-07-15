@@ -43,10 +43,10 @@ function nowCDT() {
 
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-/** Deduplicated Telegram send — same key suppressed for ALERT_COOLDOWN ms. */
-async function alert(key, message, userId = KMADINED) {
+/** Deduplicated Telegram send — same key suppressed for `cooldownMs` (default ALERT_COOLDOWN). */
+async function alert(key, message, userId = KMADINED, cooldownMs = ALERT_COOLDOWN) {
     const last = _alerted.get(key) || 0;
-    if (Date.now() - last < ALERT_COOLDOWN) return; // still in cooldown
+    if (Date.now() - last < cooldownMs) return; // still in cooldown
     _alerted.set(key, Date.now());
     try {
         const tg = require('./telegramAlertService');
@@ -55,6 +55,8 @@ async function alert(key, message, userId = KMADINED) {
         logger.error('[HealthMonitor] Telegram send failed', { error: e.message });
     }
 }
+
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
 /** Clear a key so the next occurrence fires immediately (used after auto-fix). */
 function clearCooldown(key) { _alerted.delete(key); }
@@ -310,6 +312,70 @@ async function checkAndFixReconciliation(userId) {
     } catch (_) { return null; }
 }
 
+/**
+ * Check H — Nightly scan completion. The scan window (4:15 PM–11 PM ET, see
+ * enhancedAIScheduler.js) only checks itself WHILE the process is running — if the
+ * desktop/process is down for all of it (confirmed 2026-07-14: restarted at 11:07 PM,
+ * 7 min past the window's own cutoff), nothing ever notices the scan never finished.
+ * This runs as an outside observer during the overnight/pre-market window (11 PM–9 AM
+ * ET) and alerts once per day if the most recent scan never reached the same
+ * completion threshold the scheduler itself uses.
+ */
+const SCAN_COMPLETE_THRESHOLD = 420; // keep in sync with enhancedAIScheduler.js
+
+async function checkNightlyScanCompletion() {
+    const et = etNow();
+    const etHour = et.getHours();
+    const overnightWindow = etHour >= 23 || etHour < 9;
+    if (!overnightWindow) return null;
+
+    try {
+        const { rows } = await query(
+            `SELECT COUNT(*) AS cnt
+             FROM daily_universe_analysis
+             WHERE analysis_date = (
+                 SELECT MAX(analysis_date)
+                 FROM daily_universe_analysis
+                 WHERE analysis_date >= CURRENT_DATE - INTERVAL '3 day'
+                   AND analysis_date <= CURRENT_DATE
+             )
+             AND ai_score IS NOT NULL`
+        );
+        const scored = parseInt(rows[0]?.cnt ?? 0);
+        if (scored < SCAN_COMPLETE_THRESHOLD) {
+            return `WARNING: Last night's universe scan only reached ${scored}/${SCAN_COMPLETE_THRESHOLD}+ symbols scored — may have been interrupted (desktop/process downtime?). Consider a manual resume before market open.`;
+        }
+        return null;
+    } catch (e) {
+        return null;
+    }
+}
+
+/**
+ * Check I — Regime blocking all new entries (CHOPPY/PANIC). This gate sits in
+ * enhancedAITradingBot.js *before* any per-stock scanning happens, so it never reaches
+ * alertNoOpportunities/alertEdgeGateBlocked — a choppy day was previously completely
+ * silent to the user (confirmed 2026-07-14). Once-per-day informational note, not a
+ * "critical" issue — this is the bot behaving correctly, just worth knowing about.
+ */
+async function checkRegimeBlocking(userId) {
+    try {
+        const r = await query(
+            `SELECT message FROM ai_trading_logs
+             WHERE user_id = $1 AND timestamp::date = CURRENT_DATE
+             ORDER BY timestamp DESC LIMIT 1`,
+            [userId]
+        );
+        const lastMsg = r.rows[0]?.message || '';
+        if (/^Market choppy/.test(lastMsg) || /^Market in PANIC regime/.test(lastMsg)) {
+            return lastMsg;
+        }
+        return null;
+    } catch (e) {
+        return null;
+    }
+}
+
 // ─── Main cycle ───────────────────────────────────────────────────────────────
 
 async function runHealthCheck() {
@@ -324,6 +390,18 @@ async function runHealthCheck() {
         const { issue: haltIssue, fixed: haltFixed } = await checkAndClearHaltAll();
         if (haltFixed) fixes.push(haltFixed);
         if (haltIssue) issues.push({ key: 'halt_all', msg: haltIssue });
+
+        // H — Nightly scan completion (overnight/pre-market window only, self-gated).
+        // Once-per-day dedup — this isn't an ongoing critical issue like the others,
+        // just a single daily "did last night's scan finish" fact.
+        const etDateStr = etNow().toDateString();
+        const scanIssue = await checkNightlyScanCompletion();
+        if (scanIssue) {
+            await alert(`scan_incomplete_${etDateStr}`,
+                `🌙 *KiranRock Nightly Scan* [${nowCDT()} CDT]\n\n${scanIssue}`,
+                KMADINED, ONE_DAY_MS
+            );
+        }
 
         // Market-hours-only checks
         if (isMarketOpen()) {
@@ -347,6 +425,17 @@ async function runHealthCheck() {
             // G — Trailing stop upgrades for profitable positions
             const trailFixed = await upgradeTrailingStops(KMADINED);
             if (trailFixed) fixes.push(trailFixed);
+
+            // I — Regime blocking all new entries (CHOPPY/PANIC) — once-per-day FYI,
+            // not an "issue" (the bot is behaving correctly), so alerted separately
+            // from the critical-issues loop below rather than mixed into `issues`.
+            const regimeMsg = await checkRegimeBlocking(KMADINED);
+            if (regimeMsg) {
+                await alert(`regime_blocked_${etDateStr}`,
+                    `⏸️ *KiranRock Trading Update* [${nowCDT()} CDT]\n\n${regimeMsg}\n\nBot is sitting out new entries and managing existing positions only.`,
+                    KMADINED, ONE_DAY_MS
+                );
+            }
         }
 
         // ── Send Telegram alerts ──────────────────────────────────────────────

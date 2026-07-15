@@ -856,7 +856,30 @@ const alpacaBroker = (() => {
         return events;
     }
 
-    return { buyMarket, buyBracket, buyFractional, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, getNetDeposits, getDepositActivities, placeStopOrder, cancelOrder, name: 'Alpaca Markets' };
+    /**
+     * Any real cash-moving event (fill, deposit, withdrawal, journal transfer) since a
+     * given date — used to cross-check a suspicious cash swing before saving it: if the
+     * live "current cash" reading disagrees sharply with recent history AND there's
+     * literally no order/deposit/withdrawal to explain it, that's strong independent
+     * evidence the reading itself is bad (not client-side guesswork), since a genuine
+     * swing always has a matching activity record (2026-07-13).
+     */
+    async function getRecentActivity(userId, sinceDate) {
+        const { client } = await getClientForUser(userId);
+        const after = new Date(sinceDate).toISOString();
+        const events = [];
+        for (const activityType of ['FILL', 'CSD', 'CSW', 'JNLC', 'JNLS']) {
+            try {
+                const activities = await client.getAccountActivities({ activityTypes: activityType, after });
+                for (const a of (activities || [])) events.push(a);
+            } catch (err) {
+                logger.debug(`[Broker:Alpaca] getRecentActivity skipping ${activityType}: ${err.message}`);
+            }
+        }
+        return events;
+    }
+
+    return { buyMarket, buyBracket, buyFractional, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, getNetDeposits, getDepositActivities, getRecentActivity, placeStopOrder, cancelOrder, name: 'Alpaca Markets' };
 })();
 
 // ─── ACTIVE BROKER SELECTION ─────────────────────────────────────────────────
@@ -1132,6 +1155,15 @@ module.exports = {
     getDepositActivities: (userId) =>
                         activeBroker.getDepositActivities
                             ? activeBroker.getDepositActivities(userId)
+                            : Promise.resolve([]),
+
+    /**
+     * Any fill/deposit/withdrawal/transfer since `sinceDate` — [] for simulated broker
+     * (no external ledger to cross-check against).
+     */
+    getRecentActivity: (userId, sinceDate) =>
+                        activeBroker.getRecentActivity
+                            ? activeBroker.getRecentActivity(userId, sinceDate)
                             : Promise.resolve([]),
 
     brokerName:     activeBroker.name,

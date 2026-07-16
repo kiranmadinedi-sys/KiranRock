@@ -199,6 +199,61 @@ interface MarketReview {
     allRows: MarketReviewRow[];
 }
 
+interface SkippedThresholdRow {
+    threshold: number;
+    candidateCount: number;
+    sample1d: number;
+    sample5d: number;
+    avgReturn1d: number | null;
+    avgReturn3d: number | null;
+    avgReturn5d: number | null;
+    medianReturn5d: number | null;
+    stddevReturn5d: number | null;
+    winners5d: number;
+    losers5d: number;
+    avgWinner5d: number | null;
+    avgLoser5d: number | null;
+    profitFactor5d: number | null;
+    winRate5d: number | null;
+}
+
+interface SkippedDailyRow {
+    scanDate: string;
+    regime: string | null;
+    count85: number;
+    count90: number;
+    count95: number;
+    avgReturn5d85: number | null;
+}
+
+interface SkippedMissedRow {
+    scanDate: string;
+    symbol: string;
+    aiScore: number;
+    sector: string | null;
+    regime: string | null;
+    priceAtScan: number | null;
+    return1d: number | null;
+    return3d: number | null;
+    return5d: number | null;
+}
+
+interface SkippedRegimeRow {
+    regime: string;
+    blockedDays: number;
+    candidates85: number;
+    avgReturn5d85: number | null;
+}
+
+interface SkippedOpportunities {
+    days: number;
+    byThreshold: SkippedThresholdRow[];
+    spyBenchmark: { avgReturn5d: number | null; sampleDays: number };
+    dailyBreakdown: SkippedDailyRow[];
+    topMissed: SkippedMissedRow[];
+    byRegime: SkippedRegimeRow[];
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const fmtPct = (n: number | null) => n == null ? '—' : `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
@@ -293,7 +348,7 @@ function AggTable({ title, rows }: { title: string; rows: AggRow[] }) {
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
-type Tab = 'trades' | 'score' | 'hold' | 'health' | 'equity' | 'exits' | 'review';
+type Tab = 'trades' | 'score' | 'hold' | 'health' | 'equity' | 'exits' | 'review' | 'skipped';
 type SortKey = 'closedAt' | 'symbol' | 'pnlPct' | 'aiScore' | 'holdHours';
 type SortDir = 'asc' | 'desc';
 
@@ -343,6 +398,11 @@ export default function AnalyticsPage() {
     const [loadingMarketReview, setLoadingMarketReview] = useState(false);
     const [reviewDays, setReviewDays]             = useState(7);
     const [reviewSymbolSearch, setReviewSymbolSearch] = useState('');
+
+    // Skipped opportunity analysis state — "did sitting out actually cost us money?"
+    const [skipped, setSkipped]                 = useState<SkippedOpportunities | null>(null);
+    const [loadingSkipped, setLoadingSkipped]   = useState(false);
+    const [skippedDays, setSkippedDays]         = useState(30);
 
     // Filters
     const [filterOutcome,  setFilterOutcome]  = useState('');
@@ -447,6 +507,19 @@ export default function AnalyticsPage() {
         }
     }, [reviewDays]);
 
+    const fetchSkipped = useCallback(async (token: string) => {
+        setLoadingSkipped(true);
+        try {
+            const res = await fetch(
+                `${getApiBaseUrl()}/api/performance/skipped-opportunities?days=${skippedDays}`,
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+            if (res.ok) { const d = await res.json(); setSkipped(d); }
+        } finally {
+            setLoadingSkipped(false);
+        }
+    }, [skippedDays]);
+
     const fetchSummary = useCallback(async () => {
         const token = getAuthToken();
         if (!token) return;
@@ -488,6 +561,13 @@ export default function AnalyticsPage() {
         fetchExits(token);
         fetchMarketReview(token);
     }, [fetchTradeLog, fetchBuckets, fetchHealth, fetchEquity, fetchExits, fetchMarketReview, router]);
+
+    // Separate effect (not the mount-only block above) so the day-selector buttons in
+    // the Skipped Opportunities tab actually refetch when clicked, not just relabel.
+    useEffect(() => {
+        const token = getAuthToken();
+        if (token) fetchSkipped(token);
+    }, [fetchSkipped]);
 
     // Client-side filters
     const filtered = trades.filter(t => {
@@ -546,6 +626,7 @@ export default function AnalyticsPage() {
         { id: 'exits',  label: 'Exit Breakdown' },
         { id: 'health', label: 'Strategy Health' },
         { id: 'review', label: 'Market Review' },
+        { id: 'skipped', label: 'Skipped Opportunities' },
     ];
 
     return (
@@ -1535,6 +1616,207 @@ export default function AnalyticsPage() {
                                     )}
                                 </div>
                             </div>
+                        </>
+                    )}
+                </div>
+            )}
+
+            {/* ── Skipped Opportunities: did sitting out actually cost us money? ──── */}
+            {tab === 'skipped' && (
+                <div className="space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                        <p className="text-sm text-gray-400 max-w-2xl">
+                            For every day the bot took zero trades, what did the highest-scoring candidates
+                            (85+/90+/95+) actually do over the next 1/3/5 trading days? Answers whether the
+                            regime gate is correctly avoiding losses or leaving profit on the table — with
+                            real forward returns, not a guess.
+                        </p>
+                        <div className="flex items-center gap-2">
+                            {([7, 14, 30, 60, 90] as const).map(d => (
+                                <button key={d} onClick={() => setSkippedDays(d)}
+                                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                                        skippedDays === d ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                                    }`}>{d}d</button>
+                            ))}
+                        </div>
+                    </div>
+
+                    {loadingSkipped ? (
+                        <div className="flex items-center justify-center h-40 text-gray-400">Loading skipped-opportunity analysis…</div>
+                    ) : !skipped || skipped.byThreshold.every(b => b.candidateCount === 0) ? (
+                        <div className="bg-gray-800 border border-gray-700 rounded-xl p-8 text-center text-gray-400">
+                            No no-trade days with scored candidates found in this period.
+                        </div>
+                    ) : (
+                        <>
+                            {/* SPY benchmark callout */}
+                            {skipped.spyBenchmark.avgReturn5d != null && (
+                                <div className="bg-blue-900/20 border border-blue-700/40 rounded-xl p-4 text-sm text-blue-300">
+                                    <strong>Market benchmark:</strong> over the same no-trade days, SPY itself averaged{' '}
+                                    <span className={pnlColor(skipped.spyBenchmark.avgReturn5d)}>{fmtPct(skipped.spyBenchmark.avgReturn5d)}</span> over
+                                    the next 5 trading days ({skipped.spyBenchmark.sampleDays} sampled days — recent days don't have 5 days of
+                                    forward data yet, so this sample shrinks for shorter lookback windows).
+                                </div>
+                            )}
+
+                            {/* Threshold summary cards */}
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                {skipped.byThreshold.map(b => (
+                                    <div key={b.threshold} className="bg-gray-800 border border-gray-700 rounded-xl p-4">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <p className="text-sm font-semibold text-white">Score {b.threshold}+</p>
+                                            <span className="text-xs text-gray-500">{b.candidateCount} candidates</span>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-2 text-xs">
+                                            <div>
+                                                <p className="text-gray-400">Avg 5d Return</p>
+                                                <p className={`font-bold text-base ${pnlColor(b.avgReturn5d)}`}>{fmtPct(b.avgReturn5d)}</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-gray-400">Win Rate</p>
+                                                <p className={`font-bold text-base ${b.winRate5d != null && b.winRate5d >= 50 ? 'text-green-400' : 'text-red-400'}`}>
+                                                    {b.winRate5d != null ? `${b.winRate5d.toFixed(1)}%` : '—'}
+                                                </p>
+                                            </div>
+                                            <div>
+                                                <p className="text-gray-400">Median 5d</p>
+                                                <p className={pnlColor(b.medianReturn5d)}>{fmtPct(b.medianReturn5d)}</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-gray-400">Profit Factor</p>
+                                                <p className={b.profitFactor5d != null && b.profitFactor5d >= 1 ? 'text-green-400' : 'text-red-400'}>
+                                                    {b.profitFactor5d != null ? b.profitFactor5d.toFixed(2) : '—'}
+                                                </p>
+                                            </div>
+                                            <div>
+                                                <p className="text-gray-400">Avg Winner</p>
+                                                <p className="text-green-400">{fmtPct(b.avgWinner5d)}</p>
+                                            </div>
+                                            <div>
+                                                <p className="text-gray-400">Avg Loser</p>
+                                                <p className="text-red-400">{fmtPct(b.avgLoser5d)}</p>
+                                            </div>
+                                        </div>
+                                        <p className="text-[11px] text-gray-500 mt-2">
+                                            {b.winners5d}W / {b.losers5d}L · σ {b.stddevReturn5d != null ? b.stddevReturn5d.toFixed(2) : '—'}%
+                                        </p>
+                                    </div>
+                                ))}
+                            </div>
+
+                            <div className={`rounded-xl p-4 text-sm border ${
+                                (skipped.byThreshold[0]?.avgReturn5d ?? 0) < 0
+                                    ? 'bg-green-900/20 border-green-700/40 text-green-300'
+                                    : 'bg-amber-900/20 border-amber-700/40 text-amber-300'
+                            }`}>
+                                <strong>How to read this:</strong> negative average returns + sub-50% win rates + profit factor below 1.0 mean
+                                sitting out was the right call — the regime gate correctly avoided setups that would have lost money on average.
+                                Positive returns with a profit factor above 1.0 would mean the gate is too conservative and leaving real profit
+                                on the table. This is measured, not assumed — check back as more no-trade days accumulate.
+                            </div>
+
+                            {/* By regime */}
+                            {skipped.byRegime.length > 0 && (
+                                <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
+                                    <div className="px-4 py-3 border-b border-gray-700">
+                                        <h3 className="text-sm font-semibold text-gray-200">By Regime</h3>
+                                    </div>
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-xs">
+                                            <thead>
+                                                <tr className="text-gray-400 border-b border-gray-700">
+                                                    <th className="text-left px-4 py-2.5">Regime</th>
+                                                    <th className="text-right px-3 py-2.5">Blocked Days</th>
+                                                    <th className="text-right px-3 py-2.5">Candidates (85+)</th>
+                                                    <th className="text-right px-4 py-2.5">Avg 5d Return</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {skipped.byRegime.map((r, i) => (
+                                                    <tr key={i} className="border-b border-gray-700/40 hover:bg-gray-700/30">
+                                                        <td className="px-4 py-2.5">{regimeBadge(r.regime)}</td>
+                                                        <td className="text-right px-3 py-2.5 text-gray-300">{r.blockedDays}</td>
+                                                        <td className="text-right px-3 py-2.5 text-gray-300">{r.candidates85}</td>
+                                                        <td className={`text-right px-4 py-2.5 font-medium ${pnlColor(r.avgReturn5d85)}`}>{fmtPct(r.avgReturn5d85)}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Daily breakdown */}
+                            <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
+                                <div className="px-4 py-3 border-b border-gray-700">
+                                    <h3 className="text-sm font-semibold text-gray-200">Daily Breakdown</h3>
+                                    <p className="text-xs text-gray-500 mt-0.5">Candidate counts by threshold on each no-trade day</p>
+                                </div>
+                                <div className="overflow-x-auto max-h-72 overflow-y-auto">
+                                    <table className="w-full text-xs">
+                                        <thead className="sticky top-0 bg-gray-800">
+                                            <tr className="text-gray-400 border-b border-gray-700">
+                                                <th className="text-left px-4 py-2">Date</th>
+                                                <th className="text-left px-3 py-2">Regime</th>
+                                                <th className="text-right px-3 py-2">85+</th>
+                                                <th className="text-right px-3 py-2">90+</th>
+                                                <th className="text-right px-3 py-2">95+</th>
+                                                <th className="text-right px-4 py-2">Avg 5d (85+)</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {skipped.dailyBreakdown.map((d, i) => (
+                                                <tr key={i} className="border-b border-gray-700/40 hover:bg-gray-700/30">
+                                                    <td className="px-4 py-2 text-gray-300">{new Date(d.scanDate).toLocaleDateString()}</td>
+                                                    <td className="px-3 py-2">{regimeBadge(d.regime)}</td>
+                                                    <td className="text-right px-3 py-2 text-gray-300">{d.count85}</td>
+                                                    <td className="text-right px-3 py-2 text-gray-300">{d.count90}</td>
+                                                    <td className="text-right px-3 py-2 text-gray-300">{d.count95}</td>
+                                                    <td className={`text-right px-4 py-2 font-medium ${pnlColor(d.avgReturn5d85)}`}>{fmtPct(d.avgReturn5d85)}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            {/* Top missed candidates */}
+                            {skipped.topMissed.length > 0 && (
+                                <div className="bg-gray-800 border border-gray-700 rounded-xl overflow-hidden">
+                                    <div className="px-4 py-3 border-b border-gray-700">
+                                        <h3 className="text-sm font-semibold text-gray-200">Best-Performing Missed Candidates</h3>
+                                        <p className="text-xs text-gray-500 mt-0.5">Highest 5-day forward return among 85+ scored, untraded names — the real cost of sitting out on its worst days</p>
+                                    </div>
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-xs">
+                                            <thead>
+                                                <tr className="text-gray-400 border-b border-gray-700">
+                                                    <th className="text-left px-4 py-2">Date</th>
+                                                    <th className="text-left px-3 py-2">Symbol</th>
+                                                    <th className="text-right px-3 py-2">Score</th>
+                                                    <th className="text-left px-3 py-2">Sector</th>
+                                                    <th className="text-right px-3 py-2">1d</th>
+                                                    <th className="text-right px-3 py-2">3d</th>
+                                                    <th className="text-right px-4 py-2">5d</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {skipped.topMissed.map((r, i) => (
+                                                    <tr key={i} className="border-b border-gray-700/40 hover:bg-gray-700/30">
+                                                        <td className="px-4 py-2 text-gray-300">{new Date(r.scanDate).toLocaleDateString()}</td>
+                                                        <td className="px-3 py-2 font-semibold text-white">{r.symbol}</td>
+                                                        <td className={`text-right px-3 py-2 ${scoreColor(r.aiScore)}`}>{r.aiScore.toFixed(0)}</td>
+                                                        <td className="px-3 py-2 text-gray-400">{r.sector ?? '—'}</td>
+                                                        <td className={`text-right px-3 py-2 ${pnlColor(r.return1d)}`}>{fmtPct(r.return1d)}</td>
+                                                        <td className={`text-right px-3 py-2 ${pnlColor(r.return3d)}`}>{fmtPct(r.return3d)}</td>
+                                                        <td className={`text-right px-4 py-2 font-medium ${pnlColor(r.return5d)}`}>{fmtPct(r.return5d)}</td>
+                                                    </tr>
+                                                ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
                         </>
                     )}
                 </div>

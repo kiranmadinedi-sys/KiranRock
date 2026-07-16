@@ -1401,7 +1401,47 @@ router.post('/plain-summary', protect, async (req, res) => {
         const s = statsRes.rows[0];
         const total = parseInt(s.total_trades || 0);
 
+        // ── 1b. Skipped-opportunity stats for the SAME period — this is the piece a
+        // plain-English summary was previously blind to. A stretch of zero/few trades
+        // used to read as "nothing happened"; it's usually "the bot correctly sat out,
+        // and here's the evidence" (see the Skipped Opportunities analytics tab).
+        const skippedRes = await query(`
+            SELECT
+                COUNT(DISTINCT scan_date) FILTER (WHERE was_traded = false)                    AS blocked_days,
+                COUNT(*) FILTER (WHERE was_traded = false AND ai_score >= 85)                   AS candidates_85,
+                ROUND(AVG(return_5d_pct) FILTER (WHERE was_traded = false AND ai_score >= 85)::numeric, 2) AS avg_return_5d_85,
+                ROUND(
+                    (COUNT(*) FILTER (WHERE was_traded = false AND ai_score >= 85 AND return_5d_pct > 0))::numeric /
+                    NULLIF(COUNT(*) FILTER (WHERE was_traded = false AND ai_score >= 85 AND return_5d_pct IS NOT NULL), 0) * 100, 1
+                ) AS win_rate_5d_85,
+                MODE() WITHIN GROUP (ORDER BY regime) FILTER (WHERE was_traded = false)         AS dominant_blocked_regime
+            FROM market_review_snapshots
+            WHERE scan_date >= CURRENT_DATE - ($1 * INTERVAL '1 day')
+        `, [days]);
+        const sk = skippedRes.rows[0];
+        const skippedBlob = {
+            blockedDays:         parseInt(sk.blocked_days || 0),
+            candidates85:        parseInt(sk.candidates_85 || 0),
+            avgReturn5d85:       sk.avg_return_5d_85 != null ? parseFloat(sk.avg_return_5d_85) : null,
+            winRate5d85:         sk.win_rate_5d_85 != null ? parseFloat(sk.win_rate_5d_85) : null,
+            dominantBlockedRegime: sk.dominant_blocked_regime || null,
+        };
+
         if (total === 0) {
+            if (skippedBlob.blockedDays > 0 && skippedBlob.candidates85 > 0) {
+                const verdict = skippedBlob.avgReturn5d85 != null && skippedBlob.avgReturn5d85 < 0
+                    ? 'the data suggests sitting out was the right call'
+                    : 'worth double-checking whether the regime filter is too conservative';
+                return res.json({
+                    summary: `No trades were completed in the last ${days} days, but that wasn't inactivity — the bot sat out ` +
+                        `${skippedBlob.blockedDays} day(s) of ${skippedBlob.dominantBlockedRegime ? `mostly ${skippedBlob.dominantBlockedRegime.replace(/_/g,' ')} conditions` : 'unfavorable conditions'}. ` +
+                        `Looking at the ${skippedBlob.candidates85} high-scoring stocks (85+) it passed on, they averaged ` +
+                        `${skippedBlob.avgReturn5d85 != null ? `${skippedBlob.avgReturn5d85 >= 0 ? '+' : ''}${skippedBlob.avgReturn5d85.toFixed(2)}%` : 'an unclear return'} ` +
+                        `over the next 5 trading days${skippedBlob.winRate5d85 != null ? ` with only a ${skippedBlob.winRate5d85.toFixed(0)}% win rate` : ''} — ${verdict}. ` +
+                        `See the Skipped Opportunities tab for the full breakdown.`,
+                    stats: { totalTrades: 0, days, skipped: skippedBlob }
+                });
+            }
             return res.json({
                 summary: `No closed trades found in the last ${days} days. The bot may still be building positions, or no trades were completed in this period. Check the AI Bot page to see if the bot is active and scanning for opportunities.`,
                 stats: { totalTrades: 0, days }
@@ -1449,6 +1489,7 @@ router.post('/plain-summary', protect, async (req, res) => {
             dominantRegime:   s.dominant_regime,
             avgAiScore:       parseFloat(s.avg_ai_score || 0),
             profitFactor,
+            skippedOpportunities: skippedBlob.blockedDays > 0 ? skippedBlob : null,
         };
 
         // ── 3. Ask Claude for the plain-English summary ────────────────────
@@ -1466,6 +1507,9 @@ router.post('/plain-summary', protect, async (req, res) => {
                 statsBlob.avgHoldHours > 0
                     ? `Stocks were held for ${statsBlob.avgHoldHours.toFixed(0)} hours on average (about ${(statsBlob.avgHoldHours / 24).toFixed(1)} days).` : '',
                 statsBlob.bestSector ? `Best performing sector: ${statsBlob.bestSector}. Worst: ${statsBlob.worstSector}.` : '',
+                statsBlob.skippedOpportunities ? `Separately, the bot sat out ${statsBlob.skippedOpportunities.blockedDays} day(s) in this period ` +
+                `(mostly ${statsBlob.skippedOpportunities.dominantBlockedRegime || 'unfavorable'} conditions) — the ${statsBlob.skippedOpportunities.candidates85} ` +
+                `high-scoring stocks it passed on during those days averaged ${statsBlob.skippedOpportunities.avgReturn5d85 != null ? `${statsBlob.skippedOpportunities.avgReturn5d85 >= 0 ? '+' : ''}${statsBlob.skippedOpportunities.avgReturn5d85.toFixed(2)}%` : 'an unclear return'} over the next 5 days.` : '',
             ].filter(Boolean).join(' ');
             return res.json({ summary, stats: statsBlob });
         }
@@ -1483,6 +1527,11 @@ IMPORTANT number guide (read before writing):
 - "avgLossUsd" = average loss on the LOSING trades only (already positive, so treat as a cost)
 - "winLossRatio" = avgWinUsd ÷ avgLossUsd — above 1.5 is strong, below 1.0 means losses outsize wins
 - "profitFactor" = gross wins ÷ gross losses — above 1.5 = healthy edge
+- "skippedOpportunities" (only present if the bot also sat out some days this period) = what happened
+  to the high-scoring (85+) stocks the bot did NOT trade on its no-trade days. "avgReturn5d85" is their
+  average return over the next 5 trading days had they been bought anyway — negative means sitting out
+  was correct, positive means the regime filter may be too conservative. This is a SEPARATE, complementary
+  fact from the executed-trade stats above — it did not happen to money already in the account.
 Do NOT confuse "avgNetPnlPerTrade" with "avgWinUsd" or "avgLossUsd". They are different numbers.
 
 Write a clear, friendly performance summary covering:
@@ -1491,8 +1540,9 @@ Write a clear, friendly performance summary covering:
 3. Which stocks or sectors did well, which did poorly?
 4. How long were stocks typically held?
 5. How the bot decided to exit trades (stop loss, profit target, etc.)
-6. One honest strength and one honest area to watch
-7. A single plain sentence verdict at the end
+6. If "skippedOpportunities" is present, one sentence on whether the no-trade days were correctly avoiding bad setups or possibly too cautious — grounded in the actual numbers, not a guess
+7. One honest strength and one honest area to watch
+8. A single plain sentence verdict at the end
 
 Rules:
 - Write in plain English a family member could understand
@@ -2124,6 +2174,170 @@ router.get('/market-review', protect, async (req, res) => {
     } catch (err) {
         const logger = require('../utils/logger');
         logger.error('Market review endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/performance/skipped-opportunities?days=30
+ * "Did sitting out actually cost us money?" — buckets every scanned-but-not-traded
+ * candidate by AI score threshold (85+/90+/95+) and reports real forward returns
+ * (1d/3d/5d, already precomputed in market_review_snapshots), plus a daily
+ * candidate-count breakdown and the highest-scoring/best-performing names actually
+ * missed. Answers whether CHOPPY (or any other reason for sitting out) is correctly
+ * avoiding bad setups or leaving profit on the table — with evidence, not a guess
+ * (2026-07-16, following a ChatGPT review recommending exactly this analysis).
+ */
+router.get('/skipped-opportunities', protect, async (req, res) => {
+    try {
+        const { query } = require('../config/database');
+        const days = Math.max(1, Math.min(parseInt(req.query.days) || 30, 180));
+        const THRESHOLDS = [85, 90, 95];
+
+        // Median/stddev/payoff stats per threshold — win rate alone hides whether the losers
+        // are small nicks or big drawdowns, and a mean can be skewed by one outlier name.
+        const byThresholdRes = await query(`
+            SELECT
+                t.threshold,
+                COUNT(*) FILTER (WHERE m.ai_score >= t.threshold)                              AS candidate_count,
+                COUNT(*) FILTER (WHERE m.ai_score >= t.threshold AND m.return_1d_pct IS NOT NULL) AS sample_1d,
+                COUNT(*) FILTER (WHERE m.ai_score >= t.threshold AND m.return_5d_pct IS NOT NULL) AS sample_5d,
+                ROUND(AVG(m.return_1d_pct) FILTER (WHERE m.ai_score >= t.threshold)::numeric, 2) AS avg_return_1d,
+                ROUND(AVG(m.return_3d_pct) FILTER (WHERE m.ai_score >= t.threshold)::numeric, 2) AS avg_return_3d,
+                ROUND(AVG(m.return_5d_pct) FILTER (WHERE m.ai_score >= t.threshold)::numeric, 2) AS avg_return_5d,
+                ROUND(
+                    (PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY m.return_5d_pct)
+                     FILTER (WHERE m.ai_score >= t.threshold))::numeric, 2
+                ) AS median_return_5d,
+                ROUND((STDDEV_SAMP(m.return_5d_pct) FILTER (WHERE m.ai_score >= t.threshold))::numeric, 2) AS stddev_return_5d,
+                COUNT(*) FILTER (WHERE m.ai_score >= t.threshold AND m.return_5d_pct > 0) AS winners_5d,
+                COUNT(*) FILTER (WHERE m.ai_score >= t.threshold AND m.return_5d_pct < 0) AS losers_5d,
+                ROUND(AVG(m.return_5d_pct) FILTER (WHERE m.ai_score >= t.threshold AND m.return_5d_pct > 0)::numeric, 2) AS avg_winner_5d,
+                ROUND(AVG(m.return_5d_pct) FILTER (WHERE m.ai_score >= t.threshold AND m.return_5d_pct < 0)::numeric, 2) AS avg_loser_5d,
+                ROUND(
+                    (SUM(m.return_5d_pct) FILTER (WHERE m.ai_score >= t.threshold AND m.return_5d_pct > 0))::numeric /
+                    NULLIF(ABS(SUM(m.return_5d_pct) FILTER (WHERE m.ai_score >= t.threshold AND m.return_5d_pct < 0)), 0), 2
+                ) AS profit_factor_5d,
+                ROUND(
+                    (COUNT(*) FILTER (WHERE m.ai_score >= t.threshold AND m.return_5d_pct > 0))::numeric /
+                    NULLIF(COUNT(*) FILTER (WHERE m.ai_score >= t.threshold AND m.return_5d_pct IS NOT NULL), 0) * 100, 1
+                ) AS win_rate_5d
+            FROM unnest(ARRAY[${THRESHOLDS.join(',')}]) AS t(threshold)
+            CROSS JOIN market_review_snapshots m
+            WHERE m.was_traded = false
+              AND m.scan_date >= CURRENT_DATE - ($1 * INTERVAL '1 day')
+            GROUP BY t.threshold
+            ORDER BY t.threshold
+        `, [days]);
+
+        // SPY's own forward return over the same scan dates — a "would we have beaten
+        // the market anyway" benchmark, not just an absolute return in isolation.
+        const spyBenchmarkRes = await query(`
+            WITH blocked_dates AS (
+                SELECT DISTINCT scan_date::date AS d
+                FROM market_review_snapshots
+                WHERE was_traded = false AND scan_date >= CURRENT_DATE - ($1 * INTERVAL '1 day')
+            ),
+            spy_fwd AS (
+                SELECT bd.d,
+                    (SELECT db.close FROM daily_bars db WHERE db.symbol = 'SPY' AND db.timestamp::date = bd.d ORDER BY db.timestamp DESC LIMIT 1) AS base_close,
+                    (SELECT db.close FROM daily_bars db WHERE db.symbol = 'SPY' AND db.timestamp::date > bd.d ORDER BY db.timestamp ASC OFFSET 4 LIMIT 1) AS fwd_5d_close
+                FROM blocked_dates bd
+            )
+            SELECT ROUND(AVG((fwd_5d_close - base_close) / NULLIF(base_close, 0) * 100)::numeric, 2) AS avg_spy_return_5d,
+                   COUNT(*) FILTER (WHERE fwd_5d_close IS NOT NULL) AS sample_days
+            FROM spy_fwd
+        `, [days]);
+
+        const dailyRes = await query(`
+            SELECT scan_date, regime,
+                COUNT(*) FILTER (WHERE ai_score >= 85) AS c85,
+                COUNT(*) FILTER (WHERE ai_score >= 90) AS c90,
+                COUNT(*) FILTER (WHERE ai_score >= 95) AS c95,
+                ROUND(AVG(return_5d_pct) FILTER (WHERE ai_score >= 85)::numeric, 2) AS avg_return_5d_85
+            FROM market_review_snapshots
+            WHERE was_traded = false
+              AND scan_date >= CURRENT_DATE - ($1 * INTERVAL '1 day')
+            GROUP BY scan_date, regime
+            ORDER BY scan_date DESC
+        `, [days]);
+
+        const topMissedRes = await query(`
+            SELECT scan_date, symbol, ai_score, sector, regime, price_at_scan,
+                   return_1d_pct, return_3d_pct, return_5d_pct
+            FROM market_review_snapshots
+            WHERE was_traded = false
+              AND ai_score >= 85
+              AND scan_date >= CURRENT_DATE - ($1 * INTERVAL '1 day')
+              AND return_5d_pct IS NOT NULL
+            ORDER BY return_5d_pct DESC
+            LIMIT 20
+        `, [days]);
+
+        const regimeRes = await query(`
+            SELECT COALESCE(regime, 'UNKNOWN') AS regime,
+                COUNT(DISTINCT scan_date) AS blocked_days,
+                COUNT(*) FILTER (WHERE ai_score >= 85) AS candidates_85,
+                ROUND(AVG(return_5d_pct) FILTER (WHERE ai_score >= 85)::numeric, 2) AS avg_return_5d_85
+            FROM market_review_snapshots
+            WHERE was_traded = false
+              AND scan_date >= CURRENT_DATE - ($1 * INTERVAL '1 day')
+            GROUP BY regime
+            ORDER BY blocked_days DESC
+        `, [days]);
+
+        res.json({
+            days,
+            byThreshold: byThresholdRes.rows.map(r => ({
+                threshold:      parseInt(r.threshold),
+                candidateCount: parseInt(r.candidate_count),
+                sample1d:       parseInt(r.sample_1d),
+                sample5d:       parseInt(r.sample_5d),
+                avgReturn1d:    r.avg_return_1d != null ? parseFloat(r.avg_return_1d) : null,
+                avgReturn3d:    r.avg_return_3d != null ? parseFloat(r.avg_return_3d) : null,
+                avgReturn5d:    r.avg_return_5d != null ? parseFloat(r.avg_return_5d) : null,
+                medianReturn5d: r.median_return_5d != null ? parseFloat(r.median_return_5d) : null,
+                stddevReturn5d: r.stddev_return_5d != null ? parseFloat(r.stddev_return_5d) : null,
+                winners5d:      parseInt(r.winners_5d || 0),
+                losers5d:       parseInt(r.losers_5d || 0),
+                avgWinner5d:    r.avg_winner_5d != null ? parseFloat(r.avg_winner_5d) : null,
+                avgLoser5d:     r.avg_loser_5d != null ? parseFloat(r.avg_loser_5d) : null,
+                profitFactor5d: r.profit_factor_5d != null ? parseFloat(r.profit_factor_5d) : null,
+                winRate5d:      r.win_rate_5d != null ? parseFloat(r.win_rate_5d) : null,
+            })),
+            spyBenchmark: {
+                avgReturn5d: spyBenchmarkRes.rows[0]?.avg_spy_return_5d != null ? parseFloat(spyBenchmarkRes.rows[0].avg_spy_return_5d) : null,
+                sampleDays:  parseInt(spyBenchmarkRes.rows[0]?.sample_days || 0),
+            },
+            dailyBreakdown: dailyRes.rows.map(r => ({
+                scanDate:      r.scan_date,
+                regime:        r.regime,
+                count85:       parseInt(r.c85),
+                count90:       parseInt(r.c90),
+                count95:       parseInt(r.c95),
+                avgReturn5d85: r.avg_return_5d_85 != null ? parseFloat(r.avg_return_5d_85) : null,
+            })),
+            topMissed: topMissedRes.rows.map(r => ({
+                scanDate:     r.scan_date,
+                symbol:       r.symbol,
+                aiScore:      parseFloat(r.ai_score),
+                sector:       r.sector,
+                regime:       r.regime,
+                priceAtScan:  r.price_at_scan != null ? parseFloat(r.price_at_scan) : null,
+                return1d:     r.return_1d_pct != null ? parseFloat(r.return_1d_pct) : null,
+                return3d:     r.return_3d_pct != null ? parseFloat(r.return_3d_pct) : null,
+                return5d:     r.return_5d_pct != null ? parseFloat(r.return_5d_pct) : null,
+            })),
+            byRegime: regimeRes.rows.map(r => ({
+                regime:        r.regime,
+                blockedDays:   parseInt(r.blocked_days),
+                candidates85:  parseInt(r.candidates_85),
+                avgReturn5d85: r.avg_return_5d_85 != null ? parseFloat(r.avg_return_5d_85) : null,
+            })),
+        });
+    } catch (err) {
+        const logger = require('../utils/logger');
+        logger.error('Skipped opportunities endpoint error', { error: err.message });
         res.status(500).json({ error: err.message });
     }
 });

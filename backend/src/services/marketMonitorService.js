@@ -56,12 +56,19 @@ async function getActiveUsers() {
     return res.rows;
 }
 
+// Genuine broadcasts (market open/close) — every active user sees the same
+// notice, plus admin gets exactly one copy (not one per recipient).
 async function alertAll(message) {
     const alertSvc = require('./telegramAlertService');
     const users    = await getActiveUsers();
-    for (const u of users) {
-        try { await alertSvc.sendMessage(u.id, message); } catch { /* never break on alert failure */ }
-    }
+    await alertSvc.broadcastToUsers(users.map(u => u.id), message);
+}
+
+// Ops-only (bot stall, error spikes) — references internal infra ("worker
+// process", "backend logs") an individual trader can't act on.
+async function alertAdmin(message) {
+    const alertSvc = require('./telegramAlertService');
+    await alertSvc.sendAdminMessage(message);
 }
 
 // ─── Check: bot activity ──────────────────────────────────────────────────────
@@ -251,7 +258,7 @@ async function runMonitorCycle() {
                 if (stalled.length) {
                     _botStallAlerted = true;
                     const detail = stalled.map(s => `${s.username}: last cycle ${s.ageMin} min ago`).join('\n');
-                    await alertAll(
+                    await alertAdmin(
                         `⚠️ *Bot Stall Detected*\n\nNo AI trading cycle in 15+ minutes during market hours.\n\n${detail}\n\n_Check the worker process — it may need a restart._`
                     );
                     logger.warn('[MarketMonitor] Bot stall alert sent', { stalled });
@@ -268,7 +275,7 @@ async function runMonitorCycle() {
                 if (hasCritical) issues.push('🔴 Critical errors detected');
                 if (has429)      issues.push('🟡 Rate-limit (429) errors — data may be delayed');
                 if (errorCount >= 10) issues.push(`🟠 ${errorCount} errors in last 10 min`);
-                await alertAll(
+                await alertAdmin(
                     `⚠️ *Application Error Alert*\n\n${issues.join('\n')}\n\n_Trading continues but data accuracy may be affected. Check backend logs._`
                 );
                 logger.warn('[MarketMonitor] Error spike alert sent', { errorCount, has429, hasCritical });

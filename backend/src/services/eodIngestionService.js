@@ -257,30 +257,12 @@ function detectSplit(todayOpen, lastClose) {
 
 // ── Telegram ─────────────────────────────────────────────────────────────────
 
+// Bar-ingestion completion is an ops concern (did the data pipeline run
+// cleanly?), not any individual trader's business — admin-only, single send.
 async function sendTelegramAlert(message) {
     try {
-        const token = process.env.TELEGRAM_BOT_TOKEN;
-        if (!token) return;
-        const users = await query(
-            `SELECT telegram_chat_id FROM users
-             WHERE ai_trading_enabled = true
-               AND telegram_chat_id IS NOT NULL
-               AND is_active = true`
-        );
-        for (const u of users.rows) {
-            await fetch(
-                `https://api.telegram.org/bot${token}/sendMessage`,
-                {
-                    method:  'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body:    JSON.stringify({
-                        chat_id:    u.telegram_chat_id,
-                        text:       message,
-                        parse_mode: 'HTML'
-                    })
-                }
-            ).catch(() => {});
-        }
+        const telegramAlertService = require('./telegramAlertService');
+        await telegramAlertService.sendAdminMessage(message, 'HTML');
     } catch { /* non-fatal — never block ingestion for a notification failure */ }
 }
 

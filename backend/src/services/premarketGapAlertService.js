@@ -183,9 +183,7 @@ async function runPremarketGapAlert() {
             logger.warn('[GapAlert] No active users found');
             return;
         }
-        await Promise.allSettled(
-            users.map(u => alertService.sendMessage(u.id, message).catch(() => {}))
-        );
+        await alertService.broadcastToUsers(users.map(u => u.id), message);
         logger.info('[GapAlert] Alert sent', {
             users: users.length, chasing: chasing.length,
             valid: valid.length, below: below.length

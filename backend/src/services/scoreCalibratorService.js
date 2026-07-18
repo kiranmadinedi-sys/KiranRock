@@ -589,7 +589,7 @@ async function sendCalibrationToTelegram(userId, report, currentMinBuyScore) {
             actionSection,
         ].filter(l => l !== '').join('\n');
 
-        await alertService.sendMessageToUser(userId, msg);
+        await alertService.sendMessage(userId, msg);
     } catch (err) {
         logger.warn('[ScoreCalibrator] Failed to send Telegram suggestion', { userId, error: err.message });
     }

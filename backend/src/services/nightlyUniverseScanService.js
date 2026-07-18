@@ -351,15 +351,10 @@ async function runNightlyUniverseScan(opts = {}) {
         const failureRate  = universe.length > 0 ? failed  / universe.length : 0;
         if (coverageRate < 0.85 || failureRate > 0.15) {
             try {
-                const usersRes = await query(
-                    `SELECT id FROM users WHERE ai_trading_enabled = true AND telegram_chat_id IS NOT NULL`
-                );
-                for (const u of usersRes.rows) {
-                    await alertService.alertNightlyScanFailure(u.id, {
-                        analyzed, universe: universe.length, failed,
-                        reason: failureRate > 0.15 ? 'High error rate — check data provider' : 'Low coverage'
-                    });
-                }
+                await alertService.alertNightlyScanFailure({
+                    analyzed, universe: universe.length, failed,
+                    reason: failureRate > 0.15 ? 'High error rate — check data provider' : 'Low coverage'
+                });
             } catch (_) {}
         }
 
@@ -480,12 +475,9 @@ async function runNightlyUniverseScan(opts = {}) {
         console.error('[NightlyScan] Fatal error:', err.message);
         // Fatal error alert
         try {
-            const usersRes = await query(`SELECT id FROM users WHERE ai_trading_enabled = true AND telegram_chat_id IS NOT NULL`);
-            for (const u of usersRes.rows) {
-                await alertService.alertNightlyScanFailure(u.id, {
-                    analyzed, universe: 0, failed, reason: `Fatal: ${err.message.slice(0, 100)}`
-                });
-            }
+            await alertService.alertNightlyScanFailure({
+                analyzed, universe: 0, failed, reason: `Fatal: ${err.message.slice(0, 100)}`
+            });
         } catch (_) {}
         return { analyzed, passed, filtered, failed, date: today, error: err.message };
     } finally {

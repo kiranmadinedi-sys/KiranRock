@@ -114,9 +114,7 @@ async function _broadcast(vix, prevVix, pctChange, levelName) {
             '_Market regime + ATLAS recalculating now._',
         ].join('\n');
 
-        await Promise.allSettled(
-            users.map(u => _alert().sendMessage(u.id, msg).catch(() => {}))
-        );
+        await _alert().broadcastToUsers(users.map(u => u.id), msg);
         logger.info('[VIXMonitor] Broadcast sent', { levelName, vix, users: users.length });
     } catch (err) {
         logger.warn('[VIXMonitor] Broadcast failed', { error: err.message });

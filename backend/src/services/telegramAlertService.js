@@ -11,6 +11,12 @@ const wa = require('./whatsappAlertService'); // parallel WhatsApp channel — f
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TELEGRAM_API_URL = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 
+// Admin (kmadined) needs end-to-end visibility regardless of whether the
+// user an alert is about has connected their own Telegram yet — most users
+// don't have a telegram_chat_id set at all today, so without this, the
+// admin would see nothing about their trades until they individually link.
+const ADMIN_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
+
 /**
  * Send Telegram message
  * @param {string} chatId - Telegram chat ID
@@ -25,11 +31,16 @@ async function sendTelegramMessage(chatId, message, parseMode = 'Markdown') {
         }
 
         try {
+            // These calls are awaited directly in the trading bot's critical path
+            // (right after a trade executes, before it moves to the next stock) —
+            // axios has no default timeout, so a slow/hung Telegram API could stall
+            // the trading cycle indefinitely. Bounded here so a Telegram outage can
+            // only ever cost a few seconds, never contribute to a cycle timeout.
             const response = await axios.post(`${TELEGRAM_API_URL}/sendMessage`, {
                 chat_id: chatId,
                 text: message,
                 parse_mode: parseMode
-            });
+            }, { timeout: 8000 });
             logger.info('Telegram alert sent', { chatId, success: response.data.ok });
             return response.data.ok;
         } catch (err) {
@@ -40,7 +51,7 @@ async function sendTelegramMessage(chatId, message, parseMode = 'Markdown') {
                 const plain = await axios.post(`${TELEGRAM_API_URL}/sendMessage`, {
                     chat_id: chatId,
                     text: message.replace(/[*_`\[\]]/g, '')   // strip Markdown symbols
-                });
+                }, { timeout: 8000 });
                 logger.info('Telegram alert sent (plain fallback)', { chatId, success: plain.data.ok });
                 return plain.data.ok;
             }
@@ -88,12 +99,56 @@ async function getUserInfo(userId) {
 }
 
 /**
+ * Sends to the user's own chat (if linked) AND always also to the admin
+ * chat, so kmadined keeps full visibility regardless of whether the user an
+ * alert concerns has connected their own Telegram yet. Skips the duplicate
+ * when the user's own chat already IS the admin chat (kmadined's own
+ * alerts, or the "user" test account which currently shares kmadined's
+ * chat ID).
+ */
+async function sendToUserAndAdmin(chatId, message) {
+    const sends = [];
+    if (chatId) sends.push(sendTelegramMessage(chatId, message));
+    if (ADMIN_CHAT_ID && ADMIN_CHAT_ID !== chatId) sends.push(sendTelegramMessage(ADMIN_CHAT_ID, message));
+    await Promise.all(sends);
+}
+
+/**
+ * Admin-only, single send — for operational/system status messages (cache
+ * warmed, ingestion complete, scan health) that concern running the platform,
+ * not any individual trader's account. Never loop this over every user.
+ */
+async function sendAdminMessage(message, parseMode = 'Markdown') {
+    if (!ADMIN_CHAT_ID) return false;
+    return sendTelegramMessage(ADMIN_CHAT_ID, message, parseMode);
+}
+
+/**
+ * Sends the SAME message to each of the given users' own chats, plus exactly
+ * ONE copy to admin — for genuine broadcasts (market open/close, VIX spikes,
+ * pre-market gap briefings) where every recipient sees identical content.
+ * Looping sendMessage()/sendToUserAndAdmin() per user here would cc admin
+ * once per recipient instead of once total.
+ */
+async function broadcastToUsers(userIds, message) {
+    const sends = userIds.map(async (userId) => {
+        const chatId = await getUserTelegramChatId(userId);
+        if (chatId && chatId !== ADMIN_CHAT_ID) {
+            await sendTelegramMessage(chatId, message).catch(() => {});
+        }
+    });
+    sends.push(sendAdminMessage(message));
+    await Promise.allSettled(sends);
+}
+
+/**
  * Send a plain message to a user's Telegram (used by scheduler & health check).
  */
 async function sendMessage(userId, message) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return false;
-    return sendTelegramMessage(chatId, message);
+    if (!chatId && !ADMIN_CHAT_ID) return false;
+    await sendToUserAndAdmin(chatId, message);
+    return true;
 }
 
 // 60-second cache: multiple alerts firing in the same event (BUY + stop-loss cascade)
@@ -138,7 +193,7 @@ async function getHoldingsLine(userId) {
  */
 async function alertLargeLoss(userId, symbol, percentLoss, currentPrice, purchasePrice) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     const [holdingsLine, { display }] = await Promise.all([getHoldingsLine(userId), getUserInfo(userId)]);
     const message = `
@@ -155,7 +210,7 @@ ${holdingsLine}
 ⚠️ Consider reviewing your position
 `;
 
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
     wa.alertLargeLoss(userId, symbol, percentLoss, currentPrice, purchasePrice).catch(() => {});
     logger.riskEvent('LARGE_LOSS', symbol, { percentLoss, currentPrice, purchasePrice });
 }
@@ -165,7 +220,7 @@ ${holdingsLine}
  */
 async function alertStopLossTriggered(userId, symbol, shares, sellPrice, loss) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     const [holdingsLine, { display }] = await Promise.all([getHoldingsLine(userId), getUserInfo(userId)]);
     const message = `
@@ -181,7 +236,7 @@ ${holdingsLine}
 ✅ Position closed to prevent further loss
 `;
 
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
     wa.alertStopLossTriggered(userId, symbol, shares, sellPrice, loss).catch(() => {});
 }
 
@@ -190,7 +245,7 @@ ${holdingsLine}
  */
 async function alertTakeProfitExecuted(userId, symbol, shares, sellPrice, profit, percentGain) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     const [holdingsLine, { display }] = await Promise.all([getHoldingsLine(userId), getUserInfo(userId)]);
     const message = `
@@ -206,7 +261,7 @@ ${holdingsLine}
 🎉 Target reached!
 `;
 
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
     wa.alertTakeProfitExecuted(userId, symbol, shares, sellPrice, profit, percentGain).catch(() => {});
 }
 
@@ -215,7 +270,7 @@ ${holdingsLine}
  */
 async function alertDailyLossWarning(userId, dailyLoss, limit) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     const percentOfLimit = (Math.abs(dailyLoss) / Math.abs(limit)) * 100;
     const { display } = await getUserInfo(userId);
@@ -231,7 +286,7 @@ Used: ${percentOfLimit.toFixed(1)}%
 🚨 AI trading will stop if limit is reached
 `;
 
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
 }
 
 /**
@@ -239,7 +294,7 @@ Used: ${percentOfLimit.toFixed(1)}%
  */
 async function alertDailyLossLimitReached(userId, dailyLoss) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     const { display } = await getUserInfo(userId);
     const message = `
@@ -255,7 +310,7 @@ Today's Loss: $${Math.abs(dailyLoss).toFixed(2)}
 Will resume tomorrow at market open.
 `;
 
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
     wa.alertDailyLossLimitReached(userId, dailyLoss).catch(() => {});
     logger.error('Daily loss limit reached', { userId, dailyLoss });
 }
@@ -265,7 +320,7 @@ Will resume tomorrow at market open.
  */
 async function alertHighVIX(userId, vixLevel) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     const { display } = await getUserInfo(userId);
     const message = `
@@ -281,7 +336,7 @@ VIX Level: ${vixLevel.toFixed(2)}
 Existing positions are being monitored.
 `;
 
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
 }
 
 /**
@@ -289,7 +344,7 @@ Existing positions are being monitored.
  */
 async function alertTradingStarted(userId, balance, holdings) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     const [holdingsLine, { display }] = await Promise.all([getHoldingsLine(userId), getUserInfo(userId)]);
     const message = `
@@ -304,7 +359,7 @@ ${holdingsLine}
 ✅ Bot is analyzing market opportunities...
 `;
 
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
 }
 
 /**
@@ -312,7 +367,7 @@ ${holdingsLine}
  */
 async function alertTradeExecuted(userId, action, symbol, shares, price, aiScore, reasoning) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     const emoji = action === 'BUY' ? '✅' : '📤';
     const total = shares * price;
@@ -332,7 +387,7 @@ ${holdingsLine}
 ${reasoning ? `📝 ${reasoning}` : ''}
 `;
 
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
     wa.alertTradeExecuted(userId, action, symbol, shares, price, aiScore, reasoning).catch(() => {});
 }
 
@@ -341,7 +396,7 @@ ${reasoning ? `📝 ${reasoning}` : ''}
  */
 async function alertNoOpportunities(userId, scanned, vixLevel) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     // Only send this alert once per day to avoid spam
     const today = new Date().toDateString();
@@ -366,7 +421,7 @@ No qualifying opportunities at this time.
 Bot will continue monitoring.
 `;
 
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
     
     if (!global.sentAlerts) global.sentAlerts = {};
     global.sentAlerts[lastAlertKey] = true;
@@ -377,7 +432,7 @@ Bot will continue monitoring.
  */
 async function alertDailySummary(userId, stats) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     const { trades, profitTrades, lossTrades, totalProfit, winRate, bestTrade, worstTrade } = stats;
     const [holdingsLine, { display }] = await Promise.all([getHoldingsLine(userId), getUserInfo(userId)]);
@@ -399,7 +454,7 @@ ${holdingsLine}
 ${totalProfit > 0 ? '🎉 Profitable day!' : totalProfit < 0 ? '💪 Tomorrow is another day' : '➡️ Break even'}
 `;
 
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
 }
 
 /**
@@ -407,7 +462,7 @@ ${totalProfit > 0 ? '🎉 Profitable day!' : totalProfit < 0 ? '💪 Tomorrow is
  */
 async function alertOptionsTradeExecuted(userId, tradeDetails) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     const { action, symbol, contracts, strike, expiration, optionType, price, totalCost, strategy, greeks } = tradeDetails;
     const { display } = await getUserInfo(userId);
@@ -442,7 +497,7 @@ Strategy: ${strategy}
 • Vega: ${greeks.vega.toFixed(3)}
 `;
 
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
 }
 
 /**
@@ -450,7 +505,7 @@ Strategy: ${strategy}
  */
 async function alertCreditSpreadExecuted(userId, spreadDetails) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     const { type, symbol, contracts, shortLeg, longLeg, credit, maxRisk, returnOnRisk, expiration } = spreadDetails;
     const { display } = await getUserInfo(userId);
@@ -476,7 +531,7 @@ Return on Risk: ${returnOnRisk.toFixed(1)}%
 🎯 Probability of profit: ~${(100 - Math.abs(shortLeg.greeks.delta) * 100).toFixed(0)}%
 `;
 
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
 }
 
 /**
@@ -484,7 +539,7 @@ Return on Risk: ${returnOnRisk.toFixed(1)}%
  */
 async function alertOptionsPositionClosed(userId, closeDetails) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     const { symbol, strike, expiration, contracts, entryPrice, exitPrice, pnl, pnlPercent, reason } = closeDetails;
     const { display } = await getUserInfo(userId);
@@ -513,7 +568,7 @@ P&L: $${pnl.toFixed(2)} (${pnlPercent.toFixed(1)}%)
 Reason: ${reason.replace(/_/g, ' ')}
 `;
 
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
 }
 
 /**
@@ -521,7 +576,7 @@ Reason: ${reason.replace(/_/g, ' ')}
  */
 async function alertOptionsBotStarted(userId, config) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     const { balance, strategies, maxPositions, vix } = config;
     const { display } = await getUserInfo(userId);
@@ -544,21 +599,24 @@ Max Positions: ${maxPositions}
 🔍 Scanning for opportunities...
 `;
 
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
 }
 
 /**
  * Alert: Nightly universe scan failed or had low coverage.
  */
-async function alertNightlyScanFailure(userId, { analyzed, universe, failed, reason }) {
-    const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+/**
+ * Admin-only — overnight universe scan coverage/health is an operational
+ * concern (data-provider issues, scan infra), not something an individual
+ * trader needs to see or act on. Previously this looped over every enrolled
+ * user and sent each of them the identical system-wide message.
+ */
+async function alertNightlyScanFailure({ analyzed, universe, failed, reason }) {
+    if (!ADMIN_CHAT_ID) return;
 
     const coveragePct = universe > 0 ? ((analyzed / universe) * 100).toFixed(1) : '0';
-    const { display } = await getUserInfo(userId);
     const message = `
 🚨 *NIGHTLY SCAN WARNING*
-👤 User: ${display}
 
 📊 Universe expected: ${universe}
 ✅ Analyzed: ${analyzed} (${coveragePct}% coverage)
@@ -569,7 +627,7 @@ ${reason ? `Reason: ${reason}` : ''}
 ⚠️ Market-hours scan may fall back to live analysis.
 Check server logs for details.
 `;
-    await sendTelegramMessage(chatId, message);
+    await sendTelegramMessage(ADMIN_CHAT_ID, message);
 }
 
 /**
@@ -577,7 +635,7 @@ Check server logs for details.
  */
 async function alertEdgeGateBlocked(userId, opportunityCount) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     // Rate-limit to once per day — cycle runs every 30 min, no need to spam
     const todayKey = `edge_gate_${userId}_${new Date().toDateString()}`;
@@ -598,7 +656,7 @@ Bot continues monitoring and managing exits.
 
 ${holdingsLine}
 `;
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
 }
 
 /**
@@ -606,7 +664,7 @@ ${holdingsLine}
  */
 async function alertDistressModeRecovery(userId) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     const [holdingsLine, { display }] = await Promise.all([getHoldingsLine(userId), getUserInfo(userId)]);
     const message = `
@@ -619,7 +677,7 @@ Normal stop-loss (-7%) has been restored.
 ${holdingsLine}
 Monitoring continues as usual.
 `;
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
 }
 
 /**
@@ -628,7 +686,7 @@ Monitoring continues as usual.
  */
 async function alertOptionsSignalEntry(userId, details) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     const {
         symbol, stockPrice, momentum, score, regime,
@@ -682,7 +740,7 @@ Price: $${Number(price).toFixed(2)}/contract
 Contracts: ${contracts} | Cost: $${Number(totalCost).toFixed(2)}
 `;
 
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
     wa.alertOptionsSignalEntry(userId, details).catch(() => {});
 }
 
@@ -691,7 +749,7 @@ Contracts: ${contracts} | Cost: $${Number(totalCost).toFixed(2)}
  */
 async function alertHighIVRank(userId, symbol, ivRank, strategy) {
     const chatId = await getUserTelegramChatId(userId);
-    if (!chatId) return;
+    if (!chatId && !ADMIN_CHAT_ID) return;
 
     const { display } = await getUserInfo(userId);
     const message = `
@@ -706,13 +764,16 @@ ${ivRank > 70 ? '💰 Great for selling premium (credit spreads)' : '⚡ Good fo
 Recommended: ${strategy}
 `;
 
-    await sendTelegramMessage(chatId, message);
+    await sendToUserAndAdmin(chatId, message);
 }
 
 module.exports = {
     sendTelegramMessage,
     sendMessage,
+    sendAdminMessage,
+    broadcastToUsers,
     getUserTelegramChatId,
+    getUserInfo,
     invalidateHoldingsCache,
     alertLargeLoss,
     alertStopLossTriggered,

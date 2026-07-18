@@ -185,9 +185,9 @@ async function collectOptionsChains() {
 
     logger.info('[Options Prewarm] Collection complete', { succeeded, failed });
 
-    // Send a single Telegram summary to all active users
+    // Cache-warming status is an ops concern (is the bot ready for open?), not
+    // any individual trader's business — admin-only, single send.
     try {
-        const users = await getActiveOptionsBotUsers();
         const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
         const failLine = failures.length > 0 ? `\n❌ Failed: ${failures.join(', ')}` : '';
         const message =
@@ -197,9 +197,7 @@ async function collectOptionsChains() {
             failLine +
             `\n\nBot is ready for market open.`;
 
-        for (const user of users) {
-            await telegramAlertService.sendMessage(user.id, message);
-        }
+        await telegramAlertService.sendAdminMessage(message);
     } catch (alertError) {
         logger.warn('[Options Prewarm] Telegram summary failed', { error: alertError.message });
     }

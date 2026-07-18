@@ -4,6 +4,11 @@ const stockFeedService = require('./stockFeedService');
 const stockSignalSnapshotService = require('./stockSignalSnapshotService');
 const { sendTelegramMessage } = require('./telegramService');
 
+// Admin (kmadined) keeps seeing every user's news/signal alerts even once
+// each user diverges onto their own linked chat — mirrors the same cc
+// pattern used for trade alerts in telegramAlertService.js.
+const ADMIN_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
+
 const MARKET_INTERVAL_MS = Math.max(60 * 1000, Number.parseInt(process.env.STOCK_SIGNAL_MARKET_INTERVAL_MS || `${5 * 60 * 1000}`, 10) || (5 * 60 * 1000));
 const OFF_HOURS_INTERVAL_MS = Math.max(5 * 60 * 1000, Number.parseInt(process.env.STOCK_SIGNAL_OFF_HOURS_INTERVAL_MS || `${30 * 60 * 1000}`, 10) || (30 * 60 * 1000));
 const MAX_SIGNALS_PER_USER_PER_CYCLE = Math.max(1, Number.parseInt(process.env.STOCK_SIGNAL_MAX_PER_USER || '3', 10) || 3);
@@ -282,7 +287,12 @@ function buildTelegramOptions(item) {
 
 async function sendItemToTelegram(user, item) {
     const message = buildTelegramMessage(item);
-    await sendTelegramMessage(user.telegram_chat_id, message, buildTelegramOptions(item));
+    const options = buildTelegramOptions(item);
+    const sends = [sendTelegramMessage(user.telegram_chat_id, message, options)];
+    if (ADMIN_CHAT_ID && ADMIN_CHAT_ID !== user.telegram_chat_id) {
+        sends.push(sendTelegramMessage(ADMIN_CHAT_ID, message, options).catch(() => {}));
+    }
+    await Promise.all(sends);
     // Record after successful send — isolated so a DB error never causes a re-send
     try {
         await recordDelivered(user.id, item);

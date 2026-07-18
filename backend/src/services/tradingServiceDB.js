@@ -27,8 +27,12 @@ const getCurrentPrice = async (symbol) => {
  */
 const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', aiScore = null, sector = null, notes = null, fillPrice = null, entryRegime = null, atr = null) => {
     try {
-        if (quantity <= 0 || !Number.isInteger(quantity)) {
-            throw new Error('Quantity must be a positive integer');
+        // Fractional (notional) buys from brokerService.buyFractional() fill with a decimal
+        // quantity — only whole shares used to reach here, so this rejected every fractional
+        // fill outright (order executed on the broker, DB write failed, silently caught in
+        // brokerService.js and left for the reconciler to find later as a SHADOW position).
+        if (!(quantity > 0)) {
+            throw new Error('Quantity must be positive');
         }
         
         // Get current price
@@ -200,8 +204,8 @@ const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', 
  */
 const executeSellOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', notes = null, fillPrice = null) => {
     try {
-        if (quantity <= 0 || !Number.isInteger(quantity)) {
-            throw new Error('Quantity must be a positive integer');
+        if (!(quantity > 0)) {
+            throw new Error('Quantity must be positive');
         }
 
         // Use broker-confirmed fill price when available; fall back to live quote only when needed.
@@ -248,8 +252,10 @@ const executeSellOrder = async (userId, symbol, quantity, executedBy = 'MANUAL',
             
             // Update or delete holding
             const remainingQuantity = holding.quantity - quantity;
-            
-            if (remainingQuantity === 0) {
+
+            // Fractional (notional) positions rarely land on an exact 0 after floating-point
+            // subtraction — treat anything under half a millionth of a share as fully closed.
+            if (Math.abs(remainingQuantity) < 1e-6) {
                 await client.query(
                     'DELETE FROM holdings WHERE user_id = $1 AND symbol = $2',
                     [userId, symbol.toUpperCase()]

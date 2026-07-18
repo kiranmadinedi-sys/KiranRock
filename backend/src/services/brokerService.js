@@ -342,13 +342,21 @@ const alpacaBroker = (() => {
             extra: { stopPrice, targetPrice }
         });
 
+        // GTC, not day — Alpaca applies one time_in_force to the whole bracket (entry + both
+        // exit legs), so 'day' meant the stop-loss/take-profit expired together at market
+        // close (OCO-linked) even after the entry filled, leaving live positions naked
+        // overnight until trailingStopService's next cycle happened to notice (confirmed via
+        // Alpaca order history 2026-07-18: ROP/TOST/TMUS legs all expired/canceled ~20:05 UTC
+        // the day they were bought). An unfilled entry under GTC would otherwise sit open for
+        // days, but eodCancelPartialFills() already sweeps any still-open BUY-side order every
+        // trading day at 15:45 ET regardless of TIF, so that risk isn't new.
         const order = await client.createOrder({
             symbol,
             qty:           quantity,
             side:          'buy',
             type:          'limit',
             limit_price:   entryLimit,
-            time_in_force: 'day',
+            time_in_force: 'gtc',
             order_class:   'bracket',
             stop_loss:     { stop_price: stopPrice },
             take_profit:   { limit_price: targetPrice }

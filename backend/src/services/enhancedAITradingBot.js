@@ -970,11 +970,11 @@ async function checkMaxDrawdown(userId, currentPortfolioValue) {
             logger.error('[DrawdownBreaker] HALT — max drawdown exceeded', {
                 userId, drawdownPct: drawdownPct.toFixed(2), limit: HALT_PCT
             });
-            await alertService.sendAlert(
+            alertService.sendMessage(userId,
                 `🚨 *DRAWDOWN HALT (Level 3)*\n` +
                 `Portfolio dropped ${drawdownPct.toFixed(1)}% from peak ($${peak.toFixed(0)} → $${currentPortfolioValue.toFixed(0)})\n` +
                 `Limit: ${HALT_PCT}% — *All new buys halted. Manage exits only.*`
-            );
+            ).catch(() => {});
             return { halt: true, paperOnly: true, reduceSizing: true, drawdownPct };
         }
 
@@ -983,11 +983,11 @@ async function checkMaxDrawdown(userId, currentPortfolioValue) {
             logger.warn('[DrawdownBreaker] PAPER — drawdown exceeds reduce threshold, live buys blocked', {
                 userId, drawdownPct: drawdownPct.toFixed(2), limit: PAPER_PCT
             });
-            await alertService.sendAlert(
+            alertService.sendMessage(userId,
                 `⚠️ *DRAWDOWN PAPER MODE (Level 2)*\n` +
                 `Portfolio dropped ${drawdownPct.toFixed(1)}% from peak.\n` +
                 `Live new buys blocked until recovery above ${PAPER_PCT}%.`
-            );
+            ).catch(() => {});
             return { halt: false, paperOnly: true, reduceSizing: true, drawdownPct };
         }
 
@@ -1021,11 +1021,11 @@ async function checkDailyLossLimit(userId, riskConfig, totalPortfolioValue = 0) 
 
         if (dailyLoss <= lossLimit) {
             logger.error('Daily loss limit reached', { userId, dailyLoss, lossLimit, accountValue: totalPortfolioValue });
-            await alertService.alertDailyLossLimitReached(userId, dailyLoss);
+            alertService.alertDailyLossLimitReached(userId, dailyLoss).catch(() => {});
             return true;
         }
         if (dailyLoss <= lossLimit * 0.75) {
-            await alertService.alertDailyLossWarning(userId, dailyLoss, lossLimit);
+            alertService.alertDailyLossWarning(userId, dailyLoss, lossLimit).catch(() => {});
         }
         return false;
     } catch (error) {
@@ -1042,12 +1042,12 @@ async function checkWeeklyLossLimit(userId, totalPortfolioValue, sessionRiskConf
             logger.error('[SHIELD] Weekly loss limit hit — halting trading until Monday', {
                 userId, weeklyPnl: weeklyPnl.toFixed(2), limit: weeklyLimit.toFixed(2)
             });
-            await alertService.sendAlert(
+            alertService.sendMessage(userId,
                 `🚨 *WEEKLY LOSS LIMIT REACHED*\n` +
                 `Week P&L: $${weeklyPnl.toFixed(0)} (limit: $${weeklyLimit.toFixed(0)})\n` +
                 `Portfolio: $${totalPortfolioValue.toFixed(0)}\n` +
                 `*All new trades halted until Monday.*`
-            );
+            ).catch(() => {});
             return true;
         }
         if (weeklyPnl <= weeklyLimit * 0.75) {
@@ -2716,12 +2716,10 @@ async function executeAutonomousTrading(userId) {
                     '',
                     `VIX: ${regime.vixLevel || '?'} | Score floor: ${regime.minBuyScore || '?'}`
                 ].join('\n');
-                try {
-                    await alertService.sendMessage(userId, shiftMsg);
-                    logger.info('[RegimeShift] Alert sent', {
-                        userId, from: prevKey, to: curKey
-                    });
-                } catch (_alertErr) {}
+                alertService.sendMessage(userId, shiftMsg).catch(() => {});
+                logger.info('[RegimeShift] Alert queued', {
+                    userId, from: prevKey, to: curKey
+                });
             }
             _lastRegimePerUser.set(userId, {
                 regime: regime.regime,
@@ -2863,7 +2861,7 @@ async function executeAutonomousTrading(userId) {
         // Check consecutive loss streak circuit breaker
         const streakBreaker = await checkLossStreakBreaker(userId);
         if (streakBreaker.halt) {
-            await alertService.alertTradingStarted(userId, 0, 0); // reuse for now — sends info
+            alertService.alertTradingStarted(userId, 0, 0).catch(() => {}); // reuse for now — sends info
             logger.error('[CircuitBreaker] Trading halted due to consecutive loss streak', {
                 userId, streak: streakBreaker.streak
             });
@@ -2926,7 +2924,7 @@ async function executeAutonomousTrading(userId) {
             if (_todayStops >= _stopHaltThreshold || _lossHaltFired) {
                 const reason = _lossHaltFired ? _lossHaltMsg : `${_todayStops} stop-losses fired today (limit: ${_stopHaltThreshold})`;
                 logger.warn('[DailyCircuitBreaker] Halting new entries', { userId, reason });
-                await alertService.sendMessage(userId,
+                alertService.sendMessage(userId,
                     `⚠️ *Daily Circuit Breaker Triggered*\n${reason}\n` +
                     `_No new entries until tomorrow — managing open positions only._`
                 ).catch(() => {});
@@ -3052,7 +3050,7 @@ async function executeAutonomousTrading(userId) {
         const _lastSent = _tradingStartedLastSent.get(userId) || 0;
         if (Date.now() - _lastSent >= 3600_000) {
             _tradingStartedLastSent.set(userId, Date.now());
-            await alertService.alertTradingStarted(userId, availableBalance, currentHoldings.length);
+            alertService.alertTradingStarted(userId, availableBalance, currentHoldings.length).catch(() => {});
         }
 
         // VIX Spike Monitor — halt immediately on EXTREME/PANIC spike (fast moves
@@ -3073,7 +3071,7 @@ async function executeAutonomousTrading(userId) {
         // Check VIX - reduce trading if too volatile
         if (vixLevel > sessionRiskConfig.maxVix) {
             logger.warn('VIX too high, skipping new purchases', { userId, vixLevel: vixLevel.toFixed(2) });
-            await alertService.alertHighVIX(userId, vixLevel);
+            alertService.alertHighVIX(userId, vixLevel).catch(() => {});
             // Still check for stop-loss and exits
             await manageExistingPositions(userId);
             return { success: false, message: `Market too volatile (VIX: ${vixLevel.toFixed(2)})` };
@@ -3092,17 +3090,15 @@ async function executeAutonomousTrading(userId) {
                 logger.error('[SENTINEL] Live-readiness gate blocked new buys (exits already managed)', {
                     userId, reason: readiness.reason, blockers: readiness.blockers
                 });
-                try {
-                    await alertService.sendMessage(userId,
-                        `⛔ *SENTINEL: New Buys Blocked*\n` +
-                        `_${readiness.reason}_\n\n` +
-                        Object.entries(readiness.blockers)
-                            .filter(([, v]) => v > 0)
-                            .map(([k, v]) => `  • ${k}: ${v}`)
-                            .join('\n') +
-                        `\n\n_Exits still managed. Resolve the issue then restart the bot._`
-                    );
-                } catch (_) {}
+                alertService.sendMessage(userId,
+                    `⛔ *SENTINEL: New Buys Blocked*\n` +
+                    `_${readiness.reason}_\n\n` +
+                    Object.entries(readiness.blockers)
+                        .filter(([, v]) => v > 0)
+                        .map(([k, v]) => `  • ${k}: ${v}`)
+                        .join('\n') +
+                    `\n\n_Exits still managed. Resolve the issue then restart the bot._`
+                ).catch(() => {});
                 return { success: false, message: `SENTINEL gate: ${readiness.reason}` };
             }
         }
@@ -3158,7 +3154,7 @@ async function executeAutonomousTrading(userId) {
 
         if (opportunities.length === 0) {
             logger.info('No qualifying opportunities found', { userId, vixLevel });
-            await alertService.alertNoOpportunities(userId, opportunities._scanned || 0, vixLevel);
+            alertService.alertNoOpportunities(userId, opportunities._scanned || 0, vixLevel).catch(() => {});
             return { success: true, message: 'No opportunities meet criteria' };
         }
 
@@ -3175,7 +3171,7 @@ async function executeAutonomousTrading(userId) {
             });
             _bumpGateStat(userId, 'edgeGate');
             // Operator awareness: alert once per day so the user knows no trades were opened
-            try { await alertService.alertEdgeGateBlocked(userId, newOpportunities.length); } catch (_) {}
+            alertService.alertEdgeGateBlocked(userId, newOpportunities.length).catch(() => {});
             await manageExistingPositions(userId);
             return { success: true, message: 'No high-conviction opportunities — exits managed' };
         }
@@ -4060,7 +4056,7 @@ async function executeAutonomousTrading(userId) {
                     }
 
                     const partialNote = actualShares < shares ? ` (partial: ${actualShares}/${shares})` : '';
-                    await alertService.alertTradeExecuted(
+                    alertService.alertTradeExecuted(
                         userId,
                         'BUY',
                         opportunity.symbol,
@@ -4068,7 +4064,7 @@ async function executeAutonomousTrading(userId) {
                         filledPrice,
                         opportunity.aiScore,
                         aiReasoning + partialNote
-                    );
+                    ).catch(() => {});
 
                     // Record performance
                     await performanceService.recordTradePerformance(userId, {
@@ -4307,7 +4303,7 @@ async function manageExistingPositions(userId) {
             _bumpGateStat(userId, 'distressMode');
         } else if (!isNowInDistress && wasInDistress) {
             logger.info('[DistressMode] Recovery — portfolio stress eased, normal stop-loss restored', { userId });
-            try { await alertService.alertDistressModeRecovery(userId); } catch (_) {}
+            alertService.alertDistressModeRecovery(userId).catch(() => {});
         }
 
         // ── Per-cycle stop verification & stale-stop repair ──────────────────────
@@ -4363,9 +4359,9 @@ async function manageExistingPositions(userId) {
                         } else {
                             await brokerService.placeStopOrder(userId, sym, qty, expectedStop);
                             logger.warn('[StopRepair] Missing stop — placed new GTC stop', { userId, sym, expectedStop, qty });
-                            await alertService.sendMessage(userId,
+                            alertService.sendMessage(userId,
                                 `🛡️ *Stop Repaired* — ${sym}\nStop was missing; placed GTC stop @ $${expectedStop.toFixed(2)}`
-                            );
+                            ).catch(() => {});
                         }
                     } catch (placeErr) {
                         logger.error('[StopRepair] Failed to place stop', { userId, sym, err: placeErr.message });
@@ -4519,7 +4515,7 @@ async function manageExistingPositions(userId) {
 
                 // Alert on large unrealized loss
                 if (changePercent <= -0.10 && !holding.large_loss_alerted) {
-                    await alertService.alertLargeLoss(userId, holding.symbol, changePercent * 100, currentPrice, purchasePrice);
+                    alertService.alertLargeLoss(userId, holding.symbol, changePercent * 100, currentPrice, purchasePrice).catch(() => {});
                 }
 
                 // Earnings proximity exit: if earnings are ≤2 days away, exit the position now.
@@ -4536,13 +4532,11 @@ async function manageExistingPositions(userId) {
                                 daysToEarnings: _earningsDte,
                                 gainPct: (changePercent * 100).toFixed(2)
                             });
-                            try {
-                                await alertService.sendMessage(userId,
-                                    `⚠️ *Earnings Exit* — ${holding.symbol}\n` +
-                                    `Earnings in ${_earningsDte} day(s) — closing to avoid gap risk\n` +
-                                    `_Current P&L: ${changePercent >= 0 ? '+' : ''}${(changePercent * 100).toFixed(2)}%_`
-                                );
-                            } catch (_) {}
+                            alertService.sendMessage(userId,
+                                `⚠️ *Earnings Exit* — ${holding.symbol}\n` +
+                                `Earnings in ${_earningsDte} day(s) — closing to avoid gap risk\n` +
+                                `_Current P&L: ${changePercent >= 0 ? '+' : ''}${(changePercent * 100).toFixed(2)}%_`
+                            ).catch(() => {});
                         }
                     } catch (_earningsErr) { /* non-blocking — if lookup fails, hold the position */ }
                 }
@@ -4586,7 +4580,7 @@ async function manageExistingPositions(userId) {
                     shouldSell = true;
                     reason = `Take-profit target reached at ${(changePercent * 100).toFixed(2)}% [regime: ${exitThresholds.regime}]`;
                     const profit = (currentPrice - purchasePrice) * sellQuantity;
-                    await alertService.alertTakeProfitExecuted(userId, holding.symbol, sellQuantity, currentPrice, profit, changePercent * 100);
+                    alertService.alertTakeProfitExecuted(userId, holding.symbol, sellQuantity, currentPrice, profit, changePercent * 100).catch(() => {});
                 }
                 // Partial take-profit (sell 50%) — skipped on entry day
                 else if (!tooNew && changePercent >= exitThresholds.mainPartial && !holding.partial_profit_taken) {
@@ -4750,8 +4744,9 @@ async function manageExistingPositions(userId) {
 
                         // Fire the deferred notification now — sell is about to execute.
                         // Doing it here (not at signal-detection time) ensures it fires
-                        // exactly once even when retries occur.
-                        if (pendingAlert) { try { await pendingAlert(); } catch (_) {} }
+                        // exactly once even when retries occur. Not awaited — the actual
+                        // sell order below must never wait on a Telegram round-trip.
+                        if (pendingAlert) { pendingAlert().catch(() => {}); }
 
                         const result = await brokerService.sellMarket(userId, holding.symbol, sellQuantity, { executedBy: 'AI_BOT', reason });
 
@@ -4786,7 +4781,7 @@ async function manageExistingPositions(userId) {
                             aiReasoning += '\n' + holding.scoringLog.slice(0, 8).join('\n');
                         }
 
-                        await alertService.alertTradeExecuted(userId, 'SELL', holding.symbol, sellQuantity, exitPrice, holding.aiScore || '', aiReasoning);
+                        alertService.alertTradeExecuted(userId, 'SELL', holding.symbol, sellQuantity, exitPrice, holding.aiScore || '', aiReasoning).catch(() => {});
 
                         const sellSlippage = exitPrice - currentPrice; // positive = worse fill
                         // Classify the exit into a clean category for hypothesis analytics

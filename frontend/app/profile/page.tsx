@@ -15,6 +15,7 @@ interface UserProfile {
     phone?: string;
     createdAt: string;
     aiTradingEnabled: boolean;
+    telegramConnected?: boolean;
     tradingAccount: {
         balance: number;
         totalDeposited: number;
@@ -48,7 +49,7 @@ export default function ProfilePage() {
     const [passwordError, setPasswordError] = useState('');
     const [aiTradingEnabled, setAiTradingEnabled] = useState(false);
     const [aiTradingLoading, setAiTradingLoading] = useState(false);
-    const [activeSection, setActiveSection] = useState<'profile' | 'password' | 'account' | 'ai' | 'broker'>('profile');
+    const [activeSection, setActiveSection] = useState<'profile' | 'password' | 'account' | 'ai' | 'broker' | 'telegram'>('profile');
 
     // Broker settings state
     interface BrokerStatus { configured: boolean; source: 'user' | 'env'; keyId: string | null; isPaper: boolean; }
@@ -58,6 +59,13 @@ export default function ProfilePage() {
     const [brokerIsPaper, setBrokerIsPaper] = useState(true);
     const [brokerSaving, setBrokerSaving] = useState(false);
     const [brokerMsg, setBrokerMsg] = useState<{ ok: boolean; text: string } | null>(null);
+
+    // Telegram linking state
+    const [telegramConnected, setTelegramConnected] = useState(false);
+    const [telegramDeepLink, setTelegramDeepLink] = useState('');
+    const [telegramExpiresAt, setTelegramExpiresAt] = useState<string | null>(null);
+    const [telegramGenerating, setTelegramGenerating] = useState(false);
+    const [telegramMsg, setTelegramMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
     useEffect(() => {
         const storedToken = localStorage.getItem('token');
@@ -76,7 +84,16 @@ export default function ProfilePage() {
 
         fetchProfile();
         fetchBrokerStatus(token);
+        fetchTelegramStatus(token);
     }, [token]);
+
+    // While a link is pending, poll for connection so the page updates the
+    // moment the user taps Start in Telegram, without needing a refresh.
+    useEffect(() => {
+        if (!token || !telegramDeepLink || telegramConnected) return;
+        const interval = setInterval(() => fetchTelegramStatus(token), 4000);
+        return () => clearInterval(interval);
+    }, [token, telegramDeepLink, telegramConnected]);
 
     const fetchProfile = async () => {
         setLoading(true);
@@ -93,6 +110,7 @@ export default function ProfilePage() {
                 setEmail(data.email || '');
                 setPhone(data.phone || '');
                 setAiTradingEnabled(data.aiTradingEnabled || false);
+                setTelegramConnected(!!data.telegramConnected);
             }
         } catch (error) {
             console.error('Failed to fetch profile:', error);
@@ -277,6 +295,69 @@ export default function ProfilePage() {
         }
     };
 
+    const fetchTelegramStatus = async (tok: string) => {
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/profile/telegram`, {
+                headers: { Authorization: `Bearer ${tok}` }
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setTelegramConnected(!!data.connected);
+                if (data.connected) {
+                    setTelegramDeepLink('');
+                    setTelegramExpiresAt(null);
+                }
+            }
+        } catch (_) {}
+    };
+
+    const handleGenerateTelegramLink = async () => {
+        setTelegramGenerating(true);
+        setTelegramMsg(null);
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/profile/telegram/link`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            const data = await res.json();
+            if (res.ok) {
+                setTelegramDeepLink(data.deepLink);
+                setTelegramExpiresAt(data.expiresAt);
+            } else {
+                setTelegramMsg({ ok: false, text: data.error || 'Could not generate link.' });
+            }
+        } catch (_) {
+            setTelegramMsg({ ok: false, text: 'Network error.' });
+        } finally {
+            setTelegramGenerating(false);
+        }
+    };
+
+    const handleUnlinkTelegram = async () => {
+        if (!confirm('Disconnect Telegram? You will stop receiving your own trade alerts until you reconnect.')) return;
+        setTelegramGenerating(true);
+        setTelegramMsg(null);
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/profile/telegram`, {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            if (res.ok) {
+                setTelegramConnected(false);
+                setTelegramDeepLink('');
+                setTelegramExpiresAt(null);
+                setTelegramMsg({ ok: true, text: 'Telegram disconnected.' });
+            } else {
+                const data = await res.json();
+                setTelegramMsg({ ok: false, text: data.error || 'Could not disconnect.' });
+            }
+        } catch (_) {
+            setTelegramMsg({ ok: false, text: 'Network error.' });
+        } finally {
+            setTelegramGenerating(false);
+        }
+    };
+
     const handleLogout = () => {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
@@ -329,6 +410,7 @@ export default function ProfilePage() {
                         <button onClick={() => setActiveSection('account')} className={`w-full text-left px-4 py-3 rounded-xl font-semibold transition-colors ${activeSection === 'account' ? 'bg-[var(--color-accent)] text-white' : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)]'}`}>Trading Account</button>
                         <button onClick={() => setActiveSection('ai')} className={`w-full text-left px-4 py-3 rounded-xl font-semibold transition-colors ${activeSection === 'ai' ? 'bg-[var(--color-accent)] text-white' : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)]'}`}>AI Automation</button>
                         <button onClick={() => setActiveSection('broker')} className={`w-full text-left px-4 py-3 rounded-xl font-semibold transition-colors ${activeSection === 'broker' ? 'bg-[var(--color-accent)] text-white' : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)]'}`}>Broker Settings</button>
+                        <button onClick={() => setActiveSection('telegram')} className={`w-full text-left px-4 py-3 rounded-xl font-semibold transition-colors ${activeSection === 'telegram' ? 'bg-[var(--color-accent)] text-white' : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)]'}`}>Telegram Alerts</button>
                     </div>
                 </aside>
 
@@ -631,6 +713,72 @@ export default function ProfilePage() {
                                     )}
                                 </div>
                             </form>
+                        </div>
+                    )}
+
+                    {activeSection === 'telegram' && (
+                        <div className="bg-[var(--color-card)] rounded-2xl border border-[var(--color-border)] p-6">
+                            <h1 className="text-2xl font-bold text-[var(--color-text-primary)] mb-2">Telegram Alerts</h1>
+                            <p className="text-sm text-[var(--color-text-secondary)] mb-6">
+                                Connect your own Telegram to get real-time alerts for your own trades — buys, sells, stop-losses,
+                                and daily summaries. Only your account&apos;s activity is sent to your chat.
+                            </p>
+
+                            <div className={`rounded-xl px-5 py-4 border mb-6 ${telegramConnected ? 'bg-green-500/10 border-green-500' : 'bg-blue-500/10 border-blue-500'}`}>
+                                <div className="flex items-center gap-3">
+                                    <span className="text-xl">{telegramConnected ? '✅' : '🔗'}</span>
+                                    <div>
+                                        <div className={`font-semibold ${telegramConnected ? 'text-green-500' : 'text-blue-500'}`}>
+                                            {telegramConnected ? 'Telegram connected' : 'Not connected yet'}
+                                        </div>
+                                        {!telegramConnected && (
+                                            <div className="text-xs text-[var(--color-text-secondary)] mt-0.5">
+                                                Generate a link below, open it, and tap Start in Telegram.
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {telegramMsg && (
+                                <div className={`rounded-xl px-4 py-3 text-sm border mb-6 ${telegramMsg.ok ? 'bg-green-500/10 border-green-500 text-green-600' : 'bg-red-500/10 border-red-500 text-red-600'}`}>
+                                    {telegramMsg.text}
+                                </div>
+                            )}
+
+                            {telegramConnected ? (
+                                <button
+                                    onClick={handleUnlinkTelegram}
+                                    disabled={telegramGenerating}
+                                    className="px-6 py-3 rounded-xl border border-[var(--color-border)] text-[var(--color-text-secondary)] font-semibold hover:bg-[var(--color-bg-tertiary)] transition-colors disabled:opacity-50"
+                                >
+                                    Disconnect Telegram
+                                </button>
+                            ) : telegramDeepLink ? (
+                                <div className="max-w-xl space-y-3">
+                                    <a
+                                        href={telegramDeepLink}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="inline-block px-6 py-3 rounded-xl bg-[var(--color-accent)] text-white font-semibold hover:opacity-90 transition-opacity"
+                                    >
+                                        Open Telegram &amp; Connect
+                                    </a>
+                                    <p className="text-xs text-[var(--color-text-secondary)]">
+                                        This link is one-time use and expires in 15 minutes
+                                        {telegramExpiresAt ? ` (at ${new Date(telegramExpiresAt).toLocaleTimeString()})` : ''}.
+                                        This page will update automatically once you connect.
+                                    </p>
+                                </div>
+                            ) : (
+                                <button
+                                    onClick={handleGenerateTelegramLink}
+                                    disabled={telegramGenerating}
+                                    className="px-6 py-3 rounded-xl bg-[var(--color-accent)] text-white font-semibold hover:opacity-90 transition-opacity disabled:opacity-50"
+                                >
+                                    {telegramGenerating ? 'Generating...' : 'Connect Telegram'}
+                                </button>
+                            )}
                         </div>
                     )}
                 </div>

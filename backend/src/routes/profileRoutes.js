@@ -3,6 +3,8 @@ const router = express.Router();
 const { protect } = require('../middleware/authMiddleware');
 const userProfileService = require('../services/userProfileService');
 const userDb = require('../services/userDatabaseService');
+const telegramLinkService = require('../services/telegramLinkService');
+const { query } = require('../config/database');
 
 // All routes require authentication
 router.use(protect);
@@ -175,6 +177,46 @@ router.delete('/broker', async (req, res) => {
     try {
         await userDb.clearUserAlpacaCredentials(req.userId);
         res.json({ cleared: true, message: 'Reverted to shared account credentials' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/profile/telegram
+ * Connection status — never returns the raw chat ID.
+ */
+router.get('/telegram', async (req, res) => {
+    try {
+        const result = await query('SELECT telegram_chat_id FROM users WHERE id = $1', [req.userId]);
+        res.json({ connected: !!result.rows[0]?.telegram_chat_id });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * POST /api/profile/telegram/link
+ * Generates a one-time deep link (t.me/<bot>?start=<code>) — visiting it and
+ * hitting Start on the bot binds that chat to this account.
+ */
+router.post('/telegram/link', async (req, res) => {
+    try {
+        const { code, deepLink, expiresAt } = await telegramLinkService.generateLinkCode(req.userId);
+        res.json({ code, deepLink, expiresAt });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * DELETE /api/profile/telegram
+ * Unlinks this account's Telegram chat.
+ */
+router.delete('/telegram', async (req, res) => {
+    try {
+        await query('UPDATE users SET telegram_chat_id = NULL WHERE id = $1', [req.userId]);
+        res.json({ cleared: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }

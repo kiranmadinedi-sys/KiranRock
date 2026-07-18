@@ -13,6 +13,7 @@ const assetUniverseScheduler       = require('./services/assetUniverseScheduler'
 const eodIngestionService          = require('./services/eodIngestionService');
 const newsRescanService            = require('./services/newsRescanService');
 const trailingStopService          = require('./services/trailingStopService');
+const telegramLinkService          = require('./services/telegramLinkService');
 const marketMonitorService         = require('./services/marketMonitorService');
 const systemHealthMonitor          = require('./services/systemHealthMonitorService');
 const {
@@ -68,6 +69,7 @@ async function shutdownWorker(signal, options = {}) {
         eodIngestionService.stopEodScheduler();
         newsRescanService.stopNewsRescanService();
         trailingStopService.stopTrailingStopService();
+        telegramLinkService.stopTelegramLinkListener();
         marketMonitorService.stopMarketMonitor();
         systemHealthMonitor.stopSystemHealthMonitor();
     } catch (error) {
@@ -143,6 +145,9 @@ async function startWorker(options = {}) {
 
     console.log('\n🔺 Starting Trailing Stop Service...');
     trailingStopService.startTrailingStopService();
+
+    console.log('\n🔗 Starting Telegram Account-Linking Listener...');
+    telegramLinkService.startTelegramLinkListener();
 
     console.log('\n👁️  Starting Market Monitor Service...');
     marketMonitorService.startMarketMonitor();

@@ -127,7 +127,7 @@ const getUserProfile = async (userId) => {
 
         // Get user from PostgreSQL database
         const userResult = await query(
-            'SELECT id, username, email, full_name, phone, created_at, ai_trading_enabled FROM users WHERE id = $1',
+            'SELECT id, username, email, full_name, phone, created_at, ai_trading_enabled, telegram_chat_id FROM users WHERE id = $1',
             [userId]
         );
         
@@ -161,6 +161,7 @@ const getUserProfile = async (userId) => {
             phone: user.phone || '',
             createdAt: user.created_at,
             aiTradingEnabled: user.ai_trading_enabled === true,
+            telegramConnected: !!user.telegram_chat_id,
             tradingAccount: {
                 balance: parseFloat(tradingAccount.balance),
                 totalDeposited: 0,

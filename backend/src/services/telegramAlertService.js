@@ -156,7 +156,7 @@ ${holdingsLine}
 `;
 
     await sendTelegramMessage(chatId, message);
-    wa.alertLargeLoss(symbol, percentLoss, currentPrice, purchasePrice).catch(() => {});
+    wa.alertLargeLoss(userId, symbol, percentLoss, currentPrice, purchasePrice).catch(() => {});
     logger.riskEvent('LARGE_LOSS', symbol, { percentLoss, currentPrice, purchasePrice });
 }
 
@@ -182,7 +182,7 @@ ${holdingsLine}
 `;
 
     await sendTelegramMessage(chatId, message);
-    wa.alertStopLossTriggered(symbol, shares, sellPrice, loss).catch(() => {});
+    wa.alertStopLossTriggered(userId, symbol, shares, sellPrice, loss).catch(() => {});
 }
 
 /**
@@ -207,7 +207,7 @@ ${holdingsLine}
 `;
 
     await sendTelegramMessage(chatId, message);
-    wa.alertTakeProfitExecuted(symbol, shares, sellPrice, profit, percentGain).catch(() => {});
+    wa.alertTakeProfitExecuted(userId, symbol, shares, sellPrice, profit, percentGain).catch(() => {});
 }
 
 /**
@@ -256,7 +256,7 @@ Will resume tomorrow at market open.
 `;
 
     await sendTelegramMessage(chatId, message);
-    wa.alertDailyLossLimitReached(dailyLoss).catch(() => {});
+    wa.alertDailyLossLimitReached(userId, dailyLoss).catch(() => {});
     logger.error('Daily loss limit reached', { userId, dailyLoss });
 }
 
@@ -333,7 +333,7 @@ ${reasoning ? `📝 ${reasoning}` : ''}
 `;
 
     await sendTelegramMessage(chatId, message);
-    wa.alertTradeExecuted(action, symbol, shares, price, aiScore, reasoning).catch(() => {});
+    wa.alertTradeExecuted(userId, action, symbol, shares, price, aiScore, reasoning).catch(() => {});
 }
 
 /**
@@ -683,7 +683,7 @@ Contracts: ${contracts} | Cost: $${Number(totalCost).toFixed(2)}
 `;
 
     await sendTelegramMessage(chatId, message);
-    wa.alertOptionsSignalEntry(details).catch(() => {});
+    wa.alertOptionsSignalEntry(userId, details).catch(() => {});
 }
 
 /**

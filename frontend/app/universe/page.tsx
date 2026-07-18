@@ -390,6 +390,22 @@ function ControlsTab() {
     const [scanMsg,   setScanMsg]   = useState('');
     const [scanError, setScanError] = useState('');
 
+    const [failedInfo, setFailedInfo] = useState<{ date: string | null; failed: number; total: number } | null>(null);
+    const [rescanning, setRescanning] = useState(false);
+    const [rescanMsg,   setRescanMsg]   = useState('');
+    const [rescanError, setRescanError] = useState('');
+
+    const fetchFailedCount = async () => {
+        try {
+            const data = await apiFetch('/api/asset-universe/nightly-scan/failed-count');
+            setFailedInfo(data);
+        } catch (e) {
+            // best-effort — controls still usable without this
+        }
+    };
+
+    useEffect(() => { fetchFailedCount(); }, []);
+
     const triggerScan = async () => {
         setScanning(true); setScanMsg(''); setScanError('');
         try {
@@ -399,6 +415,18 @@ function ControlsTab() {
             setScanError(e.message);
         } finally {
             setScanning(false);
+        }
+    };
+
+    const triggerRescanMissing = async () => {
+        setRescanning(true); setRescanMsg(''); setRescanError('');
+        try {
+            const data = await apiFetch('/api/asset-universe/nightly-scan/rescan-missing', { method: 'POST' });
+            setRescanMsg(data.message || `Rescanning ${data.count} failed symbols in the background.`);
+        } catch (e: any) {
+            setRescanError(e.message);
+        } finally {
+            setRescanning(false);
         }
     };
 
@@ -428,6 +456,38 @@ function ControlsTab() {
                 </button>
                 {scanMsg   && <p className="text-sm text-green-700 dark:text-green-300">{scanMsg}</p>}
                 {scanError && <p className="text-sm text-red-600 dark:text-red-400">Error: {scanError}</p>}
+            </div>
+
+            <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-5 space-y-4">
+                <h3 className="font-semibold text-slate-700 dark:text-slate-200">Retry Missing Tickers Only</h3>
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                    Some symbols come back with no score most nights — usually a transient data-provider rate limit,
+                    not genuinely missing data. Retry just those instead of the full ~500-symbol scan.
+                </p>
+                {failedInfo?.date ? (
+                    <div className="rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 p-3 text-xs text-slate-500 dark:text-slate-400">
+                        {failedInfo.failed > 0
+                            ? <>⚠️ <strong className="text-slate-700 dark:text-slate-200">{failedInfo.failed}</strong> of {failedInfo.total} symbols missing a score for {failedInfo.date}</>
+                            : <>✅ All {failedInfo.total} symbols scored for {failedInfo.date} — nothing to retry</>}
+                    </div>
+                ) : (
+                    <div className="rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 p-3 text-xs text-slate-500 dark:text-slate-400">
+                        No scan data found yet.
+                    </div>
+                )}
+                <button
+                    onClick={triggerRescanMissing}
+                    disabled={rescanning || !failedInfo?.failed}
+                    className="w-full px-4 py-2.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-lg font-medium text-sm transition-colors flex items-center justify-center gap-2"
+                >
+                    {rescanning ? (
+                        <><span className="animate-spin">⏳</span> Starting rescan…</>
+                    ) : (
+                        <><span>🔁</span> Retry {failedInfo?.failed || ''} Missing Tickers</>
+                    )}
+                </button>
+                {rescanMsg   && <p className="text-sm text-green-700 dark:text-green-300">{rescanMsg}</p>}
+                {rescanError && <p className="text-sm text-red-600 dark:text-red-400">Error: {rescanError}</p>}
             </div>
 
             <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 p-5">
@@ -463,6 +523,14 @@ export default function UniversePage() {
         const token = getAuthToken();
         if (!token) { router.replace('/login'); return; }
         setToday(new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }));
+
+        // Deep-link support (e.g. the nightly-scan Telegram alert links straight
+        // to Controls) — plain browser API, not next/navigation's useSearchParams,
+        // so this page doesn't need a Suspense boundary.
+        const requestedTab = new URLSearchParams(window.location.search).get('tab') as Tab | null;
+        if (requestedTab && ['summary', 'lookup', 'drift', 'controls'].includes(requestedTab)) {
+            setTab(requestedTab);
+        }
     }, [router]);
 
     return (

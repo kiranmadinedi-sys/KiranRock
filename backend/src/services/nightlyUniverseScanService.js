@@ -548,4 +548,52 @@ async function rescanSymbol(symbol, reason = 'news') {
     }
 }
 
-module.exports = { runNightlyUniverseScan, rescanSymbol, isScanRunning };
+/**
+ * Re-attempts analysis for a specific list of symbols against a specific
+ * historical analysis_date (not always "today" like rescanSymbol/missingOnly),
+ * using the same retry + prescreen logic as the main scan loop. For backfilling
+ * a night's symbols that came back null — usually a transient data-provider
+ * blip rather than genuinely missing data — without re-running the full universe.
+ * Reuses the main scan's one-at-a-time, 10s-apart pacing to avoid re-triggering
+ * the exact rate-limit cascade that caused the original failures.
+ */
+async function rescanFailedSymbols(date, symbols) {
+    const vixLevel = await getVixLevel().catch(() => 15);
+    const regime   = await marketRegimeService.getMarketRegime().catch(() => null);
+    let analyzed = 0, passed = 0, filtered = 0, stillFailed = 0;
+    const results = [];
+
+    for (let i = 0; i < symbols.length; i++) {
+        const symbol = symbols[i];
+        try {
+            const analysis = await _analyzeWithRetry(symbol, vixLevel, regime);
+            if (!analysis) {
+                await _upsert(symbol, date, null, false, 'analyzeStockWithAI returned null (rescan)');
+                stillFailed++;
+                results.push({ symbol, ok: false });
+            } else {
+                const passedPrescreen =
+                    (analysis.recommendation === 'STRONG BUY' || analysis.recommendation === 'BUY') &&
+                    analysis.aiScore >= 70;
+                const exclusionReason = passedPrescreen ? null : `${analysis.recommendation} / score ${analysis.aiScore}`;
+                await _upsert(symbol, date, analysis, passedPrescreen, exclusionReason);
+                if (passedPrescreen) { passed++; } else { filtered++; }
+                analyzed++;
+                results.push({ symbol, ok: true, score: analysis.aiScore, recommendation: analysis.recommendation });
+            }
+        } catch (err) {
+            await _upsert(symbol, date, null, false, (err.message || 'unknown error').slice(0, 200)).catch(() => {});
+            stillFailed++;
+            results.push({ symbol, ok: false, error: err.message });
+        }
+
+        console.log(`[NightlyScan] Rescan ${i + 1}/${symbols.length} | analyzed: ${analyzed} | passed: ${passed} | filtered: ${filtered} | stillFailed: ${stillFailed}`);
+        if (i < symbols.length - 1) {
+            await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
+        }
+    }
+
+    return { date, attempted: symbols.length, analyzed, passed, filtered, stillFailed, results };
+}
+
+module.exports = { runNightlyUniverseScan, rescanSymbol, rescanFailedSymbols, isScanRunning };

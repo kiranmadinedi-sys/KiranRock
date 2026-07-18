@@ -17,6 +17,16 @@ const TELEGRAM_API_URL = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 // admin would see nothing about their trades until they individually link.
 const ADMIN_CHAT_ID = process.env.TELEGRAM_CHAT_ID || '';
 
+function getFrontendBaseUrl() {
+    const explicit = process.env.FRONTEND_BASE_URL || process.env.PUBLIC_APP_URL;
+    if (explicit) return explicit.replace(/\/$/, '');
+
+    const origins = String(process.env.CORS_ORIGINS || '').split(',').map(v => v.trim()).filter(Boolean);
+    if (origins.length > 0) return origins[0].replace(/\/$/, '');
+
+    return 'http://localhost:3000';
+}
+
 /**
  * Send Telegram message
  * @param {string} chatId - Telegram chat ID
@@ -615,6 +625,7 @@ async function alertNightlyScanFailure({ analyzed, universe, failed, reason }) {
     if (!ADMIN_CHAT_ID) return;
 
     const coveragePct = universe > 0 ? ((analyzed / universe) * 100).toFixed(1) : '0';
+    const controlsUrl = `${getFrontendBaseUrl()}/universe?tab=controls`;
     const message = `
 🚨 *NIGHTLY SCAN WARNING*
 
@@ -625,7 +636,7 @@ async function alertNightlyScanFailure({ analyzed, universe, failed, reason }) {
 ${reason ? `Reason: ${reason}` : ''}
 
 ⚠️ Market-hours scan may fall back to live analysis.
-Check server logs for details.
+🔁 Retry the missing tickers: ${controlsUrl}
 `;
     await sendTelegramMessage(ADMIN_CHAT_ID, message);
 }

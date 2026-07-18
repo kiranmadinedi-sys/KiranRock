@@ -180,4 +180,83 @@ router.post('/nightly-scan', authenticateToken, async (req, res) => {
     }
 });
 
+/**
+ * GET /api/asset-universe/nightly-scan/failed-count?date=YYYY-MM-DD
+ * How many symbols came back with no score (ai_score IS NULL) for a given
+ * scan date — defaults to the most recent date that has any scan data.
+ */
+router.get('/nightly-scan/failed-count', authenticateToken, async (req, res) => {
+    try {
+        const { query } = require('../config/database');
+        let date = req.query.date;
+        if (!date) {
+            const latest = await query(`SELECT MAX(analysis_date) as d FROM daily_universe_analysis`);
+            date = latest.rows[0]?.d;
+        }
+        if (!date) return res.json({ date: null, failed: 0, total: 0 });
+
+        const r = await query(
+            `SELECT COUNT(*) FILTER (WHERE ai_score IS NULL) as failed, COUNT(*) as total
+             FROM daily_universe_analysis WHERE analysis_date = $1::date`,
+            [date]
+        );
+        res.json({
+            date,
+            failed: parseInt(r.rows[0].failed, 10),
+            total:  parseInt(r.rows[0].total, 10)
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * POST /api/asset-universe/nightly-scan/rescan-missing
+ * Retries ONLY the symbols that failed (ai_score IS NULL) for a given date
+ * — defaults to the most recent scan date. Runs in background, same
+ * one-at-a-time / 10s-apart pacing as the real scan to avoid re-triggering
+ * the rate-limit cascade that likely caused the original failures.
+ * Body: { date?: 'YYYY-MM-DD' }
+ */
+router.post('/nightly-scan/rescan-missing', authenticateToken, async (req, res) => {
+    try {
+        const { query } = require('../config/database');
+        let date = req.body?.date;
+        if (!date) {
+            const latest = await query(`SELECT MAX(analysis_date) as d FROM daily_universe_analysis`);
+            date = latest.rows[0]?.d;
+        }
+        if (!date) {
+            return res.status(400).json({ success: false, error: 'No scan data found for any date' });
+        }
+
+        const failedRes = await query(
+            `SELECT symbol FROM daily_universe_analysis
+             WHERE analysis_date = $1::date AND ai_score IS NULL
+             ORDER BY symbol`,
+            [date]
+        );
+        const symbols = failedRes.rows.map(row => row.symbol);
+
+        if (symbols.length === 0) {
+            return res.json({ success: true, message: `No failed symbols for ${date} — nothing to rescan`, count: 0, date });
+        }
+
+        res.json({
+            success: true,
+            message: `Rescanning ${symbols.length} failed symbols for ${date} in background (~10s/symbol)`,
+            count: symbols.length,
+            date
+        });
+
+        const nightlyScanSvc = require('../services/nightlyUniverseScanService');
+        nightlyScanSvc.rescanFailedSymbols(date, symbols)
+            .then(r => console.log(`[NightlyScan] Manual rescan-missing done: ${r.analyzed} analyzed, ${r.passed} passed, ${r.stillFailed} still failed`))
+            .catch(err => console.error('[NightlyScan] Manual rescan-missing error:', err.message));
+    } catch (err) {
+        console.error('[NightlyScan] Manual rescan-missing failed:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 module.exports = router;

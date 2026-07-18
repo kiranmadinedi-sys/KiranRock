@@ -2283,6 +2283,31 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
     }
 }
 
+// Cross-user analysis cache — analyzeStockWithAI() takes no userId; it's purely a
+// function of (symbol, vixLevel, regime), the same for every account. With multiple
+// users enrolled and their scan cycles now running in parallel, each one was calling
+// it fresh for the same candidates, multiplying external API load (Yahoo/Gemini/SEC)
+// by the number of concurrent users for identical data — directly worsening the rate
+// limiting that was already making cycles slow enough to hit the scheduler's 4-minute
+// timeout (see enhancedAIScheduler.js's per-user cycle lock, added alongside this the
+// same day, 2026-07-17). Single-flight: the first caller for a symbol triggers the
+// real fetch; every other caller for that same symbol within the TTL awaits the same
+// in-flight (or already-resolved) promise instead of re-fetching.
+const _analysisCache = new Map(); // symbol -> { promise, expiresAt }
+const ANALYSIS_CACHE_TTL_MS = 4 * 60 * 1000; // just under the 5-min scheduler interval
+
+function analyzeStockWithAICached(symbol, vixLevel, regime) {
+    const cached = _analysisCache.get(symbol);
+    if (cached && Date.now() < cached.expiresAt) {
+        return cached.promise;
+    }
+    const promise = analyzeStockWithAI(symbol, vixLevel, null, regime);
+    _analysisCache.set(symbol, { promise, expiresAt: Date.now() + ANALYSIS_CACHE_TTL_MS });
+    // A failed analysis shouldn't poison the cache for the full TTL — let the next caller retry fresh.
+    promise.catch(() => { _analysisCache.delete(symbol); });
+    return promise;
+}
+
 /**
  * Scan entire market universe and find best opportunities
  * @param {string} userId
@@ -2383,7 +2408,7 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
     for (let i = 0; i < qualified.length; i += batchSize) {
         const batch = qualified.slice(i, i + batchSize);
         const results = await Promise.allSettled(
-            batch.map(stock => analyzeStockWithAI(stock.symbol, vixLevel, null, regime))
+            batch.map(stock => analyzeStockWithAICached(stock.symbol, vixLevel, regime))
         );
 
         results.forEach((result, index) => {

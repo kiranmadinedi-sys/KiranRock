@@ -18,6 +18,10 @@ let schedulerInterval = null;
 let isRunning = false;
 let isRunningAt = null; // timestamp when isRunning was set — used by watchdog
 
+// Tracks each user's REAL in-flight executeAutonomousTrading call (not the race against
+// the reporting timeout) — see processUser() for why this matters.
+const _userCyclesInFlight = new Map(); // userId -> { startedAt }
+
 // Watchdog: if isRunning has been true for > 6 minutes, something is stuck.
 // Force-reset so the next tick can proceed instead of freezing the whole day.
 const LOCK_MAX_AGE_MS = 6 * 60 * 1000;
@@ -123,7 +127,46 @@ async function runScheduledTrading() {
         const CYCLE_TIMEOUT_MS = 4 * 60 * 1000;
 
         async function processUser(user) {
+            // Per-user execution lock — Promise.race below only stops the SCHEDULER from
+            // waiting past 4 minutes; it never cancels the underlying executeAutonomousTrading
+            // call, which keeps running in the background and can still place real trades
+            // minutes later. Without this lock, the NEXT scheduled tick (5 min later) could
+            // start a second, overlapping cycle for the same user while the first is still
+            // silently in flight — both checking "room for a new position" / heat budget /
+            // sector caps against the same stale snapshot and both deciding to buy. Invisible
+            // for 14 days of CHOPPY (every cycle returned near-instantly); confirmed live
+            // 2026-07-17 once real trading resumed and cycles ran long enough to still be
+            // executing when the next tick fired.
+            if (_userCyclesInFlight.has(user.id)) {
+                const info = _userCyclesInFlight.get(user.id);
+                const ageSec = Math.round((Date.now() - info.startedAt) / 1000);
+                const MAX_LOCK_AGE_SEC = 15 * 60; // generous vs the 4-min reporting timeout — a lock this old is a genuine hang, not just slow external APIs
+                if (ageSec > MAX_LOCK_AGE_SEC) {
+                    console.error(`[Enhanced AI Scheduler] ⚠ ${user.username}: previous cycle lock stuck for ${ageSec}s — force-clearing so this user isn't permanently blocked`);
+                    _userCyclesInFlight.delete(user.id);
+                } else {
+                    console.warn(`[Enhanced AI Scheduler] ⏭ ${user.username}: previous cycle still running (${ageSec}s in) — skipping this tick rather than starting an overlapping one`);
+                    return;
+                }
+            }
+
             console.log(`[Enhanced AI Scheduler] ▶ Starting user: ${user.username} (${user.id})`);
+            const _cycleStartedAt = Date.now();
+            _userCyclesInFlight.set(user.id, { startedAt: _cycleStartedAt });
+
+            // The REAL execution — never abandoned. A separate chain (not the race below)
+            // clears the lock exactly when this actually finishes, however long that takes.
+            const realExecution = enhancedAITradingBot.executeAutonomousTrading(user.id);
+            realExecution
+                .catch(() => {}) // swallow here so a late rejection is never "unhandled" once the race has already moved on
+                .finally(() => {
+                    _userCyclesInFlight.delete(user.id);
+                    const durationSec = Math.round((Date.now() - _cycleStartedAt) / 1000);
+                    if (durationSec > CYCLE_TIMEOUT_MS / 1000) {
+                        console.warn(`[Enhanced AI Scheduler] ${user.username}: cycle actually finished after ${durationSec}s (scheduler already reported a timeout at ${Math.round(CYCLE_TIMEOUT_MS / 1000)}s)`);
+                    }
+                });
+
             try {
                 const timeoutResult = {
                     success: false,
@@ -131,7 +174,7 @@ async function runScheduledTrading() {
                     tradesExecuted: 0, capitalDeployed: 0, opportunitiesFound: 0, trades: []
                 };
                 const result = await Promise.race([
-                    enhancedAITradingBot.executeAutonomousTrading(user.id),
+                    realExecution,
                     new Promise(resolve => setTimeout(() => resolve(timeoutResult), CYCLE_TIMEOUT_MS))
                 ]);
 

@@ -215,83 +215,55 @@ async function adjustForUser(userId) {
         const gainPct    = ((currentPrice - entryPrice) / entryPrice) * 100;
         const isFractional = parseFloat(row.quantity) !== Math.floor(parseFloat(row.quantity));
 
-        // Fractional DAY stops expire at EOD — re-place them each cycle regardless of gain.
-        // We do this BEFORE the gain threshold check so a fractional position is never left
-        // unprotected overnight or after the previous day's stop expired.
-        if (isFractional) {
-            const allSellOrders  = openOrders.filter(o => o.symbol === symbol && o.side === 'sell');
-            const existingStop   = allSellOrders.find(o => o.type === 'stop' || o.type === 'stop_limit');
-            if (!existingStop) {
-                const renewStop = parseFloat((entryPrice * (1 - 0.07)).toFixed(2));
+        // Find ALL open sell orders for this symbol (stop legs + bracket/standalone take-profit legs)
+        const allSellOrders = openOrders.filter(o => o.symbol === symbol && o.side === 'sell');
+        const stopOrders    = allSellOrders.filter(o => o.type === 'stop' || o.type === 'stop_limit');
+
+        // DAY-TIF exit legs expire at market close and take their OCO sibling stop down with
+        // them — true for fractional standalone stops, AND, it turns out, whole-share bracket
+        // legs too (Alpaca brackets default to "day", not GTC, despite buyBracket()'s comments
+        // assuming otherwise). This used to run only for fractional positions, and only after
+        // the gain >= MIN_GAIN_TO_ACT gate below — so a flat/red whole-share position whose
+        // bracket expired overnight had no path back to protection until it moved 2%+ in its
+        // favor. Confirmed 2026-07-18 via live Alpaca order history: ROP/TOST/TMUS brackets all
+        // expired together ~20:05 UTC the day they were bought, leaving real live-account
+        // positions naked with no alert. Runs for every open position, unconditional on gain.
+        if (stopOrders.length === 0) {
+            // A bracket take-profit leg still open (parent_id set) means the bracket is still
+            // active and its stop leg may simply not have propagated to this listing yet —
+            // don't race it with a redundant standalone stop.
+            const bracketLegs = allSellOrders.filter(o => o.type === 'limit' && o.parent_id);
+            if (bracketLegs.length === 0) {
+                // 5%, matching the bot's current hard-stop default (enhancedAITradingBot.js's
+                // riskConfig.stopLoss — tightened from 7% to 5% on 2026-07-02). This fallback
+                // predates that tightening and was still using the old 7% until now.
+                const renewStop = parseFloat((entryPrice * (1 - 0.05)).toFixed(2));
                 const safeStop  = renewStop >= currentPrice ? parseFloat((currentPrice * 0.97).toFixed(2)) : renewStop;
-                logger.info('[TrailingStop] Fractional DAY stop expired — renewing', { userId, symbol, safeStop });
+                logger.warn('[TrailingStop] No active stop for open position — placing protective stop', {
+                    userId, symbol, isFractional, safeStop
+                });
                 try {
                     await _createStopOrder(keyId, secretKey, base, symbol, parseFloat(row.quantity), safeStop);
                     await _sendAlert(userId, symbol, null, safeStop, gainPct, currentPrice, 'PLACED');
                 } catch (err) {
-                    logger.warn('[TrailingStop] Failed to renew fractional stop', { userId, symbol, err: err.message });
+                    logger.warn('[TrailingStop] Failed to place protective stop', { userId, symbol, err: err.message });
                 }
+                continue; // fresh stop placed this cycle — next cycle can consider trailing it further
             }
+        } else {
+            // Explicit confirmation, not just silence — Monday's first post-restart cycle is the
+            // validation run for the GTC bracket fix, and "nothing happened because everything's
+            // fine" needs to look different in the logs than "nothing happened because the cycle
+            // never ran." Debug-level since this fires every symbol, every 5 minutes.
+            logger.debug('[TrailingStop] Existing stop confirmed — no repair needed', {
+                userId, symbol, stopCount: stopOrders.length
+            });
         }
 
         const stopTarget = targetStopPct(gainPct);
         if (stopTarget === null) continue; // position hasn't moved enough to raise the stop
 
         const newStopPrice = parseFloat((entryPrice * (1 + stopTarget / 100)).toFixed(2));
-
-        // Find ALL open sell orders for this symbol (stop legs + bracket take-profit limit legs)
-        const allSellOrders = openOrders.filter(o =>
-            o.symbol === symbol && o.side === 'sell'
-        );
-        const stopOrders = allSellOrders.filter(o =>
-            o.type === 'stop' || o.type === 'stop_limit'
-        );
-
-        if (stopOrders.length === 0) {
-            // Use Alpaca's parent_id to distinguish bracket legs from standalone orders.
-            // Bracket OCO legs always have a parent_id pointing to the entry order.
-            // Standalone take-profit orders placed by buyFractional have no parent_id.
-            const bracketLegs = allSellOrders.filter(o => o.type === 'limit' && o.parent_id);
-            if (bracketLegs.length > 0) {
-                logger.info('[TrailingStop] Bracket order active — exit managed by bracket, skipping standalone stop', {
-                    userId, symbol, currentPrice: currentPrice.toFixed(2), gainPct: gainPct.toFixed(1),
-                    bracketLegs: bracketLegs.map(o => ({
-                        id: o.id, limitPrice: o.limit_price, status: o.status
-                    }))
-                });
-                continue;
-            }
-
-            // No stop found. Check if a standalone take-profit limit exists (fractional buy path).
-            // This means the original stop was cancelled externally — recreate it and alert.
-            const standaloneTakeProfit = allSellOrders.filter(o => o.type === 'limit' && !o.parent_id);
-            if (standaloneTakeProfit.length > 0) {
-                logger.warn('[TrailingStop] Stop order missing — standalone take-profit exists but no stop. Recreating.', {
-                    userId, symbol, currentPrice: currentPrice.toFixed(2),
-                    gainPct: gainPct.toFixed(1), newStopPrice
-                });
-                try {
-                    await _createStopOrder(keyId, secretKey, base, symbol, row.quantity, newStopPrice);
-                    await _sendAlert(userId, symbol, null, newStopPrice, gainPct, currentPrice, 'RECREATED');
-                } catch (err) {
-                    logger.warn('[TrailingStop] Failed to recreate missing stop', { userId, symbol, err: err.message });
-                }
-                continue;
-            }
-
-            // No stop and no bracket — place a protective stop to lock in gains
-            logger.info('[TrailingStop] No stop found — placing protective stop', {
-                userId, symbol, currentPrice: currentPrice.toFixed(2),
-                gainPct: gainPct.toFixed(1), newStopPrice
-            });
-            try {
-                await _createStopOrder(keyId, secretKey, base, symbol, row.quantity, newStopPrice);
-                await _sendAlert(userId, symbol, null, newStopPrice, gainPct, currentPrice, 'PLACED');
-            } catch (err) {
-                logger.warn('[TrailingStop] Failed to place stop', { userId, symbol, err: err.message });
-            }
-            continue;
-        }
 
         for (const stopOrder of stopOrders) {
             const currentStopPrice = parseFloat(stopOrder.stop_price || 0);

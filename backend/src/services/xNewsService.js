@@ -120,6 +120,17 @@ async function searchXPosts(query, options = {}) {
                 console.warn(`[X News] Auth error (${status}) — check X_BEARER_TOKEN`);
                 break;
             }
+            if (status === 402) {
+                // Payment Required — the token's current plan doesn't include this
+                // endpoint at all (X's free tier doesn't cover search/recent). Unlike
+                // 429 this will never clear on its own, so without a cooldown every
+                // future call retries and fails the same way forever. Long cooldown
+                // (1hr) so it stops hammering an endpoint that needs a plan upgrade,
+                // while still noticing automatically if the plan changes later.
+                _rateLimitedUntil = Date.now() + 60 * 60 * 1000;
+                console.warn('[X News] Payment required (402) — current plan does not include this endpoint. Pausing 1hr. Upgrade the X API plan or set X_NEWS_ENABLED=false.');
+                break;
+            }
             if (status === 404 || status === 410) {
                 continue; // Try next endpoint
             }

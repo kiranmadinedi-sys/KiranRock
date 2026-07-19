@@ -87,9 +87,32 @@ async function sleep(ms) {
     return new Promise((res) => setTimeout(res, ms));
 }
 
+// Shared rate-limit cooldown — Yahoo's 429 is IP-wide, not per-symbol, but the
+// per-call retry loop below has no memory of it. During a nightly scan (500+
+// symbols) or a targeted rescan, one symbol getting rate-limited previously
+// meant every subsequent symbol independently burned through its own 4-attempt
+// backoff against the same still-active block — confirmed 2026-07-18 rescanning
+// 130 symbols: 100% still failed, 779 "Too Many Requests" logged, because
+// nothing ever told later calls that Yahoo was already blocking this IP.
+// Once tripped, calls fail fast instead of retrying into a wall.
+let _yahooRateLimitedUntil = 0;
+const YAHOO_COOLDOWN_MS = Math.max(5000, parseInt(process.env.YAHOO_RATE_LIMIT_COOLDOWN_MS || '60000', 10));
+
+function isYahooRateLimited() {
+    return Date.now() < _yahooRateLimitedUntil;
+}
+
 async function withRetry(fn, args = [], opts = {}) {
     const maxAttempts = opts.maxAttempts || 4;
     const baseDelay = opts.baseDelay || 300; // ms
+
+    if (isYahooRateLimited()) {
+        const waitSec = Math.ceil((_yahooRateLimitedUntil - Date.now()) / 1000);
+        const err = new Error(`Yahoo rate-limit cooldown active — skipping (retry in ${waitSec}s)`);
+        err.statusCode = 429;
+        err.isCooldownSkip = true;
+        throw err;
+    }
 
     let attempt = 0;
     while (attempt < maxAttempts) {
@@ -98,6 +121,12 @@ async function withRetry(fn, args = [], opts = {}) {
         } catch (err) {
             attempt++;
             const status = err && err.statusCode ? err.statusCode : err && err.code ? err.code : null;
+            if (status === 429) {
+                // Trip the shared breaker immediately so every OTHER in-flight or
+                // future call backs off too, not just this one's own retry loop.
+                _yahooRateLimitedUntil = Date.now() + YAHOO_COOLDOWN_MS;
+                console.warn(`yfClient: 429 rate-limited — tripping shared cooldown for ${Math.round(YAHOO_COOLDOWN_MS / 1000)}s`);
+            }
             // On 429 or network errors, retry with exponential backoff
             if (attempt >= maxAttempts || (status && status !== 429 && status !== 'ECONNRESET')) {
                 throw err;
@@ -242,6 +271,7 @@ module.exports = {
     search,
     quoteSummary,
     quote,
+    isYahooRateLimited,
     // expose low-level yf for rare cases
     _raw: yf,
     _cache: cache,

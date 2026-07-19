@@ -1174,13 +1174,18 @@ async function getShortInterestData(symbol) {
  * 0 or negative = earnings passed or today.
  */
 async function getDaysToEarnings(symbol, yahooFinanceInstance = null) {
-    const yf = yahooFinanceInstance || yahooFinance;
     const cacheKey = `earnings_days_${symbol}`;
     const cached = cacheService.get(cacheKey);
     if (cached !== null) return cached;
 
     try {
-        const summary = await yf.quoteSummary(symbol, { modules: ['calendarEvents'] });
+        // Route through yfClient (not the raw yahoo-finance2 instance) unless an
+        // explicit override is passed — gets its own caching plus the shared
+        // rate-limit circuit breaker, instead of hitting Yahoo directly and
+        // unconditionally on every single call with neither.
+        const summary = yahooFinanceInstance
+            ? await yahooFinanceInstance.quoteSummary(symbol, { modules: ['calendarEvents'] })
+            : await require('../utils/yfClient').quoteSummary(symbol, { modules: ['calendarEvents'] });
         const earningsDate = summary?.calendarEvents?.earnings?.earningsDate?.[0];
         if (!earningsDate) {
             cacheService.set(cacheKey, null, 60 * 60 * 1000); // cache miss for 1hr

@@ -68,6 +68,8 @@ export default function AdminPage() {
     const [error, setError] = useState<string | null>(null);
     const [statusActionLoading, setStatusActionLoading] = useState(false);
     const [statusActionMsg, setStatusActionMsg] = useState<string | null>(null);
+    const [sentinelAckLoading, setSentinelAckLoading] = useState(false);
+    const [sentinelAckMsg, setSentinelAckMsg] = useState<string | null>(null);
 
     useEffect(() => {
         const storedToken = localStorage.getItem('token');
@@ -122,6 +124,34 @@ export default function AdminPage() {
         }
     };
 
+    const handleAcknowledgeSentinel = async (user: AdminUser) => {
+        const ok = window.confirm(
+            `Acknowledge SENTINEL blockers for ${user.fullName || user.username}?\n\nOnly do this after reviewing the audit trail and confirming the flagged incident(s) are resolved or a false positive. Audit records are NOT deleted — this just clears the block.`
+        );
+        if (!ok) return;
+        setSentinelAckLoading(true);
+        setSentinelAckMsg(null);
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/admin/users/${user.id}/sentinel/acknowledge-blockers`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                body: JSON.stringify({ reason: 'Reviewed and confirmed resolved via Admin panel' })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Failed to acknowledge blockers');
+            setUsers(prev => prev.map(u => u.id === user.id
+                ? { ...u, readiness: { ready: data.sentinelReady, reason: data.reason, blockers: data.remainingBlockers, advisory: u.readiness?.advisory || {} } }
+                : u));
+            setSentinelAckMsg(data.sentinelReady
+                ? `${user.username}: all SENTINEL blockers cleared.`
+                : `${user.username}: some blockers remain — ${data.reason}`);
+        } catch (e: any) {
+            setSentinelAckMsg(e.message || 'Failed to acknowledge blockers');
+        } finally {
+            setSentinelAckLoading(false);
+        }
+    };
+
     if (loading) {
         return (
             <div className="min-h-screen flex items-center justify-center bg-[var(--color-bg-primary)]">
@@ -152,6 +182,40 @@ export default function AdminPage() {
                 {error && (
                     <div className="mb-4 p-3 rounded-xl bg-red-500/10 border border-red-500 text-red-600 text-sm">{error}</div>
                 )}
+
+                {/* ── SENTINEL — all-users summary ── */}
+                {(() => {
+                    const blocked = users.filter(u => u.readiness && !u.readiness.ready);
+                    if (blocked.length === 0) {
+                        return (
+                            <div className="mb-6 px-4 py-3 rounded-xl bg-green-500/10 border border-green-500 text-sm flex items-center gap-2">
+                                <span className="font-bold text-green-600">🛡️ SENTINEL</span>
+                                <span className="text-[var(--color-text-secondary)]">All accounts clear — no live-trading blockers.</span>
+                            </div>
+                        );
+                    }
+                    return (
+                        <div className="mb-6 px-4 py-3 rounded-xl bg-red-500/10 border border-red-500 text-sm">
+                            <div className="flex items-center gap-2 mb-1">
+                                <span className="font-bold text-red-600">⚠ SENTINEL</span>
+                                <span className="text-[var(--color-text-secondary)]">
+                                    {blocked.length} account{blocked.length !== 1 ? 's' : ''} blocked from live trading
+                                </span>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                                {blocked.map(u => (
+                                    <button
+                                        key={u.id}
+                                        onClick={() => setSelectedId(u.id)}
+                                        className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-red-500/15 text-red-600 hover:bg-red-500/25 transition-colors"
+                                    >
+                                        {u.fullName || u.username} — {u.readiness!.reason}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    );
+                })()}
 
                 {/* ── User list — tap/click to select ── */}
                 <div className="rounded-xl border border-[var(--color-border)] overflow-hidden mb-6">
@@ -263,13 +327,25 @@ export default function AdminPage() {
                                     </div>
                                     <div className="text-xs text-[var(--color-text-secondary)] mb-2">{selected.readiness.reason}</div>
                                     {!selected.readiness.ready && (
-                                        <div className="flex flex-wrap gap-1.5">
-                                            {Object.entries(selected.readiness.blockers).filter(([, v]) => v > 0).map(([k, v]) => (
-                                                <span key={k} className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-red-500/10 text-red-600">
-                                                    {k}: {v}
-                                                </span>
-                                            ))}
-                                        </div>
+                                        <>
+                                            <div className="flex flex-wrap gap-1.5 mb-3">
+                                                {Object.entries(selected.readiness.blockers).filter(([, v]) => v > 0).map(([k, v]) => (
+                                                    <span key={k} className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-red-500/10 text-red-600">
+                                                        {k}: {v}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                            <button
+                                                onClick={() => handleAcknowledgeSentinel(selected)}
+                                                disabled={sentinelAckLoading}
+                                                className="text-xs font-bold px-3 py-1.5 rounded-full bg-amber-600 text-white transition-opacity disabled:opacity-40"
+                                            >
+                                                {sentinelAckLoading ? 'Clearing…' : '✓ Acknowledge Blockers'}
+                                            </button>
+                                        </>
+                                    )}
+                                    {sentinelAckMsg && (
+                                        <div className="text-xs text-[var(--color-text-secondary)] mt-2">{sentinelAckMsg}</div>
                                     )}
                                 </div>
                             ) : (

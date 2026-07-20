@@ -11,7 +11,7 @@ const { protect, adminOnly } = require('../middleware/authMiddleware');
 const { query } = require('../config/database');
 const portfolioTrackingService = require('../services/portfolioTrackingService');
 const { getLocationForIp } = require('../services/ipGeolocationService');
-const { checkLiveReadiness } = require('../services/liveReadinessService');
+const { checkLiveReadiness, acknowledgeBlockers } = require('../services/liveReadinessService');
 const { logger } = require('../utils/logger');
 
 router.use(protect, adminOnly);
@@ -81,13 +81,12 @@ router.get('/users', async (req, res) => {
                 logger.debug('[Admin] Portfolio fetch failed for user in list', { userId: r.id, error: portfolioErr.message });
             }
 
-            // SENTINEL readiness — read-only. Same function this user's own live-readiness
-            // page calls, just scoped to them individually. Lets you spot a systemic issue
-            // (like this week's naked-short bugs) on an account you aren't watching as
-            // closely as your own, without needing their login. Deliberately no action
-            // endpoints wired up yet (e.g. acknowledge-blockers) — clearing a blocker
-            // affects someone else's live trading, so that's a separate decision for later,
-            // not bundled into this read-only view (2026-07-11).
+            // SENTINEL readiness — same function this user's own live-readiness page calls,
+            // just scoped to them individually. Lets you spot a systemic issue (like this
+            // week's naked-short bugs) on an account you aren't watching as closely as your
+            // own, without needing their login. Clearing a blocker for another user is a
+            // separate, admin-only action — see POST /users/:userId/sentinel/acknowledge-blockers
+            // below (added 2026-07-20, after the SENTINEL false-positive fix).
             let readiness = null;
             try {
                 const rd = await checkLiveReadiness(r.id);
@@ -188,6 +187,46 @@ router.post('/users/:userId/reactivate', async (req, res) => {
         res.json({ success: true, user: result.rows[0] });
     } catch (err) {
         logger.error('[Admin] Failed to reactivate user', { userId: req.params.userId, error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * POST /api/admin/users/:userId/sentinel/acknowledge-blockers
+ *
+ * Admin-operated counterpart to the self-service endpoint at
+ * /api/system/sentinel/acknowledge-blockers — that one only ever acknowledges
+ * the calling user's OWN blockers, so it can't be used to help someone else.
+ * This lets the admin clear a blocker on another user's account after
+ * confirming (via the audit trail) that the flagged incident is a known,
+ * already-fixed bug or otherwise resolved — the workflow this exists for is a
+ * user reporting "I can't trade" and the admin reviewing + clearing it for
+ * them. Does not delete audit records, only marks them acknowledged.
+ *
+ * Body (optional): { "reason": "confirmed resolved after reviewing audit log" }
+ */
+router.post('/users/:userId/sentinel/acknowledge-blockers', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const target = await query('SELECT id, username FROM users WHERE id = $1', [userId]);
+        if (target.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+
+        const reason = `Acknowledged by admin ${req.user.username}: ${req.body?.reason || 'confirmed resolved via admin review'}`;
+        const result = await acknowledgeBlockers(userId, reason);
+        const readiness = await checkLiveReadiness(userId);
+
+        logger.info('[Admin] SENTINEL blockers acknowledged for user', {
+            adminId: req.user.id, targetUserId: userId, targetUsername: target.rows[0].username, reason
+        });
+
+        res.json({
+            acknowledged: result,
+            sentinelReady: readiness.ready,
+            remainingBlockers: readiness.blockers,
+            reason: readiness.reason
+        });
+    } catch (err) {
+        logger.error('[Admin] Failed to acknowledge SENTINEL blockers', { userId: req.params.userId, error: err.message });
         res.status(500).json({ error: err.message });
     }
 });

@@ -174,6 +174,28 @@ const alpacaProvider = (() => {
     const _quoteCache = new Map();
     const QUOTE_CACHE_TTL = 60 * 1000; // 60 seconds
 
+    // Shared, global throttle for every Alpaca market-data call (getQuote + getBars),
+    // regardless of which scheduler makes it. This module is a singleton imported by
+    // every caller in the codebase (aiTradingScheduler, nightlyUniverseScanService,
+    // istPipelineScheduler, trailingStopService, marketMonitorService, optionsBotScheduler,
+    // etc.) — each one independently batches/throttles its OWN calls assuming it's the
+    // only consumer of the Alpaca key, but none of them know about each other. When
+    // enough overlap in the same few seconds the combined burst exceeds Alpaca's rate
+    // limit (observed 2026-07-20: 12 different symbols 429'd within ~1-2s during a live
+    // scan). A per-symbol cache alone doesn't help since it's different symbols each
+    // time. This paces every call through one shared budget so bursts queue instead of
+    // all firing at once and getting rejected.
+    const ALPACA_RATE_LIMIT_PER_MIN = parseInt(process.env.ALPACA_RATE_LIMIT_PER_MIN || '170', 10);
+    const ALPACA_MIN_INTERVAL_MS    = 60000 / Math.max(1, ALPACA_RATE_LIMIT_PER_MIN);
+    let _nextAlpacaSlot = 0;
+    async function _throttleAlpaca() {
+        const now  = Date.now();
+        const slot = Math.max(now, _nextAlpacaSlot);
+        _nextAlpacaSlot = slot + ALPACA_MIN_INTERVAL_MS;
+        const wait = slot - now;
+        if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    }
+
     // ── Stale-trade guard for gate-critical symbols (2026-07-06 incident) ──────────
     // Alpaca's free IEX snapshot served a stuck LatestTrade for QQQ for 6+ hours,
     // implying a price ~3% off the real (unremarkable) intraday range. Because
@@ -217,6 +239,7 @@ const alpacaProvider = (() => {
         // Indices/ETFs not supported by Alpaca IEX — fall back to Yahoo
         if (isYahooOnly(symbol)) return yahooProvider.getBars(symbol, interval, lookbackDays);
 
+        await _throttleAlpaca();
         const client = getClient();
         const alpacaTimeframe = {
             '1m':  '1Min',
@@ -256,6 +279,7 @@ const alpacaProvider = (() => {
         const cached = _quoteCache.get(symbol);
         if (cached && Date.now() - cached.ts < QUOTE_CACHE_TTL) return cached.data;
 
+        await _throttleAlpaca();
         const client = getClient();
         const snap = await client.getSnapshot(symbol);
         // Alpaca SDK returns PascalCase keys: LatestTrade, DailyBar, LatestQuote

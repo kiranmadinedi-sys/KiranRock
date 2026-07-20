@@ -190,7 +190,8 @@ const simulatedBroker = (() => {
             avgEntryPrice: parseFloat(h.average_price),
             currentPrice:  parseFloat(h.current_price || h.average_price),
             marketValue:   parseFloat(h.market_value  || 0),
-            unrealizedPL:  parseFloat(h.gain_loss     || 0)
+            unrealizedPL:  parseFloat(h.gain_loss     || 0),
+            assetClass:    'us_equity' // simulated broker only ever trades the us_equity universe
         }));
     }
 
@@ -734,7 +735,10 @@ const alpacaBroker = (() => {
             avgEntryPrice: parseFloat(p.avg_entry_price),
             currentPrice:  parseFloat(p.current_price),
             marketValue:   parseFloat(p.market_value),
-            unrealizedPL:  parseFloat(p.unrealized_pl)
+            unrealizedPL:  parseFloat(p.unrealized_pl),
+            // 'us_equity' or 'crypto' — lets callers apply the right trading-hours
+            // rule per position instead of assuming everything follows NYSE hours.
+            assetClass:    p.asset_class || 'us_equity'
         }));
     }
 

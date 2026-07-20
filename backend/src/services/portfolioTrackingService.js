@@ -56,6 +56,18 @@ function _isMarketHours() {
     return t >= 9.5 && t < 16;
 }
 
+/**
+ * Whether a SPECIFIC asset's market is open right now — not one global flag
+ * for the whole portfolio. us_equity follows NYSE hours; crypto (if this
+ * platform ever holds any — it doesn't today, universe is us_equity-only)
+ * trades 24/7 and must never be treated as "closed". A blanket market-hours
+ * gate would silently freeze a genuinely-moving crypto position's chart.
+ */
+function _isAssetMarketOpen(assetClass) {
+    if (assetClass === 'crypto') return true;
+    return _isMarketHours();
+}
+
 async function _getAlpacaData(userId, forceRefresh = false) {
     const ttlMs  = _isMarketHours() ? 20_000 : 5 * 60_000;
     const cached = _alpacaCache.get(userId);
@@ -98,8 +110,10 @@ const getPortfolioSummary = async (userId) => {
         // on every 30-second frontend poll — TTL 20s market hours, 5 min otherwise).
         const alpacaData    = await _getAlpacaData(userId);
         const alpacaPriceMap = {};
+        const alpacaAssetClassMap = {};
         for (const p of alpacaData.positions) {
             if (p.symbol && p.currentPrice) alpacaPriceMap[p.symbol] = p.currentPrice;
+            if (p.symbol) alpacaAssetClassMap[p.symbol] = p.assetClass || 'us_equity';
         }
         const alpacaEquity = alpacaData.equity;
         const alpacaCash   = alpacaData.cash;
@@ -111,19 +125,34 @@ const getPortfolioSummary = async (userId) => {
                     // lookup precomputed firstBought for this symbol
                     const firstBought = firstBoughtMap[holding.symbol] || null;
 
-                    // 1) Alpaca live position price — authoritative for live accounts, never stale
-                    // 2) Yahoo Finance fallback — for symbols not currently in Alpaca positions
-                    // 3) Cached holding price or cost basis
-                    let currentPrice = alpacaPriceMap[holding.symbol] ?? null;
-                    if (currentPrice === null) {
-                        try {
-                            currentPrice = await marketQuoteService.getCurrentPrice(holding.symbol);
-                        } catch (e) {
-                            currentPrice = null;
+                    // While this asset's own market is closed, hold the last stored price
+                    // steady instead of re-pulling a "live" quote — closed-market quotes can
+                    // drift a few cents between calls for reasons unrelated to real trading
+                    // (settlement/source refresh), which shows up as a phantom move on the
+                    // chart even though nothing actually happened. Checked per-asset (not one
+                    // global flag) so a 24/7 asset like crypto — if this platform ever holds
+                    // one; today's universe is us_equity-only — still gets fresh prices.
+                    const assetClass = alpacaAssetClassMap[holding.symbol] || 'us_equity';
+                    const hasStoredPrice = holding.currentPrice !== null && holding.currentPrice !== undefined;
+
+                    let currentPrice;
+                    if (hasStoredPrice && !_isAssetMarketOpen(assetClass)) {
+                        currentPrice = holding.currentPrice;
+                    } else {
+                        // 1) Alpaca live position price — authoritative for live accounts, never stale
+                        // 2) Yahoo Finance fallback — for symbols not currently in Alpaca positions
+                        // 3) Cached holding price or cost basis
+                        currentPrice = alpacaPriceMap[holding.symbol] ?? null;
+                        if (currentPrice === null) {
+                            try {
+                                currentPrice = await marketQuoteService.getCurrentPrice(holding.symbol);
+                            } catch (e) {
+                                currentPrice = null;
+                            }
                         }
-                    }
-                    if (currentPrice === null || currentPrice === undefined) {
-                        currentPrice = holding.currentPrice ?? holding.averagePrice;
+                        if (currentPrice === null || currentPrice === undefined) {
+                            currentPrice = holding.currentPrice ?? holding.averagePrice;
+                        }
                     }
 
                     const currentValue = currentPrice * holding.quantity;
@@ -224,9 +253,21 @@ const getPortfolioSummary = async (userId) => {
         const sellTrades = trades.filter(t => t.type === 'SELL');
         const totalRealizedPL = sellTrades.reduce((sum, t) => sum + (t.profitLoss || 0), 0);
         
-        // Total portfolio value — prefer Alpaca equity for live accounts (exact mark-to-market)
+        // Total portfolio value — prefer Alpaca's own live equity (exact mark-to-market)
+        // WHILE at least one held asset is actually trading. If every position's market
+        // is currently closed, Alpaca's own equity figure can still drift a few cents
+        // between reads for reasons unrelated to real trading (the same closed-market
+        // noise the per-holding freeze above guards against) — fall back to the stable,
+        // freeze-aware sum instead so the chart doesn't show phantom movement with zero
+        // market activity behind it. Checked per-asset, not one global flag, so a mixed
+        // portfolio with any 24/7 asset (crypto — none held today) still prefers live equity.
+        const anyAssetMarketOpen = holdings.some(h =>
+            _isAssetMarketOpen(alpacaAssetClassMap[h.symbol] || 'us_equity')
+        );
         let cashBalance = alpacaCash ?? account.balance;
-        let totalPortfolioValue = alpacaEquity ?? (cashBalance + totalCurrentValue);
+        let totalPortfolioValue = (anyAssetMarketOpen && alpacaEquity != null)
+            ? alpacaEquity
+            : (cashBalance + totalCurrentValue);
 
         // Sanity guard: a transient Alpaca read (cash/equity briefly out of sync — e.g. a
         // pending order momentarily holding cash, or Alpaca's own account-side reconciliation

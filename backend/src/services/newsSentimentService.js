@@ -4,6 +4,7 @@ const yfClient = require('../utils/yfClient');
 const cacheService = require('./cacheService');
 const { fetchAlphaVantageNews } = require('./newsAggregationService');
 const { fetchXSymbolNews, isXConfigured } = require('./xNewsService');
+const { fetchPolygonNews } = require('./polygonNewsService');
 
 const NEWS_SENTIMENT_CACHE_FILE = path.join(__dirname, '../storage/newsSentimentCache.json');
 const NEWS_SENTIMENT_CACHE_MS = Math.max(5 * 60 * 1000, parseInt(process.env.NEWS_SENTIMENT_CACHE_MS || `${30 * 60 * 1000}`, 10));
@@ -43,21 +44,39 @@ function setPersistedCacheEntry(symbol, payload) {
     writePersistedCache(cache);
 }
 
-function normalizeYahooArticles(symbol, news) {
-    const items = news?.news || [];
-    return items.map(article => ({
-        symbol,
-        title: article.title,
-        summary: article.summary || '',
-        publisher: article.publisher || 'Yahoo Finance',
-        source: 'Yahoo Finance',
-        sourceType: 'news',
-        link: article.link,
-        publishedAt: article.providerPublishTime
-            ? new Date(article.providerPublishTime * 1000).toISOString()
-            : new Date().toISOString(),
-        weight: 1.0
-    }));
+function normalizePolygonArticles(symbol, items = []) {
+    const SENTIMENT_MAP = { positive: 1, neutral: 0, negative: -1 };
+    return items.map(article => {
+        // Polygon includes per-ticker sentiment ("insights") already computed on
+        // each article — carried through as providedSentiment for parity with
+        // the Alpha Vantage source (existing convention in this file), while the
+        // actual scoring below still runs its own text analysis uniformly across
+        // every source rather than trusting any one provider's label alone.
+        const insight = (article.insights || []).find(i => i.ticker === symbol);
+        return {
+            symbol,
+            title: article.title,
+            summary: article.description || '',
+            publisher: article.publisher?.name || 'Polygon',
+            source: article.publisher?.name || 'Polygon',
+            sourceType: 'news',
+            link: article.article_url,
+            publishedAt: article.published_utc || new Date().toISOString(),
+            weight: 1.1,
+            providedSentiment: insight ? (SENTIMENT_MAP[insight.sentiment] ?? null) : null
+        };
+    });
+}
+
+// Alpha Vantage returns timestamps as "YYYYMMDDTHHMMSS" (no separators) — not
+// parseable by `new Date()` (silently produces Invalid Date, which later throws
+// "Invalid time value" on .toISOString() and was wiping out the entire merged
+// article list, not just this source's contribution). Converts to real ISO 8601.
+function parseAlphaVantageTimestamp(raw) {
+    const match = typeof raw === 'string' && raw.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$/);
+    if (!match) return new Date().toISOString();
+    const [, year, month, day, hour, min, sec] = match;
+    return `${year}-${month}-${day}T${hour}:${min}:${sec}Z`;
 }
 
 function normalizeAlphaVantageArticles(symbol, items = []) {
@@ -69,7 +88,7 @@ function normalizeAlphaVantageArticles(symbol, items = []) {
         source: article.source || 'Alpha Vantage',
         sourceType: 'news',
         link: article.url,
-        publishedAt: article.published_at || new Date().toISOString(),
+        publishedAt: parseAlphaVantageTimestamp(article.published_at),
         weight: 1.15,
         providedSentiment: typeof article.sentiment === 'number' ? article.sentiment : null
     }));
@@ -186,14 +205,20 @@ const getNewsSentiment = async (symbol, options = {}) => {
     }
 
     try {
-        const [news, alphaVantageNews, xNews] = await Promise.all([
-            yfClient.search(normalizedSymbol, { newsCount: 10 }).catch(() => null),
+        // Polygon replaced Yahoo here (2026-07-20) — Yahoo's unofficial search API was
+        // persistently rate-limited (confirmed via yfClient's shared circuit breaker
+        // tripping on nearly every call), while Polygon's news endpoint works reliably
+        // on the existing plan with no upgrade needed and already includes per-ticker
+        // sentiment. Yahoo is kept elsewhere in this file (quoteSummary, below) and for
+        // earnings-date lookups in enhancedAITradingBot.js — only the news source moved.
+        const [polygonNews, alphaVantageNews, xNews] = await Promise.all([
+            fetchPolygonNews(normalizedSymbol, { limit: 10 }).catch(() => []),
             fetchAlphaVantageNews(normalizedSymbol).catch(() => []),
             isXConfigured() ? fetchXSymbolNews(normalizedSymbol, { maxResults: 8 }).catch(() => []) : Promise.resolve([])
         ]);
 
         let articles = deduplicateArticles([
-            ...normalizeYahooArticles(normalizedSymbol, news),
+            ...normalizePolygonArticles(normalizedSymbol, polygonNews),
             ...normalizeAlphaVantageArticles(normalizedSymbol, alphaVantageNews),
             ...normalizeXArticles(normalizedSymbol, xNews)
         ]).map(article => ({

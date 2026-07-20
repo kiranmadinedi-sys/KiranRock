@@ -86,6 +86,14 @@ async function checkLiveReadiness(userId = null, {
                 // BLOCKER: stop-loss failures (OPEN_WITH_STOP with no terminal state after 1 day,
                 // but ONLY if the position is no longer held — swing trades stay OPEN_WITH_STOP
                 // for many days/weeks while the position is active, which is correct behaviour).
+                //
+                // brokerService.sellMarket() always mints a fresh idempotency_key for every sell
+                // (`SYMBOL:date:sell:reason`) — it never reuses the original buy order's key. That
+                // means a perfectly successful trailing-stop/stop-loss exit can NEVER satisfy a
+                // same-idempotency_key terminal-state check, so the first NOT EXISTS below (kept
+                // for legacy same-key closes/bracket cancels) is supplemented with a second check
+                // that matches by symbol+user instead, requiring no new buy-fill in between so a
+                // later, unrelated round-trip's close can't mask a genuinely unresolved incident.
                 query(`
                     SELECT COUNT(*) AS cnt FROM (
                         SELECT DISTINCT o.idempotency_key FROM order_audit_log o
@@ -100,6 +108,21 @@ async function checkLiveReadiness(userId = null, {
                               SELECT 1 FROM order_audit_log t
                               WHERE t.idempotency_key = o.idempotency_key
                                 AND t.state IN ('STOPPED','CLOSED','CLOSED_MANUAL','CANCELED','REJECTED')
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM order_audit_log t
+                              WHERE t.symbol = o.symbol
+                                AND t.user_id = o.user_id
+                                AND t.state IN ('STOPPED','CLOSED','CLOSED_MANUAL')
+                                AND t.created_at > o.created_at
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM order_audit_log b
+                                    WHERE b.symbol = o.symbol
+                                      AND b.user_id = o.user_id
+                                      AND b.state = 'FILLED'
+                                      AND b.created_at > o.created_at
+                                      AND b.created_at < t.created_at
+                                )
                           )
                           AND NOT EXISTS (
                               SELECT 1 FROM holdings h
@@ -252,6 +275,7 @@ async function acknowledgeBlockers(userId, reason = 'Acknowledged by operator') 
     `);
 
     // 5. Gather stop-loss failures: OPEN_WITH_STOP with no terminal state, position no longer held
+    // (mirrors the symbol+user fallback match in checkLiveReadiness — see comment there)
     const stopFailKeys = await query(`
         SELECT DISTINCT o.idempotency_key FROM order_audit_log o
         WHERE o.state = 'OPEN_WITH_STOP'
@@ -265,6 +289,21 @@ async function acknowledgeBlockers(userId, reason = 'Acknowledged by operator') 
               SELECT 1 FROM order_audit_log t
               WHERE t.idempotency_key = o.idempotency_key
                 AND t.state IN ('STOPPED','CLOSED','CLOSED_MANUAL','CANCELED','REJECTED')
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM order_audit_log t
+              WHERE t.symbol = o.symbol
+                AND t.user_id = o.user_id
+                AND t.state IN ('STOPPED','CLOSED','CLOSED_MANUAL')
+                AND t.created_at > o.created_at
+                AND NOT EXISTS (
+                    SELECT 1 FROM order_audit_log b
+                    WHERE b.symbol = o.symbol
+                      AND b.user_id = o.user_id
+                      AND b.state = 'FILLED'
+                      AND b.created_at > o.created_at
+                      AND b.created_at < t.created_at
+                )
           )
           AND NOT EXISTS (
               SELECT 1 FROM holdings h

@@ -1,6 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const yfClient = require('../utils/yfClient');
 const cacheService = require('./cacheService');
 const { fetchAlphaVantageNews } = require('./newsAggregationService');
 const { fetchXSymbolNews, isXConfigured } = require('./xNewsService');
@@ -490,29 +489,40 @@ const calculateOverallSentiment = (articles) => {
 
 /**
  * Fetches analyst ratings.
+ * Moved off Yahoo (2026-07-20) — same persistent rate-limiting as the news
+ * source, just noisier since it has no circuit breaker of its own and was
+ * logging a fresh "Error fetching analyst ratings" on nearly every call.
+ * Finnhub's recommendation-trends endpoint returns the exact same
+ * strongBuy/buy/hold/sell/strongSell shape Yahoo did, on the key already
+ * configured for other features in this codebase — no upgrade needed.
  */
 const getAnalystRatings = async (symbol) => {
+    const FINNHUB_KEY = process.env.FINNHUB_KEY || '';
+    if (!FINNHUB_KEY) return null;
+
     try {
-        const quoteSummary = await yfClient.quoteSummary(symbol, {
-            modules: ['recommendationTrend', 'financialData'],
-            ttl: 60 * 60 * 1000
+        const axios = require('axios');
+        const response = await axios.get('https://finnhub.io/api/v1/stock/recommendation', {
+            params: { symbol: symbol.toUpperCase(), token: FINNHUB_KEY },
+            timeout: 8000
         });
 
-        const recommendation = quoteSummary.financialData?.recommendationKey;
-        const trend = quoteSummary.recommendationTrend?.trend?.[0];
-        
-        if (!recommendation && !trend) {
-            return null;
-        }
+        const trend = response.data?.[0];
+        if (!trend) return null;
+
+        // Finnhub has no single "current rating" string the way Yahoo's
+        // financialData.recommendationKey did — derive it from the same
+        // consensus logic already used for the `consensus` field below.
+        const consensus = deriveConsensus(trend);
 
         return {
-            currentRating: recommendation ? recommendation.toUpperCase() : 'N/A',
-            strongBuy: trend?.strongBuy || 0,
-            buy: trend?.buy || 0,
-            hold: trend?.hold || 0,
-            sell: trend?.sell || 0,
-            strongSell: trend?.strongSell || 0,
-            consensus: deriveConsensus(trend)
+            currentRating: consensus !== 'N/A' ? consensus.toUpperCase() : 'N/A',
+            strongBuy: trend.strongBuy || 0,
+            buy: trend.buy || 0,
+            hold: trend.hold || 0,
+            sell: trend.sell || 0,
+            strongSell: trend.strongSell || 0,
+            consensus
         };
     } catch (error) {
         console.error('Error fetching analyst ratings:', error.message);

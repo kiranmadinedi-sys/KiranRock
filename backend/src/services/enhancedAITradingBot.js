@@ -4357,13 +4357,28 @@ async function manageExistingPositions(userId) {
                     try {
                         const livePosition = await brokerService.getPosition(userId, sym);
                         const liveQty = livePosition ? parseFloat(livePosition.qty) : 0;
-                        if (liveQty < parseFloat(qty)) {
+                        // holdings.quantity is NUMERIC(18,8) — Alpaca's true qty can carry more
+                        // precision (e.g. 0.481337867), so the DB snapshot is a ROUNDED value that
+                        // can end up microscopically LARGER than the live qty whenever the 9th+
+                        // decimal digit rounds up. A strict liveQty < qty comparison then reads as
+                        // "position closed" every single cycle for that symbol, permanently — not
+                        // a real close, just rounding dust (confirmed live 2026-07-21: NET and MELI
+                        // stuck "no longer matches snapshot" every cycle for hours, off by ~3e-9
+                        // shares, while the position was fully open the whole time). A real partial
+                        // close changes qty by a meaningful fraction, not billionths — 1e-6 headroom
+                        // comfortably separates the two.
+                        const QTY_EPSILON = 1e-6;
+                        if (liveQty < parseFloat(qty) - QTY_EPSILON) {
                             logger.warn('[StopRepair] Skipping — position no longer matches snapshot (likely just closed)', {
                                 userId, sym, snapshotQty: qty, liveQty
                             });
                         } else {
-                            await brokerService.placeStopOrder(userId, sym, qty, expectedStop);
-                            logger.warn('[StopRepair] Missing stop — placed new GTC stop', { userId, sym, expectedStop, qty });
+                            // Use the broker's own qty for the order, not the DB snapshot — placing
+                            // a sell for a rounded-up qty that's fractionally more than truly
+                            // available would itself fail.
+                            const placeQty = livePosition ? String(livePosition.qty) : qty;
+                            await brokerService.placeStopOrder(userId, sym, placeQty, expectedStop);
+                            logger.warn('[StopRepair] Missing stop — placed new GTC stop', { userId, sym, expectedStop, qty: placeQty });
                             alertService.sendMessage(userId,
                                 `🛡️ *Stop Repaired* — ${sym}\nStop was missing; placed GTC stop @ $${expectedStop.toFixed(2)}`
                             ).catch(() => {});
@@ -4394,14 +4409,21 @@ async function manageExistingPositions(userId) {
                             // trailingStopService.js already uses for its own order cancellation.
                             const neededQty = parseFloat(qty);
                             let released = false;
+                            // Prefer the broker's own qty over the DB-snapshot `qty` when we have
+                            // it — same rounding-mismatch reasoning as the "missing stop" branch
+                            // above (NUMERIC(18,8) snapshot can round up past the true live qty).
+                            let placeQty = qty;
                             try {
                                 await brokerService.cancelOrder(userId, existing.orderId);
                                 for (let attempt = 0; attempt < 4 && !released; attempt++) {
                                     await new Promise(r => setTimeout(r, 1500));
                                     const live = await brokerService.getPosition(userId, sym).catch(() => null);
-                                    if (live && parseFloat(live.qty_available ?? live.qty) >= neededQty - 1e-6) released = true;
+                                    if (live && parseFloat(live.qty_available ?? live.qty) >= neededQty - 1e-6) {
+                                        released = true;
+                                        placeQty = String(live.qty);
+                                    }
                                 }
-                                await brokerService.placeStopOrder(userId, sym, qty, expectedStop);
+                                await brokerService.placeStopOrder(userId, sym, placeQty, expectedStop);
                                 logger.info('[StopRepair] Stale stop raised', {
                                     userId, sym, was: existing.stopPrice, now: expectedStop, drift: (drift * 100).toFixed(2) + '%', sharesReleased: released
                                 });
@@ -4412,10 +4434,13 @@ async function manageExistingPositions(userId) {
                                         for (let attempt = 0; attempt < 4 && !released; attempt++) {
                                             await new Promise(r => setTimeout(r, 1500));
                                             const live = await brokerService.getPosition(userId, sym).catch(() => null);
-                                            if (live && parseFloat(live.qty_available ?? live.qty) >= neededQty - 1e-6) released = true;
+                                            if (live && parseFloat(live.qty_available ?? live.qty) >= neededQty - 1e-6) {
+                                                released = true;
+                                                placeQty = String(live.qty);
+                                            }
                                         }
                                     }
-                                    await brokerService.placeStopOrder(userId, sym, qty, existing.stopPrice);
+                                    await brokerService.placeStopOrder(userId, sym, placeQty, existing.stopPrice);
                                     logger.info('[StopRepair] Previous stop restored after raise failure', { userId, sym, restoredPrice: existing.stopPrice });
                                 } catch (restoreErr) {
                                     logger.error('[StopRepair] CRITICAL — position left with no stop after failed raise+restore', {

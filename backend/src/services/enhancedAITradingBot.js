@@ -4383,14 +4383,35 @@ async function manageExistingPositions(userId) {
                         // STALE stop — check if price diverged >0.2% from expected
                         const drift = Math.abs(existing.stopPrice - expectedStop) / expectedStop;
                         if (drift > 0.002) {
+                            // Cancel-then-place is not atomic: if placeStopOrder fails after the
+                            // cancel already succeeded, the position is left with NO stop at all
+                            // until the next cycle. Observed live 2026-07-21 — TMUS repeatedly lost
+                            // its stop here every ~5-10min for 90+ minutes during market hours (422
+                            // on the immediate re-place, most likely Alpaca not yet having released
+                            // the shares from the just-canceled order — brokerService.sellMarket()
+                            // already waits after a cancel for exactly this reason, this path didn't).
+                            // Fix: wait for the cancel to settle, and if the new stop still fails,
+                            // restore the old price rather than leaving the position naked.
                             try {
                                 await brokerService.cancelOrder(userId, existing.orderId);
+                                await new Promise(r => setTimeout(r, 2000));
                                 await brokerService.placeStopOrder(userId, sym, qty, expectedStop);
                                 logger.info('[StopRepair] Stale stop raised', {
                                     userId, sym, was: existing.stopPrice, now: expectedStop, drift: (drift * 100).toFixed(2) + '%'
                                 });
                             } catch (updateErr) {
-                                logger.warn('[StopRepair] Stop update failed', { userId, sym, err: updateErr.message });
+                                logger.warn('[StopRepair] Stop update failed — restoring previous stop price', { userId, sym, err: updateErr.message });
+                                try {
+                                    await brokerService.placeStopOrder(userId, sym, qty, existing.stopPrice);
+                                    logger.info('[StopRepair] Previous stop restored after raise failure', { userId, sym, restoredPrice: existing.stopPrice });
+                                } catch (restoreErr) {
+                                    logger.error('[StopRepair] CRITICAL — position left with no stop after failed raise+restore', {
+                                        userId, sym, err: restoreErr.message
+                                    });
+                                    alertService.sendMessage(userId,
+                                        `⚠️ *Stop Protection Failed* — ${sym}\nCould not update or restore protective stop. Please check this position manually.`
+                                    ).catch(() => {});
+                                }
                             }
                         }
                     }

@@ -143,8 +143,22 @@ async function startWorker(options = {}) {
     console.log('\n📰 Starting News-Triggered Signal Rescan Service...');
     newsRescanService.startNewsRescanService();
 
-    console.log('\n🔺 Starting Trailing Stop Service...');
-    trailingStopService.startTrailingStopService();
+    // Disabled 2026-07-21: this ran its own independent 5-min interval alongside
+    // enhancedAITradingBot.js's manageExistingPositions()/StopRepair, which ALSO
+    // runs every ~5min (as part of the per-user AI cycle) and manages the exact
+    // same stop orders — two uncoordinated systems racing on the same symbols.
+    // Confirmed live: both fired within seconds of each other on NET/TMUS/MELI,
+    // one's cancel-then-place colliding with the other's, producing 403s
+    // ("insufficient qty available" — shares already locked by the other's fresh
+    // order) and 422s, repeatedly leaving fractional positions with zero
+    // protective stop during market hours. StopRepair is the more capable of the
+    // two (peak-based ATR trailing, live-position guard, cancel-failure recovery)
+    // and already runs at the same frequency via the main per-user cycle's
+    // single-flight lock (_userCyclesInFlight) — no coordination work needed if
+    // this one is simply not running a second, independent pass over the same
+    // positions.
+    // console.log('\n🔺 Starting Trailing Stop Service...');
+    // trailingStopService.startTrailingStopService();
 
     console.log('\n🔗 Starting Telegram Account-Linking Listener...');
     telegramLinkService.startTelegramLinkListener();

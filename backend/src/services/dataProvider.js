@@ -221,9 +221,13 @@ const alpacaProvider = (() => {
         return mins >= (9 * 60 + 30) && mins < (16 * 60);
     }
 
-    // Alpaca doesn't support index symbols (^VIX, ^GSPC etc.) — fall back to Yahoo
+    // Alpaca's equity IEX feed can't serve indices (^VIX, ^GSPC) or futures contracts
+    // (ES=F, NQ=F, DX=F, CL=F, GC=F — used by globalSentimentService/ATLAS for macro
+    // context every 15 min) — both guaranteed to 400 on every attempt, not a coverage
+    // gap that improves over time. Skip straight to Yahoo instead of wasting a
+    // throttled Alpaca call on a request that can never succeed (2026-07-20).
     function isIndexSymbol(symbol) {
-        return symbol.startsWith('^') || symbol.startsWith('=');
+        return symbol.startsWith('^') || symbol.startsWith('=') || /=F$/.test(symbol);
     }
 
     // ETFs not carried by Alpaca IEX free feed — skip directly to real Yahoo to avoid

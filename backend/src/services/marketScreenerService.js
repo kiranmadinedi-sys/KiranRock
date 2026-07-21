@@ -485,6 +485,15 @@ function refreshCache() {
  * The asset_universe table is refreshed nightly from Alpaca — any new IPO that
  * Alpaca makes tradable will have first_added_at set to the night it was discovered.
  * Returns [] silently if the column doesn't exist yet (pre-migration fallback).
+ *
+ * shortable=true is the filter that actually matters here (2026-07-20 fix): Alpaca's
+ * asset-listing endpoint marks tons of SPAC-unit/thinly-traded recent listings as
+ * "tradable"/"active" even though its IEX market-data feed has no real snapshot for
+ * them (guaranteed 404 on every quote call). Every junk ticker checked from a scan
+ * that fell over on this (RECI, PTACW, RNMN, NTAL, DRMY, QJL, SCJL, SHOTR, CTJL, CJUL,
+ * NQLT, IDJL, HJLY, EMFI, DVVY, ZCBB) had shortable=false — real, liquid recent IPOs
+ * get marked shortable quickly once there's actual trading interest. This filter alone
+ * cut the recent-IPO pool from 368 candidates to 13 on the current asset_universe data.
  */
 async function getRecentIPOSymbols() {
     try {
@@ -493,6 +502,7 @@ async function getRecentIPOSymbols() {
             SELECT symbol FROM asset_universe
             WHERE tradable = true
               AND status = 'active'
+              AND shortable = true
               AND exchange IN ('NYSE', 'NASDAQ', 'ARCA', 'BATS', 'AMEX')
               AND first_added_at > NOW() - INTERVAL '90 days'
               AND symbol ~ '^[A-Z]{1,5}$'

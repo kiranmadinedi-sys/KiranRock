@@ -164,63 +164,64 @@ async function _realizedPnl(userId, sell, todayBuys, today) {
     return null;   // no cost basis available — don't show a misleading number
 }
 
-async function buildDailySummary() {
-    const today   = etNow().toISOString().slice(0, 10);
-    const users   = await getActiveUsers();
-    const lines   = [`📊 *Market Close Summary — ${today}*`, ''];
+// Builds the market-close summary for ONE user only — each trader's own trades
+// and P/L, never anyone else's. Previously this looped every active user into a
+// single shared message broadcast to everyone (including non-admins), leaking
+// every account's trade activity and realized P/L to every other user (found
+// 2026-07-20). Admin still sees every user's summary — sendMessage() at the
+// call site cc's admin on each per-user send, same as every other personalized
+// alert in this codebase (trade executed, stop-loss triggered, etc.).
+async function buildDailySummaryForUser(u) {
+    const today = etNow().toISOString().slice(0, 10);
+    const lines = [`📊 *Market Close Summary — ${today}*`, '', `👤 *${u.username}*`];
 
-    for (const u of users) {
-        const trades = await query(
-            `SELECT action, symbol, quantity, price, total
-             FROM trades
-             WHERE user_id = $1 AND trade_date::date = $2::date
-             ORDER BY trade_date`,
-            [u.id, today]
-        );
-        const buys  = trades.rows.filter(t => t.action === 'BUY');
-        const sells = trades.rows.filter(t => t.action === 'SELL');
+    const trades = await query(
+        `SELECT action, symbol, quantity, price, total
+         FROM trades
+         WHERE user_id = $1 AND trade_date::date = $2::date
+         ORDER BY trade_date`,
+        [u.id, today]
+    );
+    const buys  = trades.rows.filter(t => t.action === 'BUY');
+    const sells = trades.rows.filter(t => t.action === 'SELL');
 
-        lines.push(`👤 *${u.username}*`);
+    if (buys.length === 0 && sells.length === 0) {
+        lines.push('  No trades today');
+    } else {
+        // Buys = capital deployed into new positions — NOT a loss
+        if (buys.length) {
+            const deployed = buys.reduce((s, t) => s + parseFloat(t.total || 0), 0);
+            lines.push(
+                `  🟢 Opened: ${buys.map(t => `${t.symbol}×${t.quantity}`).join(', ')}` +
+                ` (deployed $${deployed.toFixed(0)})`
+            );
+        }
 
-        if (buys.length === 0 && sells.length === 0) {
-            lines.push('  No trades today');
-        } else {
-            // Buys = capital deployed into new positions — NOT a loss
-            if (buys.length) {
-                const deployed = buys.reduce((s, t) => s + parseFloat(t.total || 0), 0);
-                lines.push(
-                    `  🟢 Opened: ${buys.map(t => `${t.symbol}×${t.quantity}`).join(', ')}` +
-                    ` (deployed $${deployed.toFixed(0)})`
-                );
+        // Sells = compute realized P/L vs actual cost basis
+        if (sells.length) {
+            let totalRealized = 0;
+            let missingBasis  = 0;
+            const sellParts   = [];
+
+            for (const sell of sells) {
+                const pnl = await _realizedPnl(u.id, sell, buys, today);
+                if (pnl !== null) {
+                    totalRealized += pnl;
+                    sellParts.push(`${sell.symbol}×${sell.quantity} (${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)})`);
+                } else {
+                    missingBasis++;
+                    sellParts.push(`${sell.symbol}×${sell.quantity}`);
+                }
             }
 
-            // Sells = compute realized P/L vs actual cost basis
-            if (sells.length) {
-                let totalRealized = 0;
-                let missingBasis  = 0;
-                const sellParts   = [];
+            lines.push(`  🔴 Closed: ${sellParts.join(', ')}`);
 
-                for (const sell of sells) {
-                    const pnl = await _realizedPnl(u.id, sell, buys, today);
-                    if (pnl !== null) {
-                        totalRealized += pnl;
-                        sellParts.push(`${sell.symbol}×${sell.quantity} (${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)})`);
-                    } else {
-                        missingBasis++;
-                        sellParts.push(`${sell.symbol}×${sell.quantity}`);
-                    }
-                }
-
-                lines.push(`  🔴 Closed: ${sellParts.join(', ')}`);
-
-                if (missingBasis < sells.length) {
-                    // At least one sell has a known cost basis
-                    const sign = totalRealized >= 0 ? '+' : '';
-                    lines.push(`  💰 Realized P/L: ${sign}$${totalRealized.toFixed(2)}`);
-                }
+            if (missingBasis < sells.length) {
+                // At least one sell has a known cost basis
+                const sign = totalRealized >= 0 ? '+' : '';
+                lines.push(`  💰 Realized P/L: ${sign}$${totalRealized.toFixed(2)}`);
             }
         }
-        lines.push('');
     }
 
     return lines.join('\n');
@@ -287,11 +288,18 @@ async function runMonitorCycle() {
         }
 
         // ── Market close summary ─────────────────────────────────────────────
+        // Per-user send (not alertAll/broadcastToUsers) — each trader's summary
+        // contains only their own trades, never another user's. Admin still sees
+        // every user's summary via sendMessage()'s built-in admin cc.
         if (isJustClosed && !_marketCloseAlerted) {
             _marketCloseAlerted = true;
-            const summary = await buildDailySummary();
-            await alertAll(summary);
-            logger.info('[MarketMonitor] Sent market close summary');
+            const alertSvc = require('./telegramAlertService');
+            const users    = await getActiveUsers();
+            for (const u of users) {
+                const summary = await buildDailySummaryForUser(u);
+                await alertSvc.sendMessage(u.id, summary).catch(() => {});
+            }
+            logger.info('[MarketMonitor] Sent market close summaries', { userCount: users.length });
         }
 
     } catch (err) {

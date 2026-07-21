@@ -758,9 +758,17 @@ const alpacaBroker = (() => {
 
     async function placeStopOrder(userId, symbol, qty, stopPrice) {
         const { client } = await getClientForUser(userId);
+        // Alpaca does not support GTC stop orders for fractional quantities — only 'day'.
+        // This was hardcoded to 'gtc' unconditionally, so every StopRepair call
+        // (manageExistingPositions in enhancedAITradingBot.js) for a fractional position
+        // failed with a 422, over and over, every cycle — repeatedly leaving positions
+        // with no protective stop at all during live market hours (found 2026-07-21).
+        // trailingStopService.js's own _createStopOrder already handles this correctly;
+        // this was the one path that didn't.
+        const isFractional = parseFloat(qty) !== Math.floor(parseFloat(qty));
         return client.createOrder({
             symbol, qty: String(qty), side: 'sell',
-            type: 'stop', time_in_force: 'gtc',
+            type: 'stop', time_in_force: isFractional ? 'day' : 'gtc',
             stop_price: String(parseFloat(stopPrice).toFixed(2))
         });
     }

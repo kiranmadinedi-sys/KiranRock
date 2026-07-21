@@ -4385,23 +4385,36 @@ async function manageExistingPositions(userId) {
                         if (drift > 0.002) {
                             // Cancel-then-place is not atomic: if placeStopOrder fails after the
                             // cancel already succeeded, the position is left with NO stop at all
-                            // until the next cycle. Observed live 2026-07-21 — TMUS repeatedly lost
-                            // its stop here every ~5-10min for 90+ minutes during market hours (422
-                            // on the immediate re-place, most likely Alpaca not yet having released
-                            // the shares from the just-canceled order — brokerService.sellMarket()
-                            // already waits after a cancel for exactly this reason, this path didn't).
-                            // Fix: wait for the cancel to settle, and if the new stop still fails,
-                            // restore the old price rather than leaving the position naked.
+                            // until the next cycle. Observed live 2026-07-21 — TMUS/NET/MELI
+                            // repeatedly lost their stop here for hours during market hours (403/422
+                            // on the re-place — Alpaca hasn't released the shares from the
+                            // just-canceled order yet). A flat 2s wait wasn't reliably long enough
+                            // (worked most cycles, still failed some) — poll qty_available instead
+                            // of guessing a fixed delay, matching the verify-and-retry pattern
+                            // trailingStopService.js already uses for its own order cancellation.
+                            const neededQty = parseFloat(qty);
+                            let released = false;
                             try {
                                 await brokerService.cancelOrder(userId, existing.orderId);
-                                await new Promise(r => setTimeout(r, 2000));
+                                for (let attempt = 0; attempt < 4 && !released; attempt++) {
+                                    await new Promise(r => setTimeout(r, 1500));
+                                    const live = await brokerService.getPosition(userId, sym).catch(() => null);
+                                    if (live && parseFloat(live.qty_available ?? live.qty) >= neededQty - 1e-6) released = true;
+                                }
                                 await brokerService.placeStopOrder(userId, sym, qty, expectedStop);
                                 logger.info('[StopRepair] Stale stop raised', {
-                                    userId, sym, was: existing.stopPrice, now: expectedStop, drift: (drift * 100).toFixed(2) + '%'
+                                    userId, sym, was: existing.stopPrice, now: expectedStop, drift: (drift * 100).toFixed(2) + '%', sharesReleased: released
                                 });
                             } catch (updateErr) {
-                                logger.warn('[StopRepair] Stop update failed — restoring previous stop price', { userId, sym, err: updateErr.message });
+                                logger.warn('[StopRepair] Stop update failed — restoring previous stop price', { userId, sym, err: updateErr.message, sharesReleased: released });
                                 try {
+                                    if (!released) {
+                                        for (let attempt = 0; attempt < 4 && !released; attempt++) {
+                                            await new Promise(r => setTimeout(r, 1500));
+                                            const live = await brokerService.getPosition(userId, sym).catch(() => null);
+                                            if (live && parseFloat(live.qty_available ?? live.qty) >= neededQty - 1e-6) released = true;
+                                        }
+                                    }
                                     await brokerService.placeStopOrder(userId, sym, qty, existing.stopPrice);
                                     logger.info('[StopRepair] Previous stop restored after raise failure', { userId, sym, restoredPrice: existing.stopPrice });
                                 } catch (restoreErr) {

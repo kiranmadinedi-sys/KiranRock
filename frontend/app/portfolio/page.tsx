@@ -376,7 +376,11 @@ function PortfolioPage() {
     const formatHistoryLabel = (timestamp: string, range: string) => {
         const date = new Date(timestamp);
         if (Number.isNaN(date.getTime())) return String(timestamp);
-        if (range === '1D') return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        // "1D" is now a calendar day anchored to midnight ET (portfolioHistoryService.js),
+        // so the label needs to render in ET too — the viewer's own local timezone can be
+        // off by an hour (CDT vs EDT) or more (other US zones), making a point that's
+        // genuinely midnight ET show as "11:00 PM" or similar (found 2026-07-21).
+        if (range === '1D') return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' });
         // 1W/1M/3M are now all bucketed every 30 min (2026-07-11) — date-only would show
         // the same label for every point on the same day, with no way to tell them apart
         // while scrubbing.

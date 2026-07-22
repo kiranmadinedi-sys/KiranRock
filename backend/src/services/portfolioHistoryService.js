@@ -101,10 +101,36 @@ const RANGE_CONFIG = {
     '1Y': { lookbackMs: 365 * 24 * 60 * 60 * 1000, bucketMs: 7 * 24 * 60 * 60 * 1000 }
 };
 
+// Midnight ET "today", expressed as a real UTC instant — DST-safe (doesn't hardcode
+// a fixed UTC-4/UTC-5 offset, derives whatever the actual current ET offset is).
+function getStartOfTodayET() {
+    const now = new Date();
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+    }).formatToParts(now);
+    const get = t => parts.find(p => p.type === t).value;
+    // "now" re-expressed as if its ET wall-clock reading were UTC — the gap between that
+    // and the real UTC instant is exactly today's ET UTC offset (handles DST automatically).
+    const nowAsIfUTC = Date.UTC(+get('year'), +get('month') - 1, +get('day'), +get('hour'), +get('minute'), +get('second'));
+    const offsetMs = nowAsIfUTC - now.getTime();
+    const midnightAsIfUTC = Date.UTC(+get('year'), +get('month') - 1, +get('day'), 0, 0, 0);
+    return new Date(midnightAsIfUTC - offsetMs);
+}
+
 function getStartDate(range) {
     const now = new Date();
     if (range === 'YTD') {
         return new Date(Date.UTC(now.getUTCFullYear(), 0, 1, 0, 0, 0, 0));
+    }
+    // "1D" means today, not "the last 24 hours" — a rolling window kept dragging in
+    // yesterday's full trading session, which made the chart's shape (and its y-axis
+    // scale) dominated by a session that's no longer relevant, especially before market
+    // open when today's own data is still thin (found 2026-07-21, screenshot showed a
+    // dramatic-looking spike/crash that was actually yesterday's normal, small intraday
+    // move visually exaggerated by both this and the y-axis scaling — see portfolio/page.tsx).
+    if (range === '1D') {
+        return getStartOfTodayET();
     }
 
     const config = RANGE_CONFIG[range] || RANGE_CONFIG['1D'];

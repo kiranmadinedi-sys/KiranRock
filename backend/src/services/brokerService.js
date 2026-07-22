@@ -742,14 +742,23 @@ const alpacaBroker = (() => {
         }));
     }
 
+    // Terminal states an order can never leave — anything else (including "held", the
+    // status Alpaca gives the waiting side of a bracket/OCO pair until its sibling
+    // triggers or cancels) is still a real, active order. Alpaca's own `status=open`
+    // filter excludes "held" orders entirely, which made StopRepair think a position's
+    // bracket-order stop-loss leg didn't exist — it was there and valid the whole time,
+    // just reported as "held" rather than "open" (found 2026-07-21, RXO).
+    const TERMINAL_ORDER_STATUSES = new Set(['filled', 'canceled', 'expired', 'rejected', 'replaced', 'done_for_day']);
+
     async function getOpenOrders(userId, symbol) {
         try {
             const { client } = await getClientForUser(userId);
-            const all = await client.getOrders({ status: 'open', limit: 200 });
+            const all = await client.getOrders({ status: 'all', limit: 200 });
+            const active = (all || []).filter(o => !TERMINAL_ORDER_STATUSES.has(o.status));
             // When no symbol given, return ALL open orders (used by stop-repair scan).
-            if (!symbol) return all || [];
+            if (!symbol) return active;
             const sym = symbol.toUpperCase();
-            return (all || []).filter(o => (o.symbol || '').toUpperCase() === sym);
+            return active.filter(o => (o.symbol || '').toUpperCase() === sym);
         } catch (err) {
             logger.warn('[Broker:Alpaca] getOpenOrders failed', { symbol, err: err.message });
             return [];

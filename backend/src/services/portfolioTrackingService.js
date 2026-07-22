@@ -73,15 +73,34 @@ async function _getAlpacaData(userId, forceRefresh = false) {
     const cached = _alpacaCache.get(userId);
     if (!forceRefresh && cached && Date.now() - cached.fetchedAt < ttlMs) return cached;
 
-    const result = { positions: [], equity: null, cash: null, fetchedAt: Date.now() };
+    const result = { positions: [], equity: null, cash: null, stopMap: {}, fetchedAt: Date.now() };
     try {
-        const [alpacaPositions, alpacaAccount] = await Promise.all([
+        const [alpacaPositions, alpacaAccount, openOrders] = await Promise.all([
             brokerService.getPositions(userId),
-            brokerService.getAccountInfo(userId)
+            brokerService.getAccountInfo(userId),
+            brokerService.getOpenOrders(userId).catch(() => [])
         ]);
         result.positions = alpacaPositions || [];
         if (alpacaAccount?.portfolioValue > 0) result.equity = alpacaAccount.portfolioValue;
         if (alpacaAccount?.cashBalance   > 0) result.cash   = alpacaAccount.cashBalance;
+
+        // symbol → { stopPrice, targetPrice } — the frontend's "Stop Protection" card was
+        // never wired to a real value (always showed "No stop placed" regardless of the
+        // actual broker state, found 2026-07-21). getOpenOrders() already includes "held"
+        // orders (the status Alpaca gives the waiting side of a bracket/OCO pair), so a
+        // real bracket stop-loss leg is correctly picked up here, not just standalone stops.
+        for (const o of openOrders) {
+            if (o.side !== 'sell') continue;
+            const sym = (o.symbol || '').toUpperCase();
+            if (!result.stopMap[sym]) result.stopMap[sym] = { stopPrice: null, targetPrice: null };
+            if (o.type === 'stop' || o.type === 'stop_limit') {
+                const sp = parseFloat(o.stop_price || 0);
+                if (sp > 0) result.stopMap[sym].stopPrice = sp;
+            } else if (o.type === 'limit') {
+                const lp = parseFloat(o.limit_price || 0);
+                if (lp > 0) result.stopMap[sym].targetPrice = lp;
+            }
+        }
     } catch (_) { /* simulated broker or creds not configured — ignore */ }
 
     _alpacaCache.set(userId, result);
@@ -117,6 +136,7 @@ const getPortfolioSummary = async (userId) => {
         }
         const alpacaEquity = alpacaData.equity;
         const alpacaCash   = alpacaData.cash;
+        const stopMap      = alpacaData.stopMap || {};
 
         // Get current prices for all holdings
         const holdingsWithCurrentPrice = await Promise.all(
@@ -217,6 +237,8 @@ const getPortfolioSummary = async (userId) => {
                         realizedPL = 0;
                     }
 
+                    const stopInfo = stopMap[(holding.symbol || '').toUpperCase()] || null;
+
                     return {
                         ...holding,
                         currentPrice,
@@ -225,10 +247,13 @@ const getPortfolioSummary = async (userId) => {
                         unrealizedPL,
                         unrealizedPLPercent,
                         realizedPL,
-                        firstBought
+                        firstBought,
+                        stopPrice: stopInfo?.stopPrice ?? null,
+                        targetPrice: stopInfo?.targetPrice ?? null
                     };
                 } catch (error) {
                     console.error(`Error getting price for ${holding.symbol}:`, error.message);
+                    const stopInfo = stopMap[(holding.symbol || '').toUpperCase()] || null;
                     return {
                         ...holding,
                         currentPrice: holding.averagePrice,
@@ -237,7 +262,9 @@ const getPortfolioSummary = async (userId) => {
                         unrealizedPL: 0,
                         unrealizedPLPercent: 0,
                         priceError: true,
-                        firstBought: firstBoughtMap[holding.symbol] || null
+                        firstBought: firstBoughtMap[holding.symbol] || null,
+                        stopPrice: stopInfo?.stopPrice ?? null,
+                        targetPrice: stopInfo?.targetPrice ?? null
                     };
                 }
             })

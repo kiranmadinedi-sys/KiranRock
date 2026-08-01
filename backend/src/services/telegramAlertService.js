@@ -468,6 +468,40 @@ ${totalProfit > 0 ? '🎉 Profitable day!' : totalProfit < 0 ? '💪 Tomorrow is
 }
 
 /**
+ * Alert: Blitz (intraday) daily summary — deliberately separate from
+ * alertDailySummary (swing) so the two strategies' P&L never get blended
+ * into one message. No holdings line here since Blitz positions are
+ * force-flattened by default and live in their own table, not `holdings`.
+ */
+async function alertBlitzDailySummary(userId, stats) {
+    const chatId = await getUserTelegramChatId(userId);
+    if (!chatId && !ADMIN_CHAT_ID) return;
+    if (!stats || stats.trades === 0) return;
+
+    const { trades, wins, losses, winRate, totalPnl, bestTrade, worstTrade, flattened } = stats;
+    const { display } = await getUserInfo(userId);
+
+    const message = `
+⚡ *BLITZ DAILY SUMMARY* (Intraday)
+👤 User: ${display}
+
+🔢 Trades: ${trades}
+✅ Wins: ${wins}
+❌ Losses: ${losses}
+📈 Win Rate: ${winRate.toFixed(1)}%
+
+💰 Total P&L: $${totalPnl.toFixed(2)}
+🏆 Best: +$${Math.abs(bestTrade).toFixed(2)}
+📉 Worst: -$${Math.abs(worstTrade).toFixed(2)}
+
+${flattened ? '🔒 All Blitz positions flattened before close.' : '📌 Positions kept open overnight (force-flatten off).'}
+${totalPnl > 0 ? '🎉 Profitable day!' : totalPnl < 0 ? '💪 Tomorrow is another day' : '➡️ Break even'}
+`;
+
+    await sendToUserAndAdmin(chatId, message);
+}
+
+/**
  * Alert: Options Trade Executed
  */
 async function alertOptionsTradeExecuted(userId, tradeDetails) {
@@ -796,6 +830,7 @@ module.exports = {
     alertTradeExecuted,
     alertNoOpportunities,
     alertDailySummary,
+    alertBlitzDailySummary,
     alertNightlyScanFailure,
     alertEdgeGateBlocked,
     alertDistressModeRecovery,

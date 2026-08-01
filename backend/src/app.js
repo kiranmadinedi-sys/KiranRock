@@ -38,6 +38,7 @@ const screenerRoutes = require('./routes/screenerRoutes');
 const enhancedSignalRoutes = require('./routes/enhancedSignalRoutes');
 const watchlistRoutes = require('./routes/watchlistRoutes');
 const optionsBotRoutes = require('./routes/optionsBotRoutes');
+const intradayRoutes = require('./routes/intradayRoutes');
 const performanceRoutes = require('./routes/performanceRoutes');
 const stockFeedRoutes = require('./routes/stockFeedRoutes');
 const systemRoutes = require('./routes/systemRoutes'); // Import the new system routes
@@ -189,6 +190,7 @@ app.use('/api/screener', screenerRoutes);
 app.use('/api/enhanced-signals', enhancedSignalRoutes);
 app.use('/api/watchlist', watchlistRoutes);
 app.use('/api/options-bot', optionsBotRoutes);
+app.use('/api/intraday', intradayRoutes);
 app.use('/api/performance', performanceRoutes);
 app.use('/api/stock-feed', stockFeedRoutes);
 app.use('/api/system', systemRoutes); // Use the new system routes

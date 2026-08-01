@@ -84,27 +84,28 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
     };
 
     const navItems = [
-        { href: '/portfolio',       label: 'Portfolio',  icon: '💼' },
-        { href: '/dashboard',       label: 'Dashboard',  icon: '📊' },
-        { href: '/most-active',     label: 'Most Active',icon: '🔥' },
-        { href: '/performance',     label: 'Performance',icon: '📈' },
-        { href: '/analytics',       label: 'Analytics',  icon: '🔍' },
-        { href: '/recommendations', label: 'Picks',      icon: '🎯' },
-        { href: '/alerts',          label: 'Alerts',     icon: '🔔' },
-        { href: '/news',            label: 'News',       icon: '📰' },
-        { href: '/weekly',          label: 'Weekly',     icon: '📅' },
-        { href: '/ai-trading',      label: 'AI Bot',     icon: '🤖' },
-        { href: '/options-chain',   label: 'Chains',     icon: '📊' },
-        { href: '/options-bot',     label: 'Options Bot',icon: '⚙️' },
-        { href: '/swing-trading',   label: 'Swing',      icon: '🔄' },
-        { href: '/backtest',        label: 'Backtest',   icon: '🧪' },
-        { href: '/scalping',        label: 'Scalping',   icon: '⚡' },
-        { href: '/scenarios',       label: 'Scenarios',  icon: '🗺️' },
-        { href: '/enquiry',         label: 'Enquiry',    icon: '💬' },
-        { href: '/localdata',       label: 'Data',       icon: '🗄️' },
-        { href: '/universe',        label: 'Universe',   icon: '🔭' },
-        { href: '/signals',         label: 'Signals',    icon: '⭐' },
-        { href: '/live-readiness',  label: 'SENTINEL',   icon: '🛡️' },
+        { href: '/portfolio', label: 'Portfolio', icon: '💼' },
+        { href: '/dashboard', label: 'Dashboard', icon: '📊' },
+        { href: '/most-active', label: 'Most Active', icon: '🔥' },
+        { href: '/performance', label: 'Performance', icon: '📈' },
+        { href: '/analytics', label: 'Analytics', icon: '🔍' },
+        { href: '/recommendations', label: 'Recommendations', icon: '🎯' },
+        { href: '/alerts', label: 'Alerts', icon: '🔔' },
+        { href: '/news', label: 'News', icon: '📰' },
+        { href: '/weekly', label: 'Next Week', icon: '📅' },
+        { href: '/ai-trading', label: 'AI Trading', icon: '🤖' },
+        { href: '/options-chain', label: 'Chains', icon: '📊' },
+        { href: '/options-bot', label: 'Options Bot', icon: '🤖' },
+        { href: '/intraday', label: 'Blitz', icon: '⚡' },
+        { href: '/swing-trading', label: 'Swing', icon: '📈' },
+        { href: '/backtest', label: 'Backtest', icon: '📊' },
+        { href: '/scalping', label: 'Scan', icon: '📡' },
+        { href: '/scenarios', label: 'Scenarios', icon: '🎯' },
+        { href: '/enquiry', label: 'Enquiry', icon: '💬' },
+        { href: '/localdata', label: 'Localdata', icon: '🗄️' },
+        { href: '/universe', label: 'Universe', icon: '🔭' },
+        { href: '/signals', label: 'Signals', icon: '⭐' },
+        { href: '/live-readiness', label: 'SENTINEL', icon: '🛡️' },
         ...(user?.isAdmin ? [{ href: '/admin', label: 'Admin', icon: '🛠️' }] : []),
     ];
 
@@ -215,20 +216,20 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
             {/* Desktop Navigation */}
             <nav className="hidden lg:block bg-gradient-to-r from-gray-800 to-gray-900 border-b border-gray-700 sticky top-14 sm:top-16 z-40">
                 <div className="max-w-full px-6">
-                    <div className="flex items-center justify-evenly py-1">
+                    <div className="flex flex-wrap items-center gap-1 py-1.5">
                         {navItems.map((item) => (
                             <button
                                 key={item.href}
                                 type="button"
                                 onClick={() => navigateTo(item.href)}
-                                className={`flex items-center justify-center gap-1.5 px-2 py-1.5 text-xs sm:text-sm font-semibold whitespace-nowrap transition-all rounded-t-lg border-b-2 flex-1 ${
+                                className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold whitespace-nowrap transition-all rounded-t-lg border-b-2 ${
                                     pathname === item.href
                                         ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white border-blue-400'
                                         : 'text-gray-300 hover:text-white hover:bg-gray-700/50 border-transparent'
                                 }`}
                             >
                                 <span>{item.icon}</span>
-                                <span className="hidden sm:inline">{item.label}</span>
+                                <span>{item.label}</span>
                                 {renderBadge(getNavBadge(item.href))}
                             </button>
                         ))}
@@ -367,6 +368,8 @@ const AppHeader: React.FC<AppHeaderProps> = ({ onSelectStock, showSearch = true,
                 </>
             )}
 
+            {/* Spacer for mobile bottom nav */}
+            <div className="lg:hidden h-16" />
         </>
     );
 };

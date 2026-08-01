@@ -16,6 +16,7 @@ const trailingStopService          = require('./services/trailingStopService');
 const telegramLinkService          = require('./services/telegramLinkService');
 const marketMonitorService         = require('./services/marketMonitorService');
 const systemHealthMonitor          = require('./services/systemHealthMonitorService');
+const intradayScheduler            = require('./services/intradayScheduler');
 const {
     acquireLeadership,
     releaseLeadership,
@@ -24,7 +25,7 @@ const {
 const { pool } = require('./config/database');
 
 const WORKER_NAME = process.env.WORKER_NAME || 'primary-worker';
-const WORKER_SERVICES = ['enhanced-ai', 'options-scanner', 'options-bot', 'news-monitor', 'telegram-reports', 'stock-signal-snapshots', 'stock-signal-telegram', 'asset-universe', 'eod-ingestion', 'news-rescan', 'trailing-stops', 'market-monitor', 'system-health-monitor'];
+const WORKER_SERVICES = ['enhanced-ai', 'options-scanner', 'options-bot', 'news-monitor', 'telegram-reports', 'stock-signal-snapshots', 'stock-signal-telegram', 'asset-universe', 'eod-ingestion', 'news-rescan', 'trailing-stops', 'market-monitor', 'system-health-monitor', 'intraday-blitz'];
 const workerInstanceId = `${os.hostname()}-${process.pid}-${Date.now()}`;
 let shuttingDown = false;
 
@@ -72,6 +73,7 @@ async function shutdownWorker(signal, options = {}) {
         telegramLinkService.stopTelegramLinkListener();
         marketMonitorService.stopMarketMonitor();
         systemHealthMonitor.stopSystemHealthMonitor();
+        intradayScheduler.stopScheduler();
     } catch (error) {
         console.error('[Worker] Error while stopping services:', error.message);
     }
@@ -165,6 +167,9 @@ async function startWorker(options = {}) {
 
     console.log('\n👁️  Starting Market Monitor Service...');
     marketMonitorService.startMarketMonitor();
+
+    console.log('\n⚡ Starting Blitz Intraday Scheduler (opt-in, 1-min cycle during market hours)...');
+    intradayScheduler.startScheduler();
 
     console.log('\n🏥 Starting System Health Monitor (5-min checks + Telegram alerts)...');
     systemHealthMonitor.startSystemHealthMonitor();

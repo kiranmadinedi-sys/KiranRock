@@ -26,6 +26,25 @@ param(
     [switch]$NonInteractive
 )
 
+# ----------------------------------------------------------------
+#  Self-elevate: every restart must run at the SAME privilege level
+#  as the run it's replacing, or Windows hides that other process's
+#  CommandLine from this one and the stop-detection below silently
+#  can't even recognize it as a target for cleanup -- leaving two
+#  generations of backend/worker/frontend running side-by-side
+#  instead of a clean restart. Always running elevated closes that
+#  gap for good, since every run ends up at the same privilege level.
+# ----------------------------------------------------------------
+$currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "Not running as Administrator -- relaunching elevated (required to reliably stop previous runs)..." -ForegroundColor Yellow
+    $relaunchArgs = @('-NoExit', '-ExecutionPolicy', 'Bypass', '-File', "`"$($MyInvocation.MyCommand.Path)`"")
+    if ($NoPrompt)       { $relaunchArgs += '-NoPrompt' }
+    if ($NonInteractive) { $relaunchArgs += '-NonInteractive' }
+    Start-Process powershell -Verb RunAs -ArgumentList $relaunchArgs
+    exit 0
+}
+
 $projectRoot  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backendPath  = Join-Path $projectRoot "backend"
 $frontendPath = Join-Path $projectRoot "frontend"
@@ -481,14 +500,16 @@ if (Test-Path $workerLogsPidFile) {
 $pm2CmdEarly = Get-Command pm2 -ErrorAction SilentlyContinue
 if ($pm2CmdEarly) {
     Write-Host "Killing PM2 daemon and cleaning stale sockets..." -ForegroundColor DarkGray
-    # Kill the PM2 God daemon node.exe directly first.
+    # Kill the PM2 daemon (internally called "God" in PM2's own source, but the
+    # actual node.exe command line is pm2\lib\Daemon.js — confirmed directly
+    # against a real stray daemon tonight; matching on 'God' never hit anything).
     # pm2 kill uses the named pipe to send a shutdown signal — if the pipe is already
     # in EPERM state (crashed daemon), pm2 kill itself fails and the pipe handle stays
     # open. Killing the node.exe process directly releases the pipe handle immediately.
     Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match 'God' } |
+        Where-Object { $_.CommandLine -match 'pm2[\\/]lib[\\/]Daemon\.js' } |
         ForEach-Object {
-            Write-Host "      Killing PM2 God daemon (PID $($_.ProcessId))..." -ForegroundColor DarkGray
+            Write-Host "      Killing PM2 daemon (PID $($_.ProcessId))..." -ForegroundColor DarkGray
             Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
         }
     Start-Sleep -Milliseconds 800
@@ -580,24 +601,13 @@ if (-not $projectProcessesStopped -and $remainingProjectProcesses.Count -gt 0) {
 Write-ShutdownSummary -PassSummaries $shutdownPassSummaries
 Write-Host ""
 
-# ----------------------------------------------------------------
-#  Cloudflare Tunnel (getmytbot.com -> localhost:3000)
-# ----------------------------------------------------------------
-Write-Host "[CF] Ensuring Cloudflare tunnel is running..." -ForegroundColor Cyan
-$cfExe    = "C:\Program Files (x86)\cloudflared\cloudflared.exe"
-$cfConfig = "C:\Users\kiran\.cloudflared\config.yml"
-if (Test-Path $cfExe) {
-    $cfRunning = Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue
-    if ($cfRunning) {
-        Write-Host "      Cloudflare tunnel already running (PID: $($cfRunning.Id))" -ForegroundColor DarkGray
-    } else {
-        $cfProcess = Start-Process -FilePath $cfExe -ArgumentList "tunnel", "--config", $cfConfig, "run" -WindowStyle Hidden -PassThru
-        Write-Host "      Cloudflare tunnel started (PID: $($cfProcess.Id))" -ForegroundColor Green
-    }
-} else {
-    Write-Host "      cloudflared.exe not found at $cfExe - skipping tunnel" -ForegroundColor Yellow
-}
-Write-Host ""
+# NOTE: Cloudflare Tunnel (getmytbot.com -> localhost:3000) is intentionally NOT
+# managed here. It runs as its own Windows Service ("cloudflared", Automatic
+# startup) independent of this script -- that was already the real routing
+# path even when an earlier version of this file tried to also manage a
+# separate foreground cloudflared.exe process, which would just have started
+# a redundant, independent tunnel connector alongside the service. Leave the
+# service alone; this script only ever touches localhost:3000/3001 behind it.
 
 # Secrets injected into backend environment
 $telegramBotToken = Resolve-SecretValue -Name "TELEGRAM_BOT_TOKEN"
@@ -964,8 +974,9 @@ Write-Host "   Worker:   own terminal (all schedulers — see header for full li
 Write-Host "   EOD:      bars ingested nightly at 6:30 PM ET (worker cron, no manual step)" -ForegroundColor White
 Write-Host "   Signals:  one startup real-delivery pass in separate terminal" -ForegroundColor White
 Write-Host "   Health:   http://localhost:3001/health" -ForegroundColor White
-$cfPid = (Get-Process -Name "cloudflared" -ErrorAction SilentlyContinue | Select-Object -First 1).Id
-Write-Host "   PIDs:     backend=$($backendProcess.Id) (PM2) | worker=$($workerProcess.Id) (PM2) | delivery=$($signalDeliveryProcess.Id) | frontend=$($frontendProcess.Id) | tunnel=$cfPid" -ForegroundColor White
+$cfService = Get-Service -Name "cloudflared" -ErrorAction SilentlyContinue
+$cfStatus = if ($cfService) { $cfService.Status } else { "not installed" }
+Write-Host "   PIDs:     backend=$($backendProcess.Id) (PM2) | worker=$($workerProcess.Id) (PM2) | delivery=$($signalDeliveryProcess.Id) | frontend=$($frontendProcess.Id) | tunnel-service=$cfStatus" -ForegroundColor White
 Write-Host "-----------------------------------------------" -ForegroundColor Green
 Write-Host "   Telegram: @KiranTradePro_bot" -ForegroundColor White
 Write-Host "   Reports:  Mon-Fri 7:00 AM (predictions) + 4:15 PM (AI bot summary) | Sun 8 AM (weekly buy list) + 9 AM (weekly recap)" -ForegroundColor White

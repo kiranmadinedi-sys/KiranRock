@@ -9,6 +9,8 @@ const portfolioTrackingService = require('../services/portfolioTrackingService')
 const ledgerService = require('../services/ledgerService');
 const { analyzeStock } = require('../services/aiTradingBotService');
 const { getNewsSentiment } = require('../services/newsSentimentService');
+const tradingControlService = require('../services/tradingControlService');
+const extendedHoursTradingService = require('../services/extendedHoursTradingService');
 
 // All routes require authentication
 router.use(protect);
@@ -27,6 +29,37 @@ router.get('/account', async (req, res) => {
 });
 
 /**
+ * GET /api/trading/extended-hours/status
+ * Opt-in extended-hours (pre-market/after-hours) trading — status for the current user.
+ */
+router.get('/extended-hours/status', async (req, res) => {
+    try {
+        const riskConfig = await tradingControlService.upsertRiskConfig(req.userId, {});
+        res.json({
+            enabled: riskConfig?.extendedHoursEnabled === true,
+            sessionActive: extendedHoursTradingService.isExtendedHoursSession()
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * POST /api/trading/extended-hours/enable  { enabled: boolean }
+ * Same opt-in convention as Blitz's POST /api/intraday/enable.
+ */
+router.post('/extended-hours/enable', async (req, res) => {
+    try {
+        const { enabled } = req.body;
+        const riskConfig = await tradingControlService.upsertRiskConfig(req.userId, { extendedHoursEnabled: !!enabled });
+        res.json({ success: true, enabled: riskConfig.extendedHoursEnabled });
+    } catch (error) {
+        const status = error.status || 500;
+        res.status(status).json({ error: error.message });
+    }
+});
+
+/**
  * POST /api/trading/deposit
  * Deposit virtual funds
  */
@@ -39,7 +72,6 @@ router.post('/deposit', async (req, res) => {
         }
         
         const result = await tradingAccountService.depositFunds(req.userId, parseFloat(amount));
-        require('../services/portfolioHistoryService').invalidateDepositEventsCache(req.userId);
         res.json(result);
     } catch (error) {
         res.status(400).json({ error: error.message });
@@ -59,7 +91,6 @@ router.post('/withdraw', async (req, res) => {
         }
         
         const result = await tradingAccountService.withdrawFunds(req.userId, parseFloat(amount));
-        require('../services/portfolioHistoryService').invalidateDepositEventsCache(req.userId);
         res.json(result);
     } catch (error) {
         res.status(400).json({ error: error.message });
@@ -72,17 +103,11 @@ router.post('/withdraw', async (req, res) => {
  */
 router.post('/reset-balance', async (req, res) => {
     try {
-        const userDb = require('../services/userDatabaseService');
-        const creds  = await userDb.getUserAlpacaCredentials(req.userId);
-        if (creds.source === 'user' && creds.isPaper === false) {
-            return res.status(403).json({ error: 'Cash balance is controlled by your live Alpaca account and cannot be overridden here.' });
-        }
         const { amount } = req.body;
         if (typeof amount !== 'number' || amount < 0) {
             return res.status(400).json({ error: 'Invalid reset amount' });
         }
         const result = await tradingAccountService.resetBalance(req.userId, amount);
-        require('../services/portfolioHistoryService').invalidateDepositEventsCache(req.userId);
         res.json(result);
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -95,14 +120,16 @@ router.post('/reset-balance', async (req, res) => {
  */
 router.post('/clear-all', async (req, res) => {
     try {
-        const userDb = require('../services/userDatabaseService');
-        const creds  = await userDb.getUserAlpacaCredentials(req.userId);
-        if (creds.source === 'user' && creds.isPaper === false) {
-            return res.status(403).json({ error: 'Cannot clear a live Alpaca account. Close positions directly on Alpaca, then reconciliation will sync the DB automatically.' });
-        }
+        // Clear trading account (cash balance)
         await tradingAccountService.clearAllPortfolio(req.userId);
+        
+        // Clear holdings and trade history
         await tradingService.clearAllHoldings(req.userId);
-        res.json({ success: true, message: 'Portfolio cleared successfully. All balances and holdings reset to zero.' });
+        
+        res.json({ 
+            success: true, 
+            message: 'Portfolio cleared successfully. All balances and holdings reset to zero.' 
+        });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -162,50 +189,6 @@ router.get('/history', async (req, res) => {
     try {
         const limit = parseInt(req.query.limit) || 100;
         const trades = await tradingService.getTradeHistory(req.userId, limit);
-
-        // Enrich open BUY trades with unrealized P/L using Alpaca live positions
-        // (authoritative real-time prices) with Yahoo Finance as fallback.
-        try {
-            const holdings = await tradingService.getHoldings(req.userId);
-            const holdingMap = {};
-            for (const h of holdings) holdingMap[h.symbol] = h;
-
-            // Try Alpaca live positions first — returns current_price + unrealizedPL direct from broker
-            const priceMap = {};
-            try {
-                const livePositions = await brokerService.getPositions(req.userId);
-                for (const p of livePositions) {
-                    if (p.currentPrice) priceMap[p.symbol] = p.currentPrice;
-                }
-            } catch { /* fall through to Yahoo */ }
-
-            // Fallback: Yahoo Finance for any symbol not covered by Alpaca
-            const symbols = [...new Set(holdings.map(h => h.symbol))].filter(s => !priceMap[s]);
-            await Promise.all(symbols.map(async sym => {
-                try {
-                    const p = await marketQuoteService.getCurrentPrice(sym);
-                    if (p != null) priceMap[sym] = p;
-                } catch { /* use stale holdingMap fallback below */ }
-            }));
-
-            for (const trade of trades) {
-                if (trade.pnl != null) continue;          // already has realized P/L
-                if (trade.type !== 'BUY') continue;       // only enrich open buy legs
-                const h = holdingMap[trade.symbol];
-                if (!h) continue;                          // position already closed
-                const currentPrice = priceMap[trade.symbol] ?? h.currentPrice ?? h.averagePrice;
-                if (!currentPrice) continue;
-                const qty = trade.quantity || 0;
-                const cost = (trade.price || 0) * qty;
-                const value = currentPrice * qty;
-                trade.unrealizedPL        = parseFloat((value - cost).toFixed(2));
-                trade.unrealizedPLPercent = cost > 0
-                    ? parseFloat(((value - cost) / cost * 100).toFixed(2))
-                    : 0;
-                trade.currentPrice = parseFloat(currentPrice.toFixed(2));
-            }
-        } catch { /* enrichment is best-effort — never break history */ }
-
         res.json({ trades });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -231,25 +214,7 @@ router.get('/holdings', async (req, res) => {
  */
 router.get('/portfolio', async (req, res) => {
     try {
-        const userDb             = require('../services/userDatabaseService');
-        const trailingStopSvc    = require('../services/trailingStopService');
-        const [portfolio, creds] = await Promise.all([
-            portfolioTrackingService.getPortfolioSummary(req.userId),
-            userDb.getUserAlpacaCredentials(req.userId)
-        ]);
-        portfolio.isLiveAccount = creds.source === 'user' && creds.isPaper === false;
-
-        // Merge Alpaca stop/target prices into each holding (non-blocking — fails gracefully)
-        if (process.env.BROKER === 'alpaca' && (portfolio.holdings || []).length > 0) {
-            try {
-                const stopMap = await trailingStopSvc.getStopOrders(req.userId);
-                portfolio.holdings = portfolio.holdings.map(h => {
-                    const info = stopMap[(h.symbol || '').toUpperCase()];
-                    return info ? { ...h, stopPrice: info.stopPrice, targetPrice: info.targetPrice, stopLocked: info.stopLocked } : h;
-                });
-            } catch { /* stop data is optional — never break the portfolio response */ }
-        }
-
+        const portfolio = await portfolioTrackingService.getPortfolioSummary(req.userId);
         res.json(portfolio);
     } catch (error) {
         res.status(500).json({ error: error.message });

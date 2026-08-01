@@ -443,10 +443,11 @@ async function getUserRiskConfig(userId) {
                 maxOrderNotional: parseFloat(dbConfig.max_order_notional),
                 maxRiskPerTrade: dbConfig.max_risk_per_trade != null ? parseFloat(dbConfig.max_risk_per_trade) : DEFAULT_RISK_CONFIG.maxRiskPerTrade,
                 maxGrossExposurePct: parseFloat(dbConfig.max_gross_exposure_pct ?? 0.75),
-                emergencyStopEnabled: dbConfig.emergency_stop_enabled === true
+                emergencyStopEnabled: dbConfig.emergency_stop_enabled === true,
+                extendedHoursEnabled: dbConfig.extended_hours_enabled === true
             };
         }
-        
+
         return DEFAULT_RISK_CONFIG;
     } catch (err) {
         logger.error('Error getting risk config', { error: err.message, userId });
@@ -1154,7 +1155,14 @@ async function getShortInterestData(symbol) {
     const cached = cacheService.get(cacheKey);
     if (cached !== null) return cached;
     try {
-        const summary = await yahooFinance.quoteSummary(symbol, { modules: ['defaultKeyStatistics'] });
+        // Route through yfClient (not the raw yahoo-finance2 instance at the top of this
+        // file) so this joins the shared rate-limit circuit breaker like getDaysToEarnings
+        // already does. Found 2026-07-29: this was the one per-symbol nightly-scan call
+        // still hitting Yahoo directly and unconditionally on every one of 479 symbols,
+        // with no awareness of (or contribution to) the shared breaker — it kept hammering
+        // Yahoo through an active rate-limit block that every other call was correctly
+        // backing off from, and its own 429s never tripped the breaker for anyone else.
+        const summary = await require('../utils/yfClient').quoteSummary(symbol, { modules: ['defaultKeyStatistics'] });
         const ks = summary?.defaultKeyStatistics || {};
         const result = {
             shortRatio:          typeof ks.shortRatio          === 'number' ? ks.shortRatio          : null,
@@ -2350,7 +2358,17 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
         if (precomputedReady) {
             const precomputedList = await precomputedUniverseService.loadCandidates({
                 minScore: Math.max(80, minBuyScore - 5), // quality floor: ≥80 removes noise while keeping stocks that gap up intraday
-                limit:    120
+                // Cut from 120 — each candidate re-runs the full live PULSE+ORACLE pipeline,
+                // and with Gemini's free-tier quota exhausted almost immediately every real
+                // scan, that means 5-15s of genuine local-Ollama-LLM inference PER candidate,
+                // not a rate limit. 116 candidates was reliably taking 5-10 real minutes,
+                // blowing past the scheduler's 4-min window for any account with room to buy
+                // (confirmed live 2026-07-31/08-01 on a zero-holdings account: 150+/253 cycles
+                // timed out, zero trades). Candidates already come back ORDER BY ai_score DESC,
+                // so this keeps exactly the best-scored overnight picks and only trims the
+                // long tail that rarely clears minBuyScore anyway — same selection quality,
+                // roughly a third of the LLM calls.
+                limit:    40
             });
             if (precomputedList.length >= 10) {
                 _rawUniverse = precomputedList; // already { symbol, marketCap, sector }
@@ -2440,8 +2458,20 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
             }
         });
         
-        // Increased delay between batches to respect Yahoo Finance rate limits
-        await new Promise(resolve => setTimeout(resolve, 3000)); // 3 seconds between batches
+        // This pause exists to respect Yahoo Finance rate limits — but it used to fire
+        // unconditionally on every batch even when Yahoo wasn't touched or already
+        // wasn't the bottleneck, adding ~72s of pure dead time to a 116-candidate scan
+        // (24 batches × 3s) on top of whatever the real analysis took. That's exactly
+        // why zero-holdings accounts (which can never take the "portfolio at capacity"
+        // early exit and so run this full loop every single cycle) were reliably
+        // blowing past the scheduler's 4-min timeout with nothing to show for it
+        // (confirmed live 2026-07-31: anilboddu1, 150/253 cycles over 7 days timed out).
+        // The shared Yahoo circuit breaker (added 2026-07-29) already knows precisely
+        // when Yahoo is actually rate-limited — defer to it instead of a blind sleep:
+        // pay the full pause only while the breaker is tripped, otherwise a short gap
+        // is enough to stay polite to the other per-symbol APIs (Alpaca, Gemini, SEC).
+        const { isYahooRateLimited } = require('../utils/yfClient');
+        await new Promise(resolve => setTimeout(resolve, isYahooRateLimited() ? 3000 : 300));
         
         // Progress update
         if ((i + batchSize) % 100 === 0) {
@@ -2826,6 +2856,23 @@ async function executeAutonomousTrading(userId) {
                     userId, err: bpErr.message
                 });
             }
+        }
+
+        // Blitz capital carve-out — this same Alpaca account may also be running the
+        // opt-in intraday module (Blitz), which draws from the same real cash pool.
+        // Subtract whatever Blitz currently has deployed so swing never double-spends
+        // dollars Blitz has already committed. Read-only and fail-open: a failure here
+        // never blocks or delays a swing trade, it just proceeds without the carve-out
+        // (matching the existing CashGuard's own fail-open behavior above).
+        try {
+            const capitalCoordinator = require('./capitalCoordinator');
+            const intradayCommitted = await capitalCoordinator.getIntradayCommittedCapital(userId);
+            if (intradayCommitted > 0) {
+                availableBalance = Math.max(0, availableBalance - intradayCommitted);
+                logger.info('[CashGuard] Carved out Blitz-committed capital', { userId, intradayCommitted: intradayCommitted.toFixed(2), availableBalance: availableBalance.toFixed(2) });
+            }
+        } catch (icErr) {
+            logger.warn('[CashGuard] Could not read Blitz committed capital — proceeding without carve-out', { userId, err: icErr.message });
         }
 
         // Strategy vs Amount: dynamically cap maxOpenPositions and maxOrderNotional
@@ -4372,6 +4419,20 @@ async function manageExistingPositions(userId) {
                             logger.warn('[StopRepair] Skipping — position no longer matches snapshot (likely just closed)', {
                                 userId, sym, snapshotQty: qty, liveQty
                             });
+                            // Immediately reconcile rather than leaving this phantom holding to be
+                            // caught by a coincidental later startup/scheduled reconciliation pass —
+                            // or never. Without this, order_audit_log never gets a proper CLOSED
+                            // entry for the exit (SENTINEL's stopLossFailures blocker then flags it
+                            // days later with no real record of how/when it closed — confirmed live
+                            // 2026-07-27 on LNG, which sat un-reconciled for days versus CVX, whose
+                            // otherwise-identical phantom got caught only because a worker restart
+                            // happened to trigger startup reconciliation shortly after it closed).
+                            try {
+                                const positionReconciliationService = require('./positionReconciliationService');
+                                await positionReconciliationService.reconcilePositions(userId, { trigger: 'STOP_REPAIR_DETECTED' });
+                            } catch (reconcileErr) {
+                                logger.error('[StopRepair] Immediate reconciliation failed', { userId, sym, err: reconcileErr.message });
+                            }
                         } else {
                             // Use the broker's own qty for the order, not the DB snapshot — placing
                             // a sell for a rounded-up qty that's fractionally more than truly

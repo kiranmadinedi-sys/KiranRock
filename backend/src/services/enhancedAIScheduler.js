@@ -6,6 +6,7 @@ const redisState = require('./redisStateService');
 const alertService = require('./telegramAlertService');
 const vixMonitor = require('./vixSpikeMonitorService');
 const premarketGapService = require('./premarketGapAlertService');
+const extendedHoursTradingService = require('./extendedHoursTradingService');
 
 /**
  * Enhanced AI Trading Scheduler - PostgreSQL Version
@@ -1358,6 +1359,9 @@ function startScheduler() {
         runMorningStopVerification();      // 9:31 AM ET Mon-Fri: ensure every position has an active stop
         runMorningDigest();                // 9:25 AM ET Mon-Fri: portfolio digest via Telegram
         runSundayGlobalScout();            // 8:00 PM ET Sunday: global markets + Monday preview
+        extendedHoursTradingService.runExtendedHoursCycle().catch(err =>
+            console.error('[ExtendedHours] Cycle error:', err.message)
+        );                                 // 4:00-9:30 AM & 4:00-8:00 PM ET Mon-Fri: opt-in extended-hours entries
     }, CHECK_INTERVAL);
 
     console.log('[Enhanced AI Scheduler] ✓ Scheduler started successfully\n');

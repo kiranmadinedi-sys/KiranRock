@@ -53,5 +53,11 @@
   "AVGO": "Technology",
   "CHWY": "Consumer Cyclical",
   "CVX": "Energy",
-  "COP": "Energy"
+  "COP": "Energy",
+  "AMZN": "Consumer Cyclical",
+  "BABA": "Consumer Cyclical",
+  "CMCSA": "Communication Services",
+  "COIN": "Financial Services",
+  "COST": "Consumer Defensive",
+  "BSX": "Healthcare"
 }

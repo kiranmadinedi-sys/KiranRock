@@ -93,7 +93,7 @@ async function _getAlpacaData(userId, forceRefresh = false) {
             if (o.side !== 'sell') continue;
             const sym = (o.symbol || '').toUpperCase();
             if (!result.stopMap[sym]) result.stopMap[sym] = { stopPrice: null, targetPrice: null };
-            if (o.type === 'stop' || o.type === 'stop_limit') {
+            if (o.type === 'stop' || o.type === 'stop_limit' || o.type === 'trailing_stop') {
                 const sp = parseFloat(o.stop_price || 0);
                 if (sp > 0) result.stopMap[sym].stopPrice = sp;
             } else if (o.type === 'limit') {

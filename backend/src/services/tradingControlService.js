@@ -24,7 +24,8 @@ const RISK_CONFIG_FIELD_MAP = {
     dailyLossLimit: 'daily_loss_limit',
     maxOrderNotional: 'max_order_notional',
     maxGrossExposurePct: 'max_gross_exposure_pct',
-    emergencyStopEnabled: 'emergency_stop_enabled'
+    emergencyStopEnabled: 'emergency_stop_enabled',
+    extendedHoursEnabled: 'extended_hours_enabled'
 };
 
 let ensureSchemaPromise = null;
@@ -34,7 +35,7 @@ function normalizeRiskValue(key, value) {
         return undefined;
     }
 
-    if (key === 'emergencyStopEnabled') {
+    if (key === 'emergencyStopEnabled' || key === 'extendedHoursEnabled') {
         return value === true || value === 'true';
     }
 
@@ -83,7 +84,8 @@ function mapRiskConfigRow(row) {
         dailyLossLimit: parseFloat(row.daily_loss_limit),
         maxOrderNotional: parseFloat(row.max_order_notional),
         maxGrossExposurePct: parseFloat(row.max_gross_exposure_pct ?? 0.75),
-        emergencyStopEnabled: row.emergency_stop_enabled === true
+        emergencyStopEnabled: row.emergency_stop_enabled === true,
+        extendedHoursEnabled: row.extended_hours_enabled === true
     };
 }
 
@@ -118,6 +120,11 @@ async function ensurePhase0Schema() {
             await query(`
                 ALTER TABLE risk_configs
                 ADD COLUMN IF NOT EXISTS emergency_stop_enabled BOOLEAN DEFAULT false
+            `);
+
+            await query(`
+                ALTER TABLE risk_configs
+                ADD COLUMN IF NOT EXISTS extended_hours_enabled BOOLEAN DEFAULT false
             `);
         })().catch((error) => {
             ensureSchemaPromise = null;

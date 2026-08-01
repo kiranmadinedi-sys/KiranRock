@@ -2,6 +2,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { getApiBaseUrl } from '../config';
+import BlitzPortfolioSection from '../components/BlitzPortfolioSection';
 import { Line } from 'react-chartjs-2';
 import {
   Chart as ChartJS, CategoryScale, LinearScale, PointElement,
@@ -70,7 +71,7 @@ function PortfolioPage() {
     const [aiSettings, setAISettings] = useState({ stopLoss: 0.06, takeProfit: 0.3, minCashReserve: 0 });
     const [settingsChanged, setSettingsChanged] = useState(false);
     const [botConfig, setBotConfig] = useState({
-        maxOrderNotional: 5000, minBuyScore: 70, maxOpenPositions: 8, maxGrossExposurePct: 75,
+        maxOrderNotional: 5000, minBuyScore: 70, maxOpenPositions: 8, maxGrossExposurePct: 75, extendedHoursEnabled: false,
     });
     const [botConfigChanged, setBotConfigChanged] = useState(false);
     const [botConfigSaving, setBotConfigSaving] = useState(false);
@@ -206,6 +207,7 @@ function PortfolioPage() {
                     minBuyScore: rc.minBuyScore ?? 70,
                     maxOpenPositions: rc.maxOpenPositions ?? 8,
                     maxGrossExposurePct: Math.round((rc.maxGrossExposurePct ?? 0.75) * 100),
+                    extendedHoursEnabled: rc.extendedHoursEnabled === true,
                 });
             }
         } catch (e) { console.error(e); }
@@ -222,6 +224,7 @@ function PortfolioPage() {
                     minBuyScore: botConfig.minBuyScore,
                     maxOpenPositions: botConfig.maxOpenPositions,
                     maxGrossExposurePct: botConfig.maxGrossExposurePct / 100,
+                    extendedHoursEnabled: botConfig.extendedHoursEnabled,
                 }),
             });
             if (res.ok) { setBotConfigChanged(false); setBotConfigMsg('✓ Saved'); setTimeout(() => setBotConfigMsg(null), 3000); }
@@ -1158,6 +1161,7 @@ function PortfolioPage() {
                 {/* ── Mobile holdings (hidden on lg+) ── */}
                 <div className="lg:hidden border-b border-[var(--color-border)]">
                     {holdingsPanel}
+                    <BlitzPortfolioSection />
                 </div>
 
                 {/* ── Tabs: History | Trade | Settings ── */}
@@ -1556,6 +1560,24 @@ function PortfolioPage() {
                                     <p className="text-xs text-[var(--color-text-secondary)] mt-1">Cash reserve = 100 − this</p>
                                 </div>
                             </div>
+
+                            <div className="mt-5 pt-5 border-t border-[var(--color-border)]">
+                                <label className="flex items-start gap-3 cursor-pointer">
+                                    <input type="checkbox" className="mt-1 w-4 h-4"
+                                        checked={botConfig.extendedHoursEnabled}
+                                        onChange={e => { setBotConfig(c => ({ ...c, extendedHoursEnabled: e.target.checked })); setBotConfigChanged(true); }} />
+                                    <span>
+                                        <span className="block text-sm font-bold text-[var(--color-text-primary)]">Extended-Hours Trading (opt-in)</span>
+                                        <span className="block text-xs text-[var(--color-text-secondary)] mt-0.5">
+                                            Lets the bot enter positions during pre-market (4:00–9:30 AM ET) and after-hours (4:00–8:00 PM ET).
+                                            A protective stop is placed immediately after each fill and rests in the book right away — it just
+                                            can't be monitored for triggering until the next regular session opens (9:30 AM ET). If that immediate
+                                            placement ever fails, the existing 9:31 AM ET safety check backfills it as a fallback.
+                                        </span>
+                                    </span>
+                                </label>
+                            </div>
+
                             <div className="flex items-center gap-4 mt-5">
                                 <button onClick={saveBotConfig} disabled={botConfigSaving || !botConfigChanged}
                                     className="px-6 py-2.5 rounded-xl bg-[var(--color-accent)] text-white font-bold hover:opacity-90 transition-opacity disabled:opacity-40">
@@ -1609,6 +1631,7 @@ function PortfolioPage() {
         {/* RIGHT SIDEBAR — desktop only */}
         <div className="hidden lg:block w-80 xl:w-96 border-l border-[var(--color-border)] sticky top-0 h-screen overflow-y-auto">
             {holdingsPanel}
+            <BlitzPortfolioSection />
         </div>
 
         </div>{/* ── closes max-w-7xl two-col container ── */}

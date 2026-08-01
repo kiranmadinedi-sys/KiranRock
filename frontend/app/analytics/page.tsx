@@ -33,6 +33,7 @@ interface Trade {
     exitType: string | null;
     executedBy: string | null;
     outcome: string | null;
+    strategy: 'swing' | 'blitz';
 }
 
 interface AggRow {
@@ -299,6 +300,11 @@ function exitBadge(t: string | null) {
         time_exit:          'text-yellow-400',
         manual:             'text-gray-400',
         bot:                'text-gray-300',
+        // Blitz (intraday) exit reasons — distinct strings from swing's derived types above
+        'take-profit':          'text-green-400',
+        'stop-loss-backstop':   'text-red-400',
+        'eod-flatten':          'text-amber-400',
+        'manual-close':         'text-gray-400',
     };
     return <span className={colors[t] || 'text-gray-300'}>{t.replace(/_/g, ' ')}</span>;
 }
@@ -411,6 +417,7 @@ export default function AnalyticsPage() {
     const [filterExit,     setFilterExit]     = useState('');
     const [filterMinScore, setFilterMinScore] = useState('');
     const [filterMaxScore, setFilterMaxScore] = useState('');
+    const [filterStrategy, setFilterStrategy] = useState(''); // '', 'swing', 'blitz'
 
     // Sort
     const [sortKey, setSortKey] = useState<SortKey>('closedAt');
@@ -578,6 +585,7 @@ export default function AnalyticsPage() {
         if (filterExit   && t.exitType !== filterExit)    return false;
         if (filterMinScore && (t.aiScore == null || t.aiScore < parseFloat(filterMinScore))) return false;
         if (filterMaxScore && (t.aiScore == null || t.aiScore > parseFloat(filterMaxScore))) return false;
+        if (filterStrategy && t.strategy !== filterStrategy) return false;
         return true;
     });
 
@@ -771,6 +779,13 @@ export default function AnalyticsPage() {
                                 <option value="loss">Losers only</option>
                             </select>
 
+                            <select value={filterStrategy} onChange={e => setFilterStrategy(e.target.value)}
+                                className="bg-gray-700 text-sm text-gray-200 border border-gray-600 rounded-lg px-2 py-1.5">
+                                <option value="">Swing + Blitz</option>
+                                <option value="swing">Swing only</option>
+                                <option value="blitz">Blitz only</option>
+                            </select>
+
                             <select value={filterSector} onChange={e => setFilterSector(e.target.value)}
                                 className="bg-gray-700 text-sm text-gray-200 border border-gray-600 rounded-lg px-2 py-1.5">
                                 <option value="">All sectors</option>
@@ -800,8 +815,8 @@ export default function AnalyticsPage() {
                                     className="w-16 bg-gray-700 text-sm text-gray-200 border border-gray-600 rounded-lg px-2 py-1.5" />
                             </div>
 
-                            {(filterOutcome || filterSector || filterRegime || filterExit || filterMinScore || filterMaxScore) && (
-                                <button onClick={() => { setFilterOutcome(''); setFilterSector(''); setFilterRegime(''); setFilterExit(''); setFilterMinScore(''); setFilterMaxScore(''); }}
+                            {(filterOutcome || filterSector || filterRegime || filterExit || filterMinScore || filterMaxScore || filterStrategy) && (
+                                <button onClick={() => { setFilterOutcome(''); setFilterSector(''); setFilterRegime(''); setFilterExit(''); setFilterMinScore(''); setFilterMaxScore(''); setFilterStrategy(''); }}
                                     className="text-xs text-red-400 hover:text-red-300 underline">Clear all</button>
                             )}
                             <span className="ml-auto text-xs text-gray-500">{sorted.length} of {trades.length} trades</span>
@@ -820,6 +835,7 @@ export default function AnalyticsPage() {
                                     <thead className="bg-gray-900/60 sticky top-0">
                                         <tr className="text-gray-400">
                                             <th className="text-left px-3 py-3"><SortBtn k="closedAt" label="Date" /></th>
+                                            <th className="text-left px-3 py-3">Type</th>
                                             <th className="text-left px-3 py-3"><SortBtn k="symbol" label="Symbol" /></th>
                                             <th className="text-right px-3 py-3"><SortBtn k="aiScore" label="Score" /></th>
                                             <th className="text-left px-3 py-3">Regime</th>
@@ -838,6 +854,17 @@ export default function AnalyticsPage() {
                                             <tr key={t.id} className="border-t border-gray-700/40 hover:bg-gray-700/20 transition-colors">
                                                 <td className="px-3 py-2.5 text-gray-400 whitespace-nowrap">
                                                     {t.closedAt ? new Date(t.closedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—'}
+                                                </td>
+                                                <td className="px-3 py-2.5">
+                                                    {t.strategy === 'blitz' ? (
+                                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                                                            ⚡ Blitz
+                                                        </span>
+                                                    ) : (
+                                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/15 text-blue-400 border border-blue-500/30">
+                                                            🔄 Swing
+                                                        </span>
+                                                    )}
                                                 </td>
                                                 <td className="px-3 py-2.5 font-bold text-white">{t.symbol}</td>
                                                 <td className={`px-3 py-2.5 text-right ${scoreColor(t.aiScore)}`}>

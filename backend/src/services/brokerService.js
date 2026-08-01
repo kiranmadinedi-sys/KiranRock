@@ -147,6 +147,11 @@ const simulatedBroker = (() => {
         return buyMarket(userId, symbol, quantity, meta);
     }
 
+    async function buyLimitExtendedHours(userId, symbol, quantity, meta = {}) {
+        // No real session concept in the simulated broker — mirrors as a regular buy
+        return buyMarket(userId, symbol, quantity, meta);
+    }
+
     async function sellMarket(userId, symbol, quantity, meta = {}) {
         logger.info('[Broker:Simulated] SELL order', { symbol, quantity, meta });
 
@@ -211,7 +216,7 @@ const simulatedBroker = (() => {
         } catch { return null; }
     }
 
-    return { buyMarket, buyBracket, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, placeStopOrder, cancelOrder, name: 'Simulated (Paper DB)' };
+    return { buyMarket, buyBracket, buyLimitExtendedHours, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, placeStopOrder, cancelOrder, name: 'Simulated (Paper DB)' };
 })();
 
 // ─── ALPACA BROKER ────────────────────────────────────────────────────────────
@@ -282,6 +287,135 @@ const alpacaBroker = (() => {
             filledQty:      buyMarketFilledQty,
             filledAvgPrice: filled.filled_avg_price ? parseFloat(filled.filled_avg_price) : quote.price,
             status:         buyMarketFinalStatus,
+            broker:         isPaper ? 'alpaca-paper' : 'alpaca-live'
+        };
+    }
+
+    // Extended-hours entry — opt-in feature (risk_configs.extended_hours_enabled),
+    // available to any account, paper or live; which users actually get enrolled is
+    // an operational rollout decision, not a restriction baked into this function.
+    //
+    // Alpaca platform rule (not a choice made here): extended-hours order submission
+    // requires type:'limit' + time_in_force:'day' + extended_hours:true, and rejects
+    // order_class:'bracket' and any stop/stop_limit order entirely during extended
+    // sessions. So this is a bare entry with NO attached stop — runMorningStopVerification
+    // (enhancedAIScheduler.js, fires 9:31-9:44 AM ET) and the regular-hours StopRepair
+    // pass inside manageExistingPositions() both already detect any held position with
+    // no protective stop order and place one automatically; neither cares what session a
+    // position was opened in (getOpenOrders has no session filter), so no new protection
+    // mechanism is needed here — the gap is real but already covered by existing code.
+    async function buyLimitExtendedHours(userId, symbol, quantity, meta = {}) {
+        const idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:${userId}:ext`;
+
+        if (await isOrderAlreadySubmitted(idemKey)) {
+            logger.warn('[ARROW-ExtHours] Duplicate submission blocked', { idemKey, symbol });
+            throw new Error(`Duplicate order blocked: ${idemKey}`);
+        }
+        await logOrderState(idemKey, userId, symbol, 'CREATED', null, { quantity });
+
+        const dataProvider = require('./dataProvider');
+        const quote = await dataProvider.getQuote(symbol);
+        await safetyCheck(userId, symbol, quantity, quote.price || 0, meta.safetyOptions);
+
+        await logOrderState(idemKey, userId, symbol, 'VALIDATED', 'CREATED', { quantity, price: quote.price });
+
+        const { client, isPaper } = await getClientForUser(userId);
+
+        logger.info('[Broker:Alpaca] Submitting EXTENDED-HOURS BUY order', {
+            symbol, quantity, paper: isPaper, estimatedPrice: quote.price
+        });
+
+        const limitPrice = parseFloat(((quote.price || quote.ask || quote.bid || 0) * 1.005).toFixed(2));
+        const order = await client.createOrder({
+            symbol,
+            qty:            quantity,
+            side:           'buy',
+            type:           'limit',
+            limit_price:    limitPrice,
+            time_in_force:  'day',
+            extended_hours: true
+        });
+
+        await logOrderState(idemKey, userId, symbol, 'SUBMITTED', 'VALIDATED', {
+            brokerOrderId: order.id, price: limitPrice, quantity,
+            extra: { extendedHours: true, noStopAttached: true }
+        });
+
+        const filled = await waitForFill(client, order.id, 15000);
+        const finalStatus = filled.status || 'submitted';
+        const filledQty = filled.filled_qty
+            ? parseInt(filled.filled_qty)
+            : (finalStatus === 'filled' ? quantity : 0);
+        const fillPrice = filled.filled_avg_price ? parseFloat(filled.filled_avg_price) : quote.price;
+
+        if (filledQty > 0) {
+            await logOrderState(idemKey, userId, symbol, 'FILLED', 'SUBMITTED', {
+                brokerOrderId: order.id, price: fillPrice, quantity: filledQty,
+                broker: isPaper ? 'alpaca-paper' : 'alpaca-live',
+                extra: { extendedHours: true, noStopAttached: true }
+            });
+
+            // Mirror into holdings exactly like buyMarket.
+            const tradingServiceDB = require('./tradingServiceDB');
+            await tradingServiceDB.executeBuyOrder(
+                userId, symbol, filledQty,
+                `ALPACA_${isPaper ? 'PAPER' : 'LIVE'}_EXTENDED_HOURS`,
+                meta.aiScore || null,
+                meta.sector  || null,
+                null, null, null,
+                meta.atr || null
+            );
+
+            // Attempt a real GTC stop immediately, right after the fill — confirmed live
+            // (2026-08-01) that Alpaca accepts a plain stop order (no extended_hours flag)
+            // submitted at ANY time of day; it just won't be monitored for triggering until
+            // the next regular session opens. So this is not a submission-timing gap at all
+            // once the position is filled — the stop rests in the book immediately, armed
+            // and ready the instant regular hours resume, rather than waiting for the next
+            // morning's runMorningStopVerification sweep to notice and place one. That sweep
+            // (and regular-hours StopRepair) remain as a genuine fallback in case this
+            // immediate attempt fails for any reason (e.g. a transient API error) — the
+            // "no stop until next regular-hours check" risk described to users is now the
+            // backup case, not the expected outcome.
+            let stopPlaced = false;
+            try {
+                const stopLossPct = Math.abs(parseFloat(meta.stopLossPct)) || 0.05;
+                const stopPrice = parseFloat((fillPrice * (1 - stopLossPct)).toFixed(2));
+                await placeStopOrder(userId, symbol, filledQty, stopPrice);
+                stopPlaced = true;
+                logger.info('[Broker:Alpaca] Extended-hours stop placed immediately after fill', {
+                    userId, symbol, filledQty, stopPrice
+                });
+            } catch (stopErr) {
+                logger.warn('[Broker:Alpaca] Could not place immediate stop after extended-hours fill — falling back to next regular-hours check', {
+                    userId, symbol, error: stopErr.message
+                });
+            }
+
+            return {
+                orderId:        order.id,
+                symbol,
+                side:           'buy',
+                qty:            quantity,
+                filledQty,
+                filledAvgPrice: fillPrice,
+                status:         finalStatus,
+                extendedHours:  true,
+                noStopAttached: !stopPlaced,
+                broker:         isPaper ? 'alpaca-paper' : 'alpaca-live'
+            };
+        }
+
+        return {
+            orderId:        order.id,
+            symbol,
+            side:           'buy',
+            qty:            quantity,
+            filledQty,
+            filledAvgPrice: fillPrice,
+            status:         finalStatus,
+            extendedHours:  true,
+            noStopAttached: true,
             broker:         isPaper ? 'alpaca-paper' : 'alpaca-live'
         };
     }
@@ -908,7 +1042,7 @@ const alpacaBroker = (() => {
         return events;
     }
 
-    return { buyMarket, buyBracket, buyFractional, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, getNetDeposits, getDepositActivities, getRecentActivity, placeStopOrder, cancelOrder, name: 'Alpaca Markets' };
+    return { buyMarket, buyBracket, buyFractional, buyLimitExtendedHours, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, getNetDeposits, getDepositActivities, getRecentActivity, placeStopOrder, cancelOrder, name: 'Alpaca Markets' };
 })();
 
 // ─── ACTIVE BROKER SELECTION ─────────────────────────────────────────────────
@@ -1131,6 +1265,24 @@ module.exports = {
                         activeBroker.buyFractional
                             ? activeBroker.buyFractional(userId, symbol, notional, meta)
                             : activeBroker.buyBracket(userId, symbol, 1, meta),
+
+    /**
+     * Extended-hours-only entry: plain limit, day, extended_hours:true — NO stop
+     * attached (Alpaca rejects stop orders and bracket/OCO order class entirely during
+     * extended sessions). Available to any account; the opt-in toggle plus which users
+     * are actually enrolled is what controls exposure, not this function.
+     * A protective stop gets backfilled automatically once regular hours resume, via
+     * the existing StopRepair / runMorningStopVerification mechanisms — see
+     * extendedHoursTradingService.js for the scan/entry loop that calls this.
+     * @param {string} userId
+     * @param {string} symbol
+     * @param {number} quantity  whole shares (Alpaca extended-hours orders reject notional/fractional)
+     * @param {object} meta      { aiScore, sector, atr }
+     */
+    buyLimitExtendedHours: (userId, symbol, quantity, meta) =>
+                        activeBroker.buyLimitExtendedHours
+                            ? activeBroker.buyLimitExtendedHours(userId, symbol, quantity, meta)
+                            : activeBroker.buyMarket(userId, symbol, quantity, meta),
 
     /** Place a limit sell order */
     sellMarket:     (userId, symbol, quantity, meta) =>

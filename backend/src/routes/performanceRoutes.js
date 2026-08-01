@@ -1239,7 +1239,7 @@ router.get('/trade-log', protect, async (req, res) => {
             return 'bot';
         }
 
-        const trades = result.rows.map(r => ({
+        const swingTrades = result.rows.map(r => ({
             id:          r.id,
             symbol:      r.symbol,
             quantity:    parseFloat(r.quantity),
@@ -1257,7 +1257,72 @@ router.get('/trade-log', protect, async (req, res) => {
             exitType:    deriveExitType(r.exit_notes, r.executed_by),
             executedBy:  r.executed_by || null,
             outcome:     r.pnl != null ? toWinLoss(parseFloat(r.pnl)) : null,
+            strategy:    'swing',
         }));
+
+        // Blitz (intraday) closed trades — separate table, separate capital pool, never
+        // touches `trades`/`holdings`. Pulled into the same review here purely for display;
+        // merged client-side-filterable via a `strategy` tag rather than blended into any
+        // swing-specific number. Blitz doesn't track sector/regime/slippage per trade, so
+        // those stay null (sector/regime filters naturally only ever match swing rows —
+        // that's correct, not a bug). id is negated to guarantee no collision with swing's
+        // own serial ids when both come from independent tables.
+        let blitzTrades = [];
+        try {
+            const { query: dbQuery } = require('../config/database');
+            const blitzRes = await dbQuery(`
+                SELECT id, symbol, quantity, entry_price, exit_price, entry_time, exit_time,
+                       pnl, pnl_percent, exit_reason, score_at_entry
+                FROM intraday_trades
+                WHERE user_id = $1 AND exit_time >= NOW() - ($2 * INTERVAL '1 day')
+                ORDER BY exit_time DESC
+                LIMIT 500
+            `, [userId, days]);
+
+            blitzTrades = blitzRes.rows
+                .filter(r => {
+                    if (outcome === 'win'  && !(parseFloat(r.pnl) > 0)) return false;
+                    if (outcome === 'loss' && !(parseFloat(r.pnl) < 0)) return false;
+                    if (sector || regime) return false; // Blitz has neither — excluded when filtering by either
+                    if (minScore != null && (r.score_at_entry == null || r.score_at_entry < minScore)) return false;
+                    if (maxScore != null && (r.score_at_entry == null || r.score_at_entry > maxScore)) return false;
+                    if (exitType && r.exit_reason !== exitType) return false;
+                    return true;
+                })
+                .map(r => {
+                    const entryTime = r.entry_time ? new Date(r.entry_time) : null;
+                    const exitTime  = r.exit_time  ? new Date(r.exit_time)  : null;
+                    const holdHours = (entryTime && exitTime)
+                        ? parseFloat(((exitTime - entryTime) / 3600000).toFixed(2))
+                        : null;
+                    return {
+                        id:          -r.id, // negated — swing ids are independent positive serials
+                        symbol:      r.symbol,
+                        quantity:    parseFloat(r.quantity),
+                        exitPrice:   r.exit_price  != null ? parseFloat(r.exit_price)  : null,
+                        entryPrice:  r.entry_price != null ? parseFloat(r.entry_price) : null,
+                        closedAt:    r.exit_time,
+                        openedAt:    r.entry_time,
+                        pnl:         r.pnl         != null ? parseFloat(r.pnl)         : null,
+                        pnlPct:      r.pnl_percent != null ? parseFloat(r.pnl_percent) : null,
+                        holdHours,
+                        slippagePct: null,
+                        aiScore:     r.score_at_entry != null ? parseFloat(r.score_at_entry) : null,
+                        sector:      null,
+                        regime:      null,
+                        exitType:    r.exit_reason || 'blitz_exit',
+                        executedBy:  'blitz',
+                        outcome:     r.pnl != null ? toWinLoss(parseFloat(r.pnl)) : null,
+                        strategy:    'blitz',
+                    };
+                });
+        } catch (blitzErr) {
+            logger.warn('[TradeLog] Could not load Blitz trades — showing swing only', { error: blitzErr.message });
+        }
+
+        const trades = [...swingTrades, ...blitzTrades].sort(
+            (a, b) => new Date(b.closedAt) - new Date(a.closedAt)
+        );
 
         // Aggregate breakdowns
         function buildAgg(rows, keyFn) {

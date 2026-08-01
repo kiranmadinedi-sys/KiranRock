@@ -245,6 +245,7 @@ async function initializeDatabase() {
                 daily_loss_limit DECIMAL(12, 2) DEFAULT -1000,
                 max_order_notional DECIMAL(12, 2) DEFAULT 5000,
                 emergency_stop_enabled BOOLEAN DEFAULT false,
+                extended_hours_enabled BOOLEAN DEFAULT false,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(user_id)

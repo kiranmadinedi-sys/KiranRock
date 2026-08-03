@@ -720,7 +720,7 @@ async function runMorningStopVerification() {
 
     console.log('[StopVerify] 9:31 AM ET — verifying protective stop orders for all positions');
     try {
-        const { Alpaca }     = require('@alpacahq/alpaca-trade-api');
+        const Alpaca         = require('@alpacahq/alpaca-trade-api');
         const { query }      = require('../config/database');
         const alertService   = require('./alertService');
         const activeUsers    = await getActiveAIUsers();

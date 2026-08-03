@@ -1143,7 +1143,7 @@ module.exports = {
             // ── Alpaca: cancel all open orders via broker API ──────────────────
             try {
                 const alpacaClient = (() => {
-                    const { Alpaca } = require('@alpacahq/alpaca-trade-api');
+                    const Alpaca = require('@alpacahq/alpaca-trade-api');
                     return new Alpaca({
                         keyId:     process.env.ALPACA_KEY_ID,
                         secretKey: process.env.ALPACA_SECRET_KEY,

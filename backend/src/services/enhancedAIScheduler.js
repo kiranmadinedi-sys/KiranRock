@@ -723,21 +723,25 @@ async function runMorningStopVerification() {
         const Alpaca         = require('@alpacahq/alpaca-trade-api');
         const { query }      = require('../config/database');
         const alertService   = require('./alertService');
+        const userDb         = require('./userDatabaseService');
         const activeUsers    = await getActiveAIUsers();
 
         for (const user of activeUsers) {
             try {
-                const userRow = await query(
-                    `SELECT alpaca_key_id, alpaca_secret_key, alpaca_paper FROM users WHERE id=$1 LIMIT 1`,
-                    [user.id]
-                );
-                if (!userRow.rows[0]) continue;
-                const { alpaca_key_id: keyId, alpaca_secret_key: secretKey, alpaca_paper } = userRow.rows[0];
-                if (!keyId || !secretKey) continue;
+                // Resolve credentials the same way brokerService/StopRepair do (falls back to
+                // the shared .env paper account when a user has no personal keys) instead of
+                // skipping outright — a prior version skipped any user without personal
+                // credentials, which meant this 9:31 AM safety net silently never ran for
+                // shared-fallback-account users at all, extended-hours or not. Found while
+                // checking why a shared-account user's extended-hours entry didn't get its
+                // promised 9:31 AM stop until StopRepair (a different mechanism) caught it hours
+                // later during an outage (2026-08-03).
+                const creds = await userDb.getUserAlpacaCredentials(user.id);
+                if (!creds.keyId || !creds.secretKey) continue;
 
                 const client = new Alpaca({
-                    keyId, secretKey,
-                    paper: alpaca_paper !== false
+                    keyId: creds.keyId, secretKey: creds.secretKey,
+                    paper: creds.isPaper !== false
                 });
 
                 const [positions, openOrders] = await Promise.all([

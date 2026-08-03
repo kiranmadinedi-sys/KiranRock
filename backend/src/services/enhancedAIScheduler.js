@@ -508,7 +508,7 @@ async function runDailyDigest(activeUsers, etDate) {
                     SELECT
                         MAX(total_portfolio_value) AS peak,
                         (SELECT total_portfolio_value FROM portfolio_snapshots
-                         WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1) AS current_val
+                         WHERE user_id = $1 ORDER BY captured_at DESC LIMIT 1) AS current_val
                     FROM portfolio_snapshots
                     WHERE user_id = $1
                 `, [user.id])

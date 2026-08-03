@@ -392,13 +392,22 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
         const alpacaPos = alpacaPositions.find(p => p.symbol.toUpperCase() === symbol);
         const avgPrice  = parseFloat(alpacaPos?.avg_entry_price || 0) ||
                           (alpacaPos?.cost_basis ? parseFloat(alpacaPos.cost_basis) / alpacaQty : 0);
+        // Alpaca's position object already carries a live price — use it so a
+        // restored row isn't left showing null/stale current_price until the
+        // next regular-hours refresh tick picks it up.
+        const currentPrice  = parseFloat(alpacaPos?.current_price || 0) || avgPrice;
+        const marketValue   = parseFloat(alpacaPos?.market_value || 0) || (currentPrice * alpacaQty);
+        const gainLoss       = parseFloat(alpacaPos?.unrealized_pl || 0) || (marketValue - (avgPrice * alpacaQty));
+        const gainLossPct    = alpacaPos?.unrealized_plpc != null
+            ? parseFloat(alpacaPos.unrealized_plpc) * 100
+            : (avgPrice > 0 ? (gainLoss / (avgPrice * alpacaQty)) * 100 : 0);
         try {
             await query(
-                `INSERT INTO holdings (user_id, symbol, quantity, average_price, created_at, updated_at)
-                 VALUES ($1, $2, $3, $4, NOW(), NOW())
+                `INSERT INTO holdings (user_id, symbol, quantity, average_price, current_price, market_value, gain_loss, gain_loss_percent, created_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
                  ON CONFLICT (user_id, symbol)
-                 DO UPDATE SET quantity = $3, average_price = $4, updated_at = NOW()`,
-                [userId, symbol, alpacaQty, avgPrice]
+                 DO UPDATE SET quantity = $3, average_price = $4, current_price = $5, market_value = $6, gain_loss = $7, gain_loss_percent = $8, updated_at = NOW()`,
+                [userId, symbol, alpacaQty, avgPrice, currentPrice, marketValue, gainLoss, gainLossPct]
             );
             await _auditLog(userId, 'SHADOW', symbol, 0, alpacaQty, 'INSERTED',
                 `Alpaca held ${alpacaQty} × ${symbol} @ $${avgPrice.toFixed(2)}; not in DB`, trigger);

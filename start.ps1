@@ -812,6 +812,17 @@ if ($null -eq $pm2Cmd) {
     & pm2 save | Out-Null
     Pop-Location
     Write-Host "      PM2 started kiranrock-worker (auto-restart on crash enabled)" -ForegroundColor Green
+
+    # ── PM2 log rotation (idempotent — safe to run every startup) ───────────
+    # Without this, kiranrock-backend/-worker out+error logs grow unbounded
+    # (seen at 300MB+ combined after a few weeks). Daily rotation + 60 retained
+    # files ~= 2 months of history, then oldest rotated logs are deleted.
+    & pm2 install pm2-logrotate | Out-Null
+    & pm2 set pm2-logrotate:max_size 20M | Out-Null
+    & pm2 set pm2-logrotate:retain 60 | Out-Null
+    & pm2 set pm2-logrotate:compress true | Out-Null
+    & pm2 set pm2-logrotate:rotateInterval '0 0 * * *' | Out-Null
+    Write-Host "      PM2 log rotation configured (daily, 60 retained, ~2 months)" -ForegroundColor Green
     $pm2WorkerPidText = (& pm2 pid kiranrock-worker 2>$null) -join ''
     $workerPidValue   = if ($pm2WorkerPidText -match '^\d+$') { [int]$pm2WorkerPidText } else { 0 }
     $workerProcess    = [pscustomobject]@{ Id = $workerPidValue }

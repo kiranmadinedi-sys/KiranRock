@@ -4794,26 +4794,15 @@ async function manageExistingPositions(userId) {
                     // position there. If the DB says we own it but Alpaca doesn't, selling
                     // would create an unintended short. Instead, clean up the stale DB record.
                     if (process.env.BROKER === 'alpaca' || process.env.DATA_PROVIDER === 'alpaca') {
-                        // Guard 1: DB sell-record check — prevents re-selling after worker restart wipes
-                        // _exitPending. If a SELL trade was recorded in the last 4 hours for this symbol,
-                        // the position was already exited in a previous cycle. Remove the stale DB holding.
-                        try {
-                            const recentSell = await query(
-                                `SELECT id FROM trades WHERE user_id=$1 AND symbol=$2 AND action='SELL'
-                                 AND trade_date > NOW() - INTERVAL '4 hours' LIMIT 1`,
-                                [userId, holding.symbol]
-                            );
-                            if (recentSell.rows.length > 0) {
-                                logger.warn('[AlpacaGuard] Recent SELL found in trades — position already exited, removing stale holding', {
-                                    userId, symbol: holding.symbol
-                                });
-                                try { await holdingsDb.deleteHolding(userId, holding.symbol); } catch (_) {}
-                                _exitPending.set(sellKey, Date.now() + 2 * 3600_000);
-                                continue;
-                            }
-                        } catch (_tradeCheckErr) { /* non-blocking */ }
-
-                        // Guard 2: Live Alpaca position check — if not long in broker, don't sell (would create short)
+                        // Live Alpaca position check — if not long in broker, don't sell (would create short).
+                        // This is the sole source of truth for "already exited," including the case a prior
+                        // cycle fully sold and _exitPending got wiped by a restart (alpacaQty will read 0).
+                        // A trade-history heuristic ("any SELL in the last N hours ⇒ fully exited") used to
+                        // run before this and delete the holding outright — but a PARTIAL exit also leaves a
+                        // recent SELL row, so it deleted still-open positions out from under a live Alpaca
+                        // position (confirmed cause of the BJ shadow-position incident, 2026-08-01/02: a
+                        // partial exit at 11:05 left a SELL row, a full-exit attempt at 11:45 hit that
+                        // heuristic and deleted the DB holding while 3 shares still sat live on Alpaca).
                         try {
                             const brokerPositions = await brokerService.getPositions(userId);
                             const alpacaPos = brokerPositions.find(p => p.symbol.toUpperCase() === holding.symbol.toUpperCase());

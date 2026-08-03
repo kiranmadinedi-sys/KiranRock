@@ -22,6 +22,13 @@ const BOT_USERNAME       = process.env.TELEGRAM_BOT_USERNAME || 'KiranTradePro_b
 const LINK_CODE_TTL_MS   = 15 * 60 * 1000; // 15 minutes
 
 let _bot = null;
+let _healthCheckTimer = null;
+let _consecutiveErrors = 0;
+let _lastSeenUpdateAt = 0;
+
+const POLL_INTERVAL_BASE_MS = 300;   // library default
+const POLL_INTERVAL_MAX_MS  = 30000; // cap during a sustained outage
+const BACKOFF_AFTER_ERRORS  = 5;     // don't slow down on a single blip
 
 /**
  * Generates a one-time linking code for this user and returns the deep link.
@@ -100,18 +107,52 @@ function startTelegramLinkListener() {
         }
     });
 
+    // The library retries getUpdates() every 300ms with no backoff, so a real
+    // outage (DNS down, 401, etc.) hammers the network and the log at 3+/sec
+    // instead of a handful of times total. Slow the retry cadence the longer
+    // the outage runs, and collapse the log spam to occasional lines — same
+    // self-healing behavior, just quieter and gentler on a sustained failure.
     _bot.on('polling_error', (err) => {
-        logger.warn('[TelegramLink] Polling error', { err: err.message });
+        _consecutiveErrors++;
+        if (_consecutiveErrors === 1 || _consecutiveErrors % 20 === 0) {
+            logger.warn('[TelegramLink] Polling error', { err: err.message, consecutiveErrors: _consecutiveErrors });
+        }
+        if (_consecutiveErrors >= BACKOFF_AFTER_ERRORS && _bot && _bot._polling) {
+            const backoffSteps = Math.min(_consecutiveErrors - BACKOFF_AFTER_ERRORS, 6);
+            _bot._polling.options.interval = Math.min(
+                POLL_INTERVAL_BASE_MS * (2 ** backoffSteps),
+                POLL_INTERVAL_MAX_MS
+            );
+        }
     });
+
+    _lastSeenUpdateAt = 0;
+    _healthCheckTimer = setInterval(() => {
+        if (!_bot || !_bot._polling) return;
+        const lastUpdate = _bot._polling._lastUpdate || 0;
+        if (lastUpdate > _lastSeenUpdateAt) {
+            _lastSeenUpdateAt = lastUpdate;
+            if (_consecutiveErrors > 0) {
+                logger.info('[TelegramLink] Polling recovered', { afterConsecutiveErrors: _consecutiveErrors });
+                _consecutiveErrors = 0;
+                _bot._polling.options.interval = POLL_INTERVAL_BASE_MS;
+            }
+        }
+    }, 10000);
 
     logger.info('[TelegramLink] Listening for /start <code> messages');
 }
 
 function stopTelegramLinkListener() {
+    if (_healthCheckTimer) {
+        clearInterval(_healthCheckTimer);
+        _healthCheckTimer = null;
+    }
     if (_bot) {
         _bot.stopPolling().catch(() => {});
         _bot = null;
     }
+    _consecutiveErrors = 0;
 }
 
 module.exports = { generateLinkCode, startTelegramLinkListener, stopTelegramLinkListener };

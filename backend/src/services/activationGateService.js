@@ -28,7 +28,14 @@ const GATES = {
 
 /**
  * Fetch live AI trade stats: total, wins, win rate.
- * Only counts trades executed by the AI bot (executed_by LIKE 'AI%').
+ * Counts closed sells from any automated path (paper or live) — everything
+ * except human-initiated (MANUAL/USER) and the dedup artifact tag. Excludes
+ * rather than includes, so new broker/strategy tags (e.g. reconciler,
+ * ALPACA_PAPER, extended-hours) count automatically instead of silently
+ * falling through an outdated include pattern like the old 'AI%' one did.
+ * Filters on pnl IS NOT NULL rather than status='CLOSED' because direct bot
+ * sells (ALPACA_PAPER/ALPACA_LIVE) are left at status='OPEN' despite having
+ * real pnl — a separate data-integrity bug, tracked but not fixed here.
  */
 async function getAITradeStats(userId) {
     try {
@@ -42,8 +49,9 @@ async function getAITradeStats(userId) {
                 )                                                   AS win_rate_pct
             FROM trades
             WHERE user_id      = $1
-              AND status       = 'CLOSED'
-              AND executed_by  ILIKE 'AI%'
+              AND action       = 'SELL'
+              AND pnl IS NOT NULL
+              AND executed_by NOT IN ('MANUAL', 'USER', 'health_monitor_dup')
               AND pnl IS NOT NULL
         `, [userId]);
 

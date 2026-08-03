@@ -333,7 +333,11 @@ const getPortfolioSummary = async (userId) => {
 
                 let deviation = Math.abs(totalPortfolioValue - baselineValue) / baselineValue;
                 if (deviation > 0.25) {
-                    console.warn(`[PortfolioTracking] Suspicious value swing for user ${userId}: ${totalPortfolioValue.toFixed(2)} vs recent median ${baselineValue.toFixed(2)} (n=${recentValues.length}, ${(deviation * 100).toFixed(1)}% dev)`);
+                    const gapDollars = totalPortfolioValue - baselineValue;
+                    console.warn(`[PortfolioTracking] Suspicious value swing for user ${userId}: ${totalPortfolioValue.toFixed(2)} vs recent median ${baselineValue.toFixed(2)} (n=${recentValues.length}, ${(deviation * 100).toFixed(1)}% dev, gap=$${gapDollars.toFixed(2)})`, {
+                        userId, recentValues, baselineValue, totalPortfolioValue, cashBalance, alpacaEquity, alpacaCash,
+                        anyAssetMarketOpen
+                    });
 
                     // Cross-check against Alpaca's own activity ledger — a genuine swing this
                     // large always has a matching fill/deposit/withdrawal behind it; a live
@@ -351,9 +355,24 @@ const getPortfolioSummary = async (userId) => {
                     }
 
                     if (corroboratingActivity.length > 0) {
-                        console.warn(`[PortfolioTracking] Swing corroborated by ${corroboratingActivity.length} real activity event(s) for user ${userId} — treating as a genuine move, not retrying/skipping`);
+                        // Log what was actually found and whether its dollar size plausibly explains
+                        // the gap — "an activity exists somewhere in the window" is not the same as
+                        // "an activity this large happened." A $373 sale corroborating a $2,857 gap
+                        // is a false-positive pattern (2026-07-28 incident) this line exists to catch.
+                        const activityDetail = corroboratingActivity.map(a => {
+                            const amount = a.net_amount != null
+                                ? parseFloat(a.net_amount)
+                                : (a.price != null && a.qty != null ? parseFloat(a.price) * parseFloat(a.qty) : null);
+                            return { type: a.activity_type, symbol: a.symbol || null, amount, time: a.transaction_time || a.date || null };
+                        });
+                        const explainedMagnitude = activityDetail.reduce((sum, a) => sum + Math.abs(a.amount || 0), 0);
+                        const gapMagnitude = Math.abs(gapDollars);
+                        const adequatelyExplained = explainedMagnitude >= gapMagnitude * 0.75;
+                        console.warn(`[PortfolioTracking] Swing corroborated by ${corroboratingActivity.length} real activity event(s) for user ${userId} — treating as a genuine move, not retrying/skipping. ${adequatelyExplained ? 'Activity size covers the gap.' : '⚠️ WEAK CORROBORATION — activity size does NOT plausibly cover the gap, may be a false-positive pass-through'}`, {
+                            userId, oldestRecentAt, activityDetail, explainedMagnitude, gapMagnitude, adequatelyExplained
+                        });
                     } else {
-                        console.warn(`[PortfolioTracking] No corroborating activity found for user ${userId} — retrying with fresh Alpaca fetches`);
+                        console.warn(`[PortfolioTracking] No corroborating activity found for user ${userId} since ${new Date(oldestRecentAt).toISOString()} — retrying with fresh Alpaca fetches`);
                         const MAX_ATTEMPTS = 3;
                         const RETRY_DELAY_MS = 2000;
                         for (let attempt = 1; attempt <= MAX_ATTEMPTS && deviation > 0.25; attempt++) {
@@ -362,6 +381,10 @@ const getPortfolioSummary = async (userId) => {
                             const retriedCashBalance = fresh.cash ?? account.balance;
                             const retriedTotalPortfolioValue = fresh.equity ?? (retriedCashBalance + totalCurrentValue);
                             const retriedDeviation = Math.abs(retriedTotalPortfolioValue - baselineValue) / baselineValue;
+                            console.warn(`[PortfolioTracking] Retry ${attempt} raw Alpaca fetch for user ${userId}`, {
+                                userId, attempt, rawCash: fresh.cash, rawEquity: fresh.equity, positionCount: fresh.positions?.length ?? 0,
+                                retriedTotalPortfolioValue, retriedDeviation
+                            });
                             if (retriedDeviation < deviation) {
                                 cashBalance = retriedCashBalance;
                                 totalPortfolioValue = retriedTotalPortfolioValue;

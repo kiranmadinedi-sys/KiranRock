@@ -3940,13 +3940,24 @@ async function executeAutonomousTrading(userId) {
             let shares = Math.floor(positionSize / opportunity.price);
 
             // Small-account floor: Kelly rounds to 0 for stocks > Kelly positionSize.
-            // Bump to 1 share only when 1 share fits within the computed position size (no over-sizing).
-            // Stocks too expensive for 1 whole share fall through to the fractional notional path.
-            if (shares === 0 && opportunity.price > 0 && opportunity.price <= positionSize) {
+            // Bump to 1 whole share when it fits within budget, OR when the overshoot is small
+            // and bounded (<=20% over target). The latter case matters because a fractional-
+            // quantity position can only ever get a 'day' stop from Alpaca — GTC is rejected for
+            // fractional qty — so it goes unprotected every night until the next regular-hours
+            // check re-places it. A small bounded oversize is a cheaper cost than a real,
+            // recurring overnight protection gap (found 2026-08-05: anilboddu1's NOW position,
+            // price only 3.8% over positionSize, fell through to fractional and sat unprotected
+            // every night for exactly this reason). Stocks priced well beyond the tolerance still
+            // fall through to the fractional notional path below — oversizing those would distort
+            // risk sizing far more than the stop-gap costs.
+            const WHOLE_SHARE_OVERSHOOT_TOLERANCE = 0.20;
+            if (shares === 0 && opportunity.price > 0 && opportunity.price <= positionSize * (1 + WHOLE_SHARE_OVERSHOOT_TOLERANCE)) {
                 shares = 1;
-                logger.info('[MinShareFloor] Kelly rounds to 0 — bumped to 1 share', {
+                const overshootPct = ((opportunity.price - positionSize) / positionSize) * 100;
+                logger.info('[MinShareFloor] Kelly rounds to 0 — bumped to 1 whole share (avoids fractional no-GTC-stop gap)', {
                     userId, symbol: opportunity.symbol,
-                    price: opportunity.price, positionSize: positionSize.toFixed(2)
+                    price: opportunity.price, positionSize: positionSize.toFixed(2),
+                    overshootPct: overshootPct.toFixed(1)
                 });
             }
 

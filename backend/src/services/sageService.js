@@ -42,8 +42,14 @@ class SageService {
 
     async getStrategyMetrics() {
         try {
+            // executed_by NOT IN (...) rather than an include-list: matches whatever real
+            // automated-trade tags exist (ALPACA_PAPER, ALPACA_LIVE, reconciler, AI_BOT, etc.)
+            // instead of a specific value ('ENHANCED_AI') that was never actually used, which
+            // made this always fall through to DEFAULT_METRICS (found 2026-08-05, same root
+            // cause as the ActivationGate fix). pnl IS NOT NULL is the reliable "really closed"
+            // signal — status='CLOSED' isn't set consistently for direct bot sells.
             const res = await query(
-                "SELECT pnl FROM trades WHERE status = 'CLOSED' AND executed_by = 'ENHANCED_AI' AND pnl IS NOT NULL"
+                "SELECT pnl FROM trades WHERE action = 'SELL' AND pnl IS NOT NULL AND executed_by NOT IN ('MANUAL', 'USER', 'health_monitor_dup')"
             );
             const completedTrades = res.rows;
 
@@ -77,7 +83,12 @@ class SageService {
 
     async generateLearnings() {
         try {
-            // Pull closed AI trades with metadata from the last 90 days
+            // Pull closed AI trades with metadata from the last 90 days.
+            // trade_date (not created_at — that column doesn't exist on trades) and an
+            // exclude-list on executed_by (not an include-list of tags like 'ENHANCED_AI'/
+            // 'AI_BRACKET' that were never actually used) — same root cause and fix pattern
+            // as the ActivationGate bug found 2026-08-04. Confirmed via data/sage/ having
+            // never once written learned_adjustments.json before this fix.
             const res = await query(`
                 SELECT
                     t.symbol,
@@ -88,11 +99,11 @@ class SageService {
                 FROM trades t
                 LEFT JOIN trade_intelligence ti
                        ON ti.trade_ref_id LIKE t.id::text || '%'
-                WHERE t.status       = 'CLOSED'
-                  AND t.executed_by  IN ('AI_BOT','ENHANCED_AI','AI_BRACKET')
+                WHERE t.action       = 'SELL'
                   AND t.pnl         IS NOT NULL
-                  AND t.created_at  > NOW() - INTERVAL '90 days'
-                ORDER BY t.created_at DESC
+                  AND t.executed_by NOT IN ('MANUAL', 'USER', 'health_monitor_dup')
+                  AND t.trade_date  > NOW() - INTERVAL '90 days'
+                ORDER BY t.trade_date DESC
                 LIMIT 500
             `);
 

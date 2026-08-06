@@ -7,6 +7,14 @@ const { fetchXSymbolNews, fetchXMarketNews, isXConfigured } = require('./xNewsSe
 const NEWS_CACHE_FILE = path.join(__dirname, '../storage/newsCache.json');
 const CACHE_DURATION = 15 * 60 * 1000; // 15 minutes
 
+// Alpha Vantage's per-ticker relevance_score (0-1) — how central that ticker is to the
+// article, not how positive/negative. The old 0.3 floor let through articles where a
+// symbol was only mentioned in passing (e.g. another company's earnings call referencing
+// "AI demand" in the same breath as Nvidia), which then fed that unrelated sentiment into
+// the symbol's AI score. Raised to 0.5 (found + tuned 2026-08-06) to require the ticker be
+// a real subject of the article, not just a tangential mention.
+const NEWS_TICKER_RELEVANCE_MIN = parseFloat(process.env.NEWS_TICKER_RELEVANCE_MIN || '0.5');
+
 // Ensure storage directory exists
 const storageDir = path.dirname(NEWS_CACHE_FILE);
 if (!fs.existsSync(storageDir)) {
@@ -268,7 +276,7 @@ async function fetchAlphaVantageNews(tickers = null) {
                 
                 // Extract relevant tickers
                 const relevantTickers = item.ticker_sentiment
-                    ?.filter(t => parseFloat(t.relevance_score) > 0.3)
+                    ?.filter(t => parseFloat(t.relevance_score) > NEWS_TICKER_RELEVANCE_MIN)
                     .map(t => t.ticker) || [];
 
                 return {

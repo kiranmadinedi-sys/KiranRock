@@ -58,6 +58,21 @@ function fmtDate(v: string | null) {
     return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) + ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
+interface SageLearnings {
+    generatedAt: string;
+    tradeCount: number;
+    setupAdj: Record<string, number>;
+    sectorAdj: Record<string, number>;
+    patternAdj: Record<string, number>;
+    overallWinRate: string;
+}
+interface SageData {
+    learnings: SageLearnings | null;
+    metrics: { winProbability: number; winLossRatio: number };
+    changelog: string[];
+    experimental: string[];
+}
+
 export default function AdminPage() {
     const router = useRouter();
     const [token, setToken] = useState<string | null>(null);
@@ -70,6 +85,9 @@ export default function AdminPage() {
     const [statusActionMsg, setStatusActionMsg] = useState<string | null>(null);
     const [sentinelAckLoading, setSentinelAckLoading] = useState(false);
     const [sentinelAckMsg, setSentinelAckMsg] = useState<string | null>(null);
+    const [sage, setSage] = useState<SageData | null>(null);
+    const [sageLoading, setSageLoading] = useState(false);
+    const [sageMsg, setSageMsg] = useState<string | null>(null);
 
     useEffect(() => {
         const storedToken = localStorage.getItem('token');
@@ -95,6 +113,37 @@ export default function AdminPage() {
             }
         })();
     }, [token, router]);
+
+    useEffect(() => {
+        if (!token) return;
+        (async () => {
+            try {
+                const res = await fetch(`${getApiBaseUrl()}/api/admin/sage`, { headers: { Authorization: `Bearer ${token}` } });
+                if (!res.ok) return; // non-fatal — SAGE section just won't render
+                setSage(await res.json());
+            } catch { /* non-fatal */ }
+        })();
+    }, [token]);
+
+    const handleRegenerateSage = async () => {
+        setSageLoading(true);
+        setSageMsg(null);
+        try {
+            const res = await fetch(`${getApiBaseUrl()}/api/admin/sage/regenerate`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Failed to regenerate');
+            const refreshed = await fetch(`${getApiBaseUrl()}/api/admin/sage`, { headers: { Authorization: `Bearer ${token}` } });
+            if (refreshed.ok) setSage(await refreshed.json());
+            setSageMsg(data.success ? `Regenerated from ${data.learnings.tradeCount} trades.` : 'Not enough closed trades yet to regenerate.');
+        } catch (e: any) {
+            setSageMsg(e.message || 'Failed to regenerate');
+        } finally {
+            setSageLoading(false);
+        }
+    };
 
     const selected = users.find(u => u.id === selectedId) || null;
 
@@ -368,6 +417,94 @@ export default function AdminPage() {
                         </div>
                     </div>
                 )}
+
+                {/* ── SAGE — platform-wide auto-learning, not tied to a selected user ── */}
+                {sage && (
+                    <div className="rounded-xl border border-[var(--color-border)] p-4 lg:p-6 mt-6">
+                        <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
+                            <h2 className="text-lg font-bold text-[var(--color-text-primary)]">🧠 SAGE — Auto-Learning</h2>
+                            <button
+                                onClick={handleRegenerateSage}
+                                disabled={sageLoading}
+                                className="text-xs font-bold px-3 py-1.5 rounded-full bg-[var(--color-accent)] text-white transition-opacity disabled:opacity-40"
+                            >
+                                {sageLoading ? 'Regenerating…' : '↻ Regenerate Now'}
+                            </button>
+                        </div>
+                        <p className="text-xs text-[var(--color-text-secondary)] mb-4">
+                            Analyses closed trades after every session and nudges ORACLE's scoring (±5 total) and Kelly position sizing based on real win rate — not a fixed strategy, it adjusts itself.
+                        </p>
+                        {sageMsg && <div className="mb-3 text-xs text-[var(--color-text-secondary)]">{sageMsg}</div>}
+
+                        {sage.learnings ? (
+                            <>
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+                                    <Stat label="Overall Win Rate" value={sage.learnings.overallWinRate + '%'} />
+                                    <Stat label="Trades Analyzed" value={String(sage.learnings.tradeCount)} />
+                                    <Stat label="Kelly Win Probability" value={(sage.metrics.winProbability * 100).toFixed(1) + '%'} />
+                                    <Stat label="Kelly Win/Loss Ratio" value={sage.metrics.winLossRatio.toFixed(2)} />
+                                </div>
+                                <div className="text-[10px] text-[var(--color-text-secondary)] mb-4">
+                                    Last generated {fmtDate(sage.learnings.generatedAt)}
+                                </div>
+
+                                <AdjustmentRow title="Sector adjustments" adj={sage.learnings.sectorAdj} />
+                                <AdjustmentRow title="Setup adjustments" adj={sage.learnings.setupAdj} />
+                                <AdjustmentRow title="Pattern adjustments" adj={sage.learnings.patternAdj} />
+
+                                {sage.experimental.length > 0 && (
+                                    <div className="border-t border-[var(--color-border)] pt-4 mt-4">
+                                        <p className="text-[11px] font-bold uppercase tracking-wider text-[var(--color-text-secondary)] mb-2">
+                                            Experimental signals — pending 30-day trial before promotion
+                                        </p>
+                                        <div className="space-y-1">
+                                            {sage.experimental.slice(0, 10).map((line, i) => (
+                                                <div key={i} className="text-xs text-[var(--color-text-secondary)] font-mono">{line}</div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {sage.changelog.length > 0 && (
+                                    <div className="border-t border-[var(--color-border)] pt-4 mt-4">
+                                        <p className="text-[11px] font-bold uppercase tracking-wider text-[var(--color-text-secondary)] mb-2">Changelog</p>
+                                        <div className="space-y-2 max-h-64 overflow-y-auto">
+                                            {sage.changelog.map((entry, i) => (
+                                                <pre key={i} className="text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap font-mono bg-[var(--color-bg-tertiary)] rounded-lg p-2">{entry}</pre>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                            </>
+                        ) : (
+                            <div className="text-sm text-[var(--color-text-secondary)]">
+                                No learnings generated yet — needs at least 10 closed AI-executed trades. Click "Regenerate Now" once there's enough history.
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+function AdjustmentRow({ title, adj }: { title: string; adj: Record<string, number> }) {
+    const entries = Object.entries(adj);
+    if (entries.length === 0) return null;
+    return (
+        <div className="mb-4">
+            <p className="text-[11px] font-bold uppercase tracking-wider text-[var(--color-text-secondary)] mb-2">{title}</p>
+            <div className="flex flex-wrap gap-1.5">
+                {entries.map(([key, val]) => (
+                    <span
+                        key={key}
+                        className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${
+                            val > 0 ? 'bg-green-500/15 text-green-600' : val < 0 ? 'bg-red-500/15 text-red-600' : 'bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]'
+                        }`}
+                    >
+                        {key} {val > 0 ? '+' : ''}{val}
+                    </span>
+                ))}
             </div>
         </div>
     );

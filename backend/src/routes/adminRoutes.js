@@ -7,11 +7,14 @@
  */
 const express = require('express');
 const router = express.Router();
+const fs = require('fs');
+const path = require('path');
 const { protect, adminOnly } = require('../middleware/authMiddleware');
 const { query } = require('../config/database');
 const portfolioTrackingService = require('../services/portfolioTrackingService');
 const { getLocationForIp } = require('../services/ipGeolocationService');
 const { checkLiveReadiness, acknowledgeBlockers } = require('../services/liveReadinessService');
+const sageService = require('../services/sageService');
 const { logger } = require('../utils/logger');
 
 router.use(protect, adminOnly);
@@ -227,6 +230,56 @@ router.post('/users/:userId/sentinel/acknowledge-blockers', async (req, res) => 
         });
     } catch (err) {
         logger.error('[Admin] Failed to acknowledge SENTINEL blockers', { userId: req.params.userId, error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * GET /api/admin/sage
+ *
+ * SAGE — the platform's auto-learning system. Analyses closed trades after
+ * every session and nudges ORACLE's scoring (±5 total, sector+setup+pattern)
+ * and Kelly position sizing based on real historical win rate / win-loss
+ * ratio. Was silently non-functional since it was built (wrong column/tag
+ * assumptions against the real trades schema — fixed 2026-08-06) — this
+ * view exists so it's visible and verifiable going forward, not just a
+ * background process nobody can check on.
+ */
+router.get('/sage', async (req, res) => {
+    try {
+        const learnings = sageService.getLearningAdjustments();
+        const metrics = await sageService.getStrategyMetrics();
+
+        const SAGE_DIR = path.join(__dirname, '../../data/sage');
+        const changelogPath = path.join(SAGE_DIR, 'changelog.txt');
+        const experimentalPath = path.join(SAGE_DIR, 'experimental_signals.txt');
+
+        const changelog = fs.existsSync(changelogPath)
+            ? fs.readFileSync(changelogPath, 'utf8').trim().split('\n\n').filter(Boolean).slice(-20).reverse()
+            : [];
+        const experimental = fs.existsSync(experimentalPath)
+            ? fs.readFileSync(experimentalPath, 'utf8').trim().split('\n').filter(Boolean).reverse()
+            : [];
+
+        res.json({ learnings, metrics, changelog, experimental });
+    } catch (err) {
+        logger.error('[Admin] Failed to fetch SAGE data', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
+ * POST /api/admin/sage/regenerate
+ * Force a fresh learning pass now, instead of waiting for the next
+ * automatic post-session run.
+ */
+router.post('/sage/regenerate', async (req, res) => {
+    try {
+        const learnings = await sageService.generateLearnings();
+        logger.info('[Admin] SAGE learnings regenerated manually', { adminId: req.user.id, tradeCount: learnings?.tradeCount });
+        res.json({ success: !!learnings, learnings });
+    } catch (err) {
+        logger.error('[Admin] Failed to regenerate SAGE learnings', { error: err.message });
         res.status(500).json({ error: err.message });
     }
 });

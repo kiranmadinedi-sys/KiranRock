@@ -63,6 +63,30 @@ async function isOrderAlreadySubmitted(idempotencyKey) {
     }
 }
 
+// Atomically claims an idempotency key by inserting its CREATED row directly, instead of
+// the racy "check isOrderAlreadySubmitted, then separately log CREATED" pattern every buy
+// path used to do. That pattern only checked for state='SUBMITTED', which isn't reached
+// until after a quote fetch + safety check + real broker call — real time during which a
+// second near-simultaneous call for the same key sails through the same check and submits
+// a genuine duplicate order. Found 2026-08-07: two extended-hours ABT buys, 4 shares each,
+// submitted 0.3s apart, both real fills on Alpaca. Relies on a partial unique index on
+// (idempotency_key) WHERE state='CREATED' (initDatabase.js) — the database enforces the
+// race, not application code, so it holds regardless of timing.
+async function claimIdempotencyKey(idemKey, userId, symbol, meta = {}) {
+    try {
+        await query(
+            `INSERT INTO order_audit_log (idempotency_key, user_id, symbol, state, previous_state, quantity, metadata)
+             VALUES ($1,$2,$3,'CREATED',NULL,$4,$5)`,
+            [idemKey, String(userId), symbol, meta.quantity != null ? parseFloat(meta.quantity) : null, JSON.stringify(meta.extra || {})]
+        );
+        return true;
+    } catch (err) {
+        if (err.code === '23505') return false; // unique violation — another call already claimed this key
+        logger.warn('[ARROW] claimIdempotencyKey failed — failing open', { idemKey, symbol, err: err.message });
+        return true; // fail open on unexpected DB errors, same posture as the rest of the audit log
+    }
+}
+
 const BROKER = (process.env.BROKER || 'simulated').toLowerCase();
 const BOT_ENABLED = process.env.BOT_ENABLED !== 'false';
 const MAX_BOT_INVESTMENT = parseFloat(process.env.MAX_BOT_INVESTMENT_USD || '5000');
@@ -307,11 +331,10 @@ const alpacaBroker = (() => {
     async function buyLimitExtendedHours(userId, symbol, quantity, meta = {}) {
         const idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:${userId}:ext`;
 
-        if (await isOrderAlreadySubmitted(idemKey)) {
+        if (!(await claimIdempotencyKey(idemKey, userId, symbol, { quantity }))) {
             logger.warn('[ARROW-ExtHours] Duplicate submission blocked', { idemKey, symbol });
             throw new Error(`Duplicate order blocked: ${idemKey}`);
         }
-        await logOrderState(idemKey, userId, symbol, 'CREATED', null, { quantity });
 
         const dataProvider = require('./dataProvider');
         const quote = await dataProvider.getQuote(symbol);
@@ -429,12 +452,10 @@ const alpacaBroker = (() => {
         const idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:${userId}:buy`;
 
         // ARROW idempotency gate — never re-submit an already-submitted order
-        if (await isOrderAlreadySubmitted(idemKey)) {
+        if (!(await claimIdempotencyKey(idemKey, userId, symbol, { quantity }))) {
             logger.warn('[ARROW] Duplicate submission blocked', { idemKey, symbol });
             throw new Error(`Duplicate order blocked: ${idemKey}`);
         }
-
-        await logOrderState(idemKey, userId, symbol, 'CREATED', null, { quantity });
 
         const dataProvider = require('./dataProvider');
         const quote = await dataProvider.getQuote(symbol);
@@ -603,12 +624,10 @@ const alpacaBroker = (() => {
         // existed (corrected 2026-07-11).
         const idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:${userId}:frac`;
 
-        if (await isOrderAlreadySubmitted(idemKey)) {
+        if (!(await claimIdempotencyKey(idemKey, userId, symbol, { extra: { notionalAmount, fractional: true } }))) {
             logger.warn('[ARROW] Duplicate fractional submission blocked', { idemKey, symbol });
             throw new Error(`Duplicate order blocked: ${idemKey}`);
         }
-
-        await logOrderState(idemKey, userId, symbol, 'CREATED', null, { notionalAmount, fractional: true });
 
         const { client, isPaper } = await getClientForUser(userId);
         const brokerLabel = isPaper ? 'alpaca-paper' : 'alpaca-live';
@@ -719,8 +738,15 @@ const alpacaBroker = (() => {
     }
 
     async function sellMarket(userId, symbol, quantity, meta = {}) {
-        const idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:sell:${meta.reason?.slice(0,20) || 'exit'}`;
-        await logOrderState(idemKey, userId, symbol, 'CREATED', null, { quantity });
+        // Missing userId here (found alongside the 2026-08-07 duplicate-order fix) meant two
+        // different users selling the same symbol for the same reason on the same day shared
+        // one idempotency key — harmless under the old racy check, but would incorrectly block
+        // one of them outright once the key is atomically enforced below.
+        const idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:${userId}:sell:${meta.reason?.slice(0,20) || 'exit'}`;
+        if (!(await claimIdempotencyKey(idemKey, userId, symbol, { quantity }))) {
+            logger.warn('[ARROW] Duplicate sell submission blocked', { idemKey, symbol });
+            throw new Error(`Duplicate order blocked: ${idemKey}`);
+        }
 
         const { client, isPaper } = await getClientForUser(userId);
 

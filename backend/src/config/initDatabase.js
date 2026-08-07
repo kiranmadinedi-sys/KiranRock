@@ -594,6 +594,12 @@ async function initializeDatabase() {
         await query(`CREATE INDEX IF NOT EXISTS idx_order_audit_key   ON order_audit_log(idempotency_key)`);
         await query(`CREATE INDEX IF NOT EXISTS idx_order_audit_user   ON order_audit_log(user_id)`);
         await query(`CREATE INDEX IF NOT EXISTS idx_order_audit_symbol ON order_audit_log(symbol, created_at DESC)`);
+        // Enforces the idempotency guard at the DB level instead of a racy SELECT-then-INSERT
+        // in application code — two near-simultaneous calls for the same key can no longer
+        // both "win" the check before either reaches SUBMITTED (found 2026-08-07: duplicate
+        // extended-hours ABT buys, 4 shares each, submitted 0.3s apart). See
+        // claimIdempotencyKey() in brokerService.js.
+        await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_order_audit_created_once ON order_audit_log(idempotency_key) WHERE state = 'CREATED'`);
         console.log('✓ Created order_audit_log table');
 
         // EVOLVE / HISTORICAL DATA — 2-year OHLCV bar cache

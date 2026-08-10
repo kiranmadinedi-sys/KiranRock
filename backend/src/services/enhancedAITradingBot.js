@@ -2965,8 +2965,8 @@ async function executeAutonomousTrading(userId) {
             // Condition 2: loss % of equity
             let _lossHaltFired = false;
             let _lossHaltMsg   = '';
-            if (_lossHaltPct > 0 && accountTotalValue > 0) {
-                const _todayLossPct = (_todayLossUsd / accountTotalValue) * 100;
+            if (_lossHaltPct > 0 && totalPortfolioValue > 0) {
+                const _todayLossPct = (_todayLossUsd / totalPortfolioValue) * 100;
                 if (_todayLossPct >= _lossHaltPct) {
                     _lossHaltFired = true;
                     _lossHaltMsg   = `Daily loss limit: -$${_todayLossUsd.toFixed(2)} (${_todayLossPct.toFixed(2)}% of equity, limit ${_lossHaltPct}%)`;

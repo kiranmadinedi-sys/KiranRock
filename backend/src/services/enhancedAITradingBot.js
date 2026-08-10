@@ -3853,17 +3853,31 @@ async function executeAutonomousTrading(userId) {
             // Calibrated for real-world confidence output of 43-55% (model is well-calibrated
             // but conservatively scored — even 45% confidence is meaningful for swing trades).
             const confPct = opportunity.confidence || 50;
-            const maxByConf = confPct >= 85 ? 0.15  // high conviction  → up to 15%
+            const _baseMaxByConf = confPct >= 85 ? 0.15  // high conviction  → up to 15%
                 : confPct >= 70 ? 0.12              // good conviction  → up to 12%
                 : confPct >= 55 ? 0.09              // moderate         → up to  9%
                 : confPct >= 45 ? 0.07              // typical output   → up to  7%
                 : confPct >= 35 ? 0.05              // below average    → up to  5%
                 : 0.03;                             // low              → up to  3%
+            // These percentages assume a normally-diversified account (baseline: 4 concurrent
+            // positions) spreading risk across several ideas at once. An account deliberately
+            // concentrated into fewer slots (e.g. maxOpenPositions=1, set for small accounts
+            // that can't afford to split capital — see the 2026-08-06 fix) has no diversification
+            // to protect, so the same percentage is needlessly restrictive: on a ~$974 account
+            // even max confidence (15%) caps out at $146, and anything below 55% confidence
+            // caps under the $100 minimum-notional floor, making the account untradeable
+            // regardless of how many good candidates the scan finds (confirmed 2026-08-10:
+            // anilboddu1 found 40 opportunities, zero cleared MinNotional). Scale the cap up
+            // proportionally when concentrated below baseline; never scale it down for accounts
+            // with normal-or-more diversification (Math.max(1, ...) floors the multiplier at 1).
+            const _concentrationScale = Math.max(1, 4 / Math.max(1, sessionRiskConfig.maxOpenPositions || 4));
+            const maxByConf = Math.min(1, _baseMaxByConf * _concentrationScale);
             const confCap = accountTotalValue * maxByConf;
             if (positionSize > confCap) {
                 logger.info('Position size clipped by confidence cap', {
                     userId, symbol: opportunity.symbol,
                     confPct, maxByConf: (maxByConf * 100).toFixed(0) + '%',
+                    concentrationScale: _concentrationScale.toFixed(2),
                     before: positionSize.toFixed(2), after: confCap.toFixed(2)
                 });
                 positionSize = confCap;

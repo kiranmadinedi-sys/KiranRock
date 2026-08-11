@@ -145,14 +145,14 @@ async function _upsert(symbol, date, analysis, passedPrescreen, exclusionReason)
               sector, market_cap, passed_prescreen, exclusion_reason, metadata)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
          ON CONFLICT (symbol, analysis_date) DO UPDATE SET
-             ai_score         = EXCLUDED.ai_score,
-             recommendation   = EXCLUDED.recommendation,
-             setup_family     = EXCLUDED.setup_family,
-             sector           = EXCLUDED.sector,
-             market_cap       = EXCLUDED.market_cap,
-             passed_prescreen = EXCLUDED.passed_prescreen,
-             exclusion_reason = EXCLUDED.exclusion_reason,
-             metadata         = EXCLUDED.metadata,
+             ai_score         = COALESCE(EXCLUDED.ai_score, daily_universe_analysis.ai_score),
+             recommendation   = COALESCE(EXCLUDED.recommendation, daily_universe_analysis.recommendation),
+             setup_family     = COALESCE(EXCLUDED.setup_family, daily_universe_analysis.setup_family),
+             sector           = COALESCE(EXCLUDED.sector, daily_universe_analysis.sector),
+             market_cap       = COALESCE(EXCLUDED.market_cap, daily_universe_analysis.market_cap),
+             passed_prescreen = CASE WHEN EXCLUDED.ai_score IS NOT NULL THEN EXCLUDED.passed_prescreen ELSE daily_universe_analysis.passed_prescreen END,
+             exclusion_reason = CASE WHEN EXCLUDED.ai_score IS NOT NULL THEN EXCLUDED.exclusion_reason ELSE daily_universe_analysis.exclusion_reason END,
+             metadata         = CASE WHEN EXCLUDED.ai_score IS NOT NULL THEN EXCLUDED.metadata ELSE daily_universe_analysis.metadata END,
              updated_at       = NOW()`,
         [
             symbol,

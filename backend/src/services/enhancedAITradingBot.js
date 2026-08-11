@@ -2670,9 +2670,8 @@ async function executeAutonomousTrading(userId) {
             }
             if (!dataOk) {
                 try {
-                    const { default: yf } = require('yahoo-finance2');
-                    const fn = yf._originalQuote || yf.quote;
-                    await _dataGuardTimeout(fn.call(yf, 'SPY'));
+                    const yfClient = require('../utils/yfClient');
+                    await _dataGuardTimeout(yfClient.quote('SPY'));
                     logger.info('[DataGuard] Yahoo Finance fallback succeeded — proceeding with trading', { userId });
                     dataOk = true;
                 } catch (yahooErr) {

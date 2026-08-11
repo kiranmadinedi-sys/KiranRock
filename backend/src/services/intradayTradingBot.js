@@ -16,6 +16,7 @@ const capitalCoordinator = require('./capitalCoordinator');
 const intradayBroker = require('./intradayBrokerService');
 const userCycleMutex = require('./userCycleMutex');
 const brokerService = require('./brokerService');
+const dynamicUniverseService = require('./dynamicUniverseService');
 const { logger } = require('../utils/logger');
 
 // Modest expansion (2026-08-11): added 8 similarly mega-cap, high-volume,
@@ -26,6 +27,16 @@ const UNIVERSE = [
     'SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA', 'AMZN', 'META', 'TSLA', 'AMD', 'GOOGL',
     'JPM', 'V', 'AVGO', 'XOM', 'BAC', 'WMT', 'DIS', 'INTC'
 ];
+
+// Dynamic layer (2026-08-11): on top of the fixed liquid core above, pull in
+// up to this many of today's actual movers (day_gainers/most_actives, tagged
+// isVelocity by dynamicUniverseService's already-running hourly refresh for
+// the swing bot). Zero new API calls -- reads a cache someone else already
+// built. Falls back to just the fixed UNIVERSE when that cache is empty or
+// stale (e.g. Yahoo rate-limited), which is the same behavior as before this
+// change, so this can never make Blitz's tradeable universe worse, only
+// occasionally wider.
+const MAX_DYNAMIC_MOVERS = 8;
 
 /**
  * Simple momentum + volume score, 0-100. Not trying to match swing's much
@@ -62,7 +73,16 @@ async function scanForUser(user) {
     let tradesExecuted = 0;
     let capitalDeployed = 0;
 
-    for (const symbol of UNIVERSE) {
+    const movers = dynamicUniverseService.getIntradayMovers()
+        .map(s => s.symbol)
+        .filter(s => !UNIVERSE.includes(s))
+        .slice(0, MAX_DYNAMIC_MOVERS);
+    if (movers.length > 0) {
+        logger.debug('[Blitz] Including today\'s movers in scan', { userId: user.id, movers });
+    }
+    const scanUniverse = [...UNIVERSE, ...movers];
+
+    for (const symbol of scanUniverse) {
         if (heldSymbols.has(symbol)) continue;
         if (openPositions.length + tradesExecuted >= config.max_open_positions) break;
 

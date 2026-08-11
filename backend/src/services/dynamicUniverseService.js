@@ -557,4 +557,14 @@ function clearCache() {
     _cacheDate       = null;
 }
 
-module.exports = { buildPreMarketCache, getScanUniverse, isCacheReady, getCacheStats, clearCache, refreshIntradayMovers };
+/**
+ * Returns today's velocity/mover stocks (day_gainers + most_actives, added by
+ * refreshIntradayMovers) from the existing cache -- no new API calls. Empty
+ * array if the cache isn't ready or nothing's been added yet today.
+ */
+function getIntradayMovers() {
+    if (!isCacheReady()) return [];
+    return _universeCache.filter(s => s.isVelocity === true);
+}
+
+module.exports = { buildPreMarketCache, getScanUniverse, isCacheReady, getCacheStats, clearCache, refreshIntradayMovers, getIntradayMovers };

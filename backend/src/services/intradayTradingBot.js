@@ -18,7 +18,14 @@ const userCycleMutex = require('./userCycleMutex');
 const brokerService = require('./brokerService');
 const { logger } = require('../utils/logger');
 
-const UNIVERSE = ['SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA', 'AMZN', 'META', 'TSLA', 'AMD', 'GOOGL'];
+// Modest expansion (2026-08-11): added 8 similarly mega-cap, high-volume,
+// tight-spread names spanning more sectors/price points than the original
+// tech-heavy 10 — still small enough to stay within dataProvider's shared
+// 60s quote cache without meaningfully adding new external API load.
+const UNIVERSE = [
+    'SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA', 'AMZN', 'META', 'TSLA', 'AMD', 'GOOGL',
+    'JPM', 'V', 'AVGO', 'XOM', 'BAC', 'WMT', 'DIS', 'INTC'
+];
 
 /**
  * Simple momentum + volume score, 0-100. Not trying to match swing's much

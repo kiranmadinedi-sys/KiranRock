@@ -219,11 +219,22 @@ async function stageSCALE(users) {
 async function stageARROW(users) {
     logger.info('[IST-ARROW] Cleaning up open/partial fill orders');
     try {
-        // Cancel any pending day orders still open in DB (shouldn't exist after broker EOD)
+        // Cancel any pending day orders still open in DB (shouldn't exist after broker EOD).
+        // order_audit_log is append-only -- every state transition is a new row -- so this
+        // must look at each order's LATEST row, not just whether it ever passed through one
+        // of these transient states (nearly every order does, on its way to FILLED). The old
+        // plain WHERE re-matched long-since-filled/closed orders forever, journaling a fresh
+        // "canceled" entry for them every single day (found investigating repeated stale
+        // cleanup entries for an order that had already filled and closed days earlier).
         const res = await query(
-            `SELECT DISTINCT idempotency_key, user_id, symbol, quantity
-             FROM order_audit_log
-             WHERE state IN ('SUBMITTED', 'PENDING_FILL', 'PARTIALLY_FILLED')
+            `SELECT idempotency_key, user_id, symbol, quantity
+             FROM (
+                 SELECT idempotency_key, user_id, symbol, quantity, state, created_at,
+                        ROW_NUMBER() OVER (PARTITION BY idempotency_key ORDER BY created_at DESC) AS rn
+                 FROM order_audit_log
+             ) latest
+             WHERE rn = 1
+               AND state IN ('SUBMITTED', 'PENDING_FILL', 'PARTIALLY_FILLED')
                AND created_at < NOW() - INTERVAL '1 hour'`,
         );
 

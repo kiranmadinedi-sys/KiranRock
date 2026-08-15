@@ -222,6 +222,42 @@ async function getMarketRegime() {
             positionSizeMultiplier = Math.max(0.70, 0.90 - headwindPenalty);
         }
 
+        // ── CHOPPY breakout confirmation ─────────────────────────────────────
+        // isChoppy is built entirely from lookback signals (5-day range, ATR ratio) --
+        // a single strong session doesn't move those much, so a genuine same-day
+        // breakout can sit hard-blocked for a day or more before the lagging
+        // indicators catch up. Rather than loosen the CHOPPY gate itself, layer a
+        // narrow, same-day confirmation check on top: only true when SPY and QQQ
+        // are BOTH up meaningfully right now, with real volume behind it (not a
+        // thin/holiday drift), and VIX hasn't spiked. Callers decide what to do
+        // with this -- it does not change regimeType or unblock anything itself.
+        let breakoutConfirmed = false, spyChangePct = 0, qqqChangePct = 0, spyVolRatio = 0;
+        if (regimeType === 'CHOPPY') {
+            try {
+                const [spyQ, qqqQ] = await Promise.allSettled([
+                    dataProvider.getQuote('SPY'),
+                    dataProvider.getQuote('QQQ')
+                ]);
+                spyChangePct = spyQ.status === 'fulfilled' ? (spyQ.value?.changePercent || 0) : 0;
+                qqqChangePct = qqqQ.status === 'fulfilled' ? (qqqQ.value?.changePercent || 0) : 0;
+                const spyVol = spyQ.status === 'fulfilled' ? (spyQ.value?.volume || 0) : 0;
+                const spyAvgVol = spyQ.status === 'fulfilled' ? (spyQ.value?.avgVolume || 0) : 0;
+                spyVolRatio = spyAvgVol > 0 ? spyVol / spyAvgVol : 0;
+
+                breakoutConfirmed = spyChangePct >= 0.5 && qqqChangePct >= 0.5 &&
+                                    spyVolRatio >= 0.5 && vixLevel < 20;
+
+                if (breakoutConfirmed) {
+                    logger.info('[MarketRegime] CHOPPY breakout confirmed', {
+                        spyChangePct: spyChangePct.toFixed(2), qqqChangePct: qqqChangePct.toFixed(2),
+                        spyVolRatio: spyVolRatio.toFixed(2), vixLevel
+                    });
+                }
+            } catch (err) {
+                logger.debug('[MarketRegime] Breakout confirmation check failed (non-fatal)', { error: err.message });
+            }
+        }
+
         // ── Post-classification adjustments ──────────────────────────────────
 
         // 3+ consecutive down days → extra caution in non-PANIC/BEAR regimes
@@ -256,6 +292,11 @@ async function getMarketRegime() {
             spy5dRangePct:  parseFloat(spy5dRangePct.toFixed(2)),
             atrExpansion:   parseFloat(atrExpansion.toFixed(3)),
             volumeExpansion: parseFloat(volumeExpansion.toFixed(2)),
+            // CHOPPY breakout confirmation (only meaningful when regimeType === 'CHOPPY')
+            breakoutConfirmed,
+            spyChangePct: parseFloat(spyChangePct.toFixed(2)),
+            qqqChangePct: parseFloat(qqqChangePct.toFixed(2)),
+            spyVolRatio:  parseFloat(spyVolRatio.toFixed(2)),
             // Trading parameters
             maxRisk,
             minBuyScore,

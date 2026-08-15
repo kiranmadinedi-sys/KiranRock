@@ -2776,9 +2776,28 @@ async function executeAutonomousTrading(userId) {
         };
         const _regimeOffset    = REGIME_SCORE_OFFSET[regime.regimeType || regime.regime] ?? 0;
         const effectiveMaxRisk = Math.min(riskConfig.maxPortfolioRisk, regime.maxRisk);
-        const effectiveMinScore = Math.max(0, Math.min(100, riskConfig.minBuyScore + _regimeOffset));
+        let effectiveMinScore = Math.max(0, Math.min(100, riskConfig.minBuyScore + _regimeOffset));
         const healthMultiplier = await getSystemHealthMultiplier(userId);
-        const effectiveSizeMultiplier = (regime.positionSizeMultiplier || 1.0) * healthMultiplier;
+        let effectiveSizeMultiplier = (regime.positionSizeMultiplier || 1.0) * healthMultiplier;
+
+        // CHOPPY breakout override (2026-08-15, paper accounts only while this is being
+        // validated): the CHOPPY gate below is a hard block built from lagging lookback
+        // signals, so a genuine same-day breakout can sit blocked for a day+ before those
+        // catch up. marketRegimeService.breakoutConfirmed is a narrow, same-day check (SPY
+        // + QQQ both up meaningfully, real volume, VIX calm) computed independently of the
+        // lookback gate. When both agree this is real, allow entries through but only the
+        // highest-quality ones (85+ regardless of the account's own bar) at half the normal
+        // CHOPPY position size — deliberately more conservative than a plain CHOPPY day, not
+        // less. Live accounts stay fully blocked until this has proven out on paper.
+        let _breakoutOverrideActive = false;
+        if (regime.regimeType === 'CHOPPY' && regime.breakoutConfirmed) {
+            const _creds = await userDb.getUserAlpacaCredentials(userId).catch(() => ({ isPaper: false }));
+            if (_creds.isPaper !== false) {
+                _breakoutOverrideActive = true;
+                effectiveMinScore = Math.max(85, riskConfig.minBuyScore);
+                effectiveSizeMultiplier = 0.5 * healthMultiplier;
+            }
+        }
 
         logger.info('Market regime applied', {
             userId,
@@ -2788,6 +2807,7 @@ async function executeAutonomousTrading(userId) {
             effectiveMinScore,
             effectiveSizeMultiplier,
             healthMultiplier,
+            breakoutOverrideActive: _breakoutOverrideActive,
             regimeDescription: regime.description,
             qqqAboveMa50: regime.qqqAboveMa50,
             risingRates: regime.risingRates,
@@ -2804,13 +2824,20 @@ async function executeAutonomousTrading(userId) {
             return { success: false, message: `Market in PANIC regime (VIX=${regime.vixLevel}, 20d=${regime.return20d}%) — exits only` };
         }
 
-        // CHOPPY regime — momentum entries fail in range-bound markets, exits only
-        if (regime.regimeType === 'CHOPPY') {
+        // CHOPPY regime — momentum entries fail in range-bound markets, exits only.
+        // Skip the block only when the breakout override above is active (paper-only,
+        // same-day confirmed) — everyone else still exits-only, unchanged.
+        if (regime.regimeType === 'CHOPPY' && !_breakoutOverrideActive) {
             logger.info('[RegimeGuard] CHOPPY regime — skipping momentum entries, managing exits', {
                 userId, spy5dRangePct: regime.spy5dRangePct, atrExpansion: regime.atrExpansion
             });
             await manageExistingPositions(userId);
             return { success: true, message: `Market choppy (5d range=${regime.spy5dRangePct}%, ATR ratio=${regime.atrExpansion}) — exits only` };
+        } else if (_breakoutOverrideActive) {
+            logger.info('[RegimeGuard] CHOPPY + BREAKOUT CONFIRMED (paper) — allowing 85+ entries at half size', {
+                userId, spyChangePct: regime.spyChangePct, qqqChangePct: regime.qqqChangePct,
+                spyVolRatio: regime.spyVolRatio, effectiveMinScore, effectiveSizeMultiplier
+            });
         }
 
         // Use regime-adjusted config for this session

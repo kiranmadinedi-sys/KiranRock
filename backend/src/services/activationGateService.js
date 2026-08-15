@@ -141,7 +141,7 @@ async function getExpectancyStats(userId, minTrades = 50) {
                 )                                                    AS win_rate_pct
             FROM trade_decision_journal
             WHERE user_id      = $1
-              AND decision_phase = 'EXECUTION'
+              AND decision_phase = 'CLOSED'
               AND pnl IS NOT NULL
         `, [userId]);
 

@@ -35,7 +35,22 @@ async function _getAuth(userId) {
  * tick rather than a second resting order, keeping this path simple.
  */
 async function buyIntraday(userId, symbol, quantity, { stopLossPercent, takeProfitPercent }) {
+    // Guard (2026-08-15, same incident as the sellIntraday fix above): scanForUser's
+    // heldSymbols check only looks at our own intraday_positions table, which can
+    // desync from the real broker state (e.g. after the duplicate-sell-goes-short
+    // race). Re-verify no real position of ANY sign already exists on Alpaca before
+    // entering what Blitz believes is a flat, fresh symbol -- brokerService's
+    // getPosition() deliberately filters to qty>0 only (built for the buy-guard use
+    // case elsewhere), so it would silently miss an existing short; use the
+    // unfiltered getPositions() list instead so a short is actually caught here.
     const { base, headers } = await _getAuth(userId);
+    const existing = (await brokerService.getPositions(userId)).find(p => p.symbol === symbol);
+    if (existing && Math.abs(parseFloat(existing.qty)) > 0.001) {
+        logger.warn('[Blitz] Skipping entry — a real Alpaca position already exists outside our tracking', {
+            userId, symbol, realQty: existing.qty
+        });
+        return null;
+    }
 
     const order = await axios.post(`${base}/orders`, {
         symbol, qty: String(quantity), side: 'buy', type: 'market', time_in_force: 'day'
@@ -85,6 +100,31 @@ async function sellIntraday(userId, symbol, { exitReason, scoreAtEntry }) {
     const position = await intradayDb.getPosition(userId, symbol);
     if (!position) return null;
 
+    // Final broker-side guard immediately before submitting (2026-08-15): re-verify
+    // a real long position still exists on Alpaca right now, not just in our own
+    // (possibly stale) intraday_positions row. userCycleMutex's lock has a bounded
+    // 8s fail-open timeout by design (so one stuck cycle can't wedge every later
+    // one) -- under real Alpaca/Yahoo API latency, sellIntraday's own cancel+submit
+    // +poll-for-fill sequence below can genuinely exceed that, so a second
+    // overlapping call for the same symbol can start believing a position still
+    // exists after the first call already closed it. Without this check, that
+    // second call submits another real sell that -- finding nothing left on the
+    // broker -- opens a naked short instead of erroring out (found investigating
+    // an unexplained -20 share INTC short, three separate stacking incidents
+    // 2026-08-13, invisible to Blitz's own tracking the whole time).
+    const realPosition = await brokerService.getPosition(userId, symbol);
+    if (!realPosition || parseFloat(realPosition.qty) <= 0) {
+        logger.warn('[Blitz] Skipping sell — no real long position on Alpaca (already closed by a prior call)', {
+            userId, symbol, exitReason
+        });
+        await intradayDb.closePosition(userId, symbol, {
+            exitPrice: parseFloat(position.current_price || position.average_price) || 0,
+            exitReason: `${exitReason}_stale_skip`, scoreAtEntry
+        }).catch(() => {});
+        return null;
+    }
+    const sellQty = Math.min(parseFloat(position.quantity), parseFloat(realPosition.qty));
+
     const { base, headers } = await _getAuth(userId);
 
     try {
@@ -98,7 +138,7 @@ async function sellIntraday(userId, symbol, { exitReason, scoreAtEntry }) {
     }
 
     const order = await axios.post(`${base}/orders`, {
-        symbol, qty: String(position.quantity), side: 'sell', type: 'market', time_in_force: 'day'
+        symbol, qty: String(sellQty), side: 'sell', type: 'market', time_in_force: 'day'
     }, { headers });
 
     let filled = order.data;

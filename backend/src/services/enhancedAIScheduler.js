@@ -784,9 +784,15 @@ async function runMorningStopVerification() {
                     const qty       = pos.qty;
 
                     try {
+                        // Alpaca rejects GTC stop orders on fractional quantities (422) — only
+                        // 'day' is accepted. This path builds its own Alpaca client instead of
+                        // going through brokerService.placeStopOrder (which already handles this,
+                        // fixed for the 2026-07-21 incident), so it had the same bug independently:
+                        // AZO/PNC 422s in the logs traced back to this hardcoded 'gtc' (2026-08-23).
+                        const isFractional = parseFloat(qty) !== Math.floor(parseFloat(qty));
                         await client.createOrder({
                             symbol: pos.symbol, qty, side: 'sell',
-                            type: 'stop', time_in_force: 'gtc',
+                            type: 'stop', time_in_force: isFractional ? 'day' : 'gtc',
                             stop_price: String(stopPrice)
                         });
                         restored.push(`${pos.symbol} stop@$${stopPrice}`);

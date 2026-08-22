@@ -517,6 +517,26 @@ const polygonProvider = (() => {
         }
     }
 
+    // Gainers/most-active movers — replaces yahoo-finance2's screener({scrIds:'day_gainers'|
+    // 'most_actives'}) for HERMES velocity discovery. Verified live 2026-08-23. Yahoo's
+    // trendingSymbols (search-buzz based) has no Polygon equivalent and stays Yahoo-only —
+    // it already degrades to an empty set on failure rather than blocking discovery.
+    async function getGainers(limit = 30) {
+        if (!hasApiKey()) throw new Error('POLYGON_API_KEY not set — cannot fetch gainers from Polygon');
+        const resp = await http().get(`${BASE}/v2/snapshot/locale/us/markets/stocks/gainers`, { params: { apiKey: apiKey() } });
+        return (resp.data.tickers || []).slice(0, limit).map(t => t.ticker);
+    }
+
+    async function getMostActive(limit = 30) {
+        if (!hasApiKey()) throw new Error('POLYGON_API_KEY not set — cannot fetch most-active from Polygon');
+        const resp = await http().get(`${BASE}/v2/snapshot/locale/us/markets/stocks/tickers`, { params: { apiKey: apiKey() } });
+        return (resp.data.tickers || [])
+            .filter(t => t.day && t.day.v)
+            .sort((a, b) => b.day.v - a.day.v)
+            .slice(0, limit)
+            .map(t => t.ticker);
+    }
+
     // Fundamentals — replaces yahoo-finance2's quoteSummary() for the fields Polygon's
     // Stocks Starter plan actually covers (verified live 2026-08-22): ticker details
     // (market cap/sector), financials (income statement → EPS/margins/ROE), dividends.
@@ -592,7 +612,7 @@ const polygonProvider = (() => {
         };
     }
 
-    return { getBars, getQuote, searchSymbols, getOptionsChain, getFundamentals, name: 'Polygon.io' };
+    return { getBars, getQuote, searchSymbols, getOptionsChain, getFundamentals, getGainers, getMostActive, name: 'Polygon.io' };
 })();
 
 // ─── ACTIVE PROVIDER SELECTION ───────────────────────────────────────────────
@@ -955,5 +975,7 @@ module.exports = {
     // equivalent is quoteSummary, which callers already have their own fallback to).
     // Throws when POLYGON_API_KEY is unset so callers know to use their existing path.
     getFundamentals: (...args) => polygonProvider.getFundamentals(...args),
+    getGainers:      (...args) => polygonProvider.getGainers(...args),
+    getMostActive:   (...args) => polygonProvider.getMostActive(...args),
     getActiveProvider: () => activeProvider
 };

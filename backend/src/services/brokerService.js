@@ -668,11 +668,18 @@ const alpacaBroker = (() => {
             const effectiveTarget = targetPrice || parseFloat((fillPrice * 1.10).toFixed(2));
             const qtyStr = String(filledQty);
 
-            // Standalone stop-loss GTC — trailing stop service raises this as the position gains
+            // Standalone stop-loss — trailing stop service raises this as the position gains.
+            // Alpaca rejects GTC on fractional/notional quantities (422) — 'day' only, same
+            // constraint as the notional buy above. This was hardcoded to 'gtc' unconditionally
+            // in a function that ONLY ever handles fractional qty, so every buyFractional() fill
+            // silently failed to get a stop or a target at all — caught only by whatever picked
+            // it up later (StopVerify next morning, the reconciler, or nothing in between).
+            // Dormant the last few days (no Kelly-rounds-to-0 buys), found auditing for the
+            // same bug class as the 2026-07-21 incident and StopVerify's 'gtc' bug (2026-08-23).
             try {
                 await client.createOrder({
                     symbol, qty: qtyStr, side: 'sell', type: 'stop',
-                    time_in_force: 'gtc', stop_price: String(effectiveStop)
+                    time_in_force: 'day', stop_price: String(effectiveStop)
                 });
                 logger.info('[Broker:Alpaca] Fractional stop-loss placed', {
                     symbol, qty: filledQty, stopPrice: effectiveStop
@@ -681,11 +688,11 @@ const alpacaBroker = (() => {
                 logger.warn('[Broker:Alpaca] Fractional stop-loss failed', { symbol, err: err.message });
             }
 
-            // Take-profit limit GTC
+            // Take-profit limit — same fractional-qty constraint, 'day' not 'gtc'.
             try {
                 await client.createOrder({
                     symbol, qty: qtyStr, side: 'sell', type: 'limit',
-                    time_in_force: 'gtc', limit_price: String(effectiveTarget)
+                    time_in_force: 'day', limit_price: String(effectiveTarget)
                 });
                 logger.info('[Broker:Alpaca] Fractional take-profit placed', {
                     symbol, qty: filledQty, targetPrice: effectiveTarget

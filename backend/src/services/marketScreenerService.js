@@ -90,34 +90,53 @@ async function getVelocitySymbols() {
         console.log(`[HERMES:Velocity] trendingSymbols unavailable: ${e.message}`);
     }
 
-    // 2. Day gainers — stocks making the biggest % moves today
+    // 2. Day gainers — stocks making the biggest % moves today.
+    // Polygon first (verified live 2026-08-23, no crumb/rate-limit dependency),
+    // Yahoo screener only as fallback if Polygon has no key or fails.
     try {
-        const res = await rateLimiter.execute(() =>
-            yahooFinance.screener({ scrIds: 'day_gainers', count: 30 })
-        );
+        const dataProvider = require('./dataProvider');
         const before = symbols.size;
-        (res?.quotes || []).forEach(q => {
-            const s = (q.symbol || '').toUpperCase();
-            if (s && /^[A-Z]{1,5}$/.test(s)) symbols.add(s);
-        });
-        console.log(`[HERMES:Velocity] day_gainers: +${symbols.size - before} new symbols`);
-    } catch (e) {
-        console.log(`[HERMES:Velocity] day_gainers unavailable: ${e.message}`);
+        const gainers = await dataProvider.getGainers(30);
+        gainers.forEach(s => { if (/^[A-Z]{1,5}$/.test(s)) symbols.add(s); });
+        console.log(`[HERMES:Velocity] day_gainers (polygon): +${symbols.size - before} new symbols`);
+    } catch (polyErr) {
+        try {
+            const res = await rateLimiter.execute(() =>
+                yahooFinance.screener({ scrIds: 'day_gainers', count: 30 })
+            );
+            const before = symbols.size;
+            (res?.quotes || []).forEach(q => {
+                const s = (q.symbol || '').toUpperCase();
+                if (s && /^[A-Z]{1,5}$/.test(s)) symbols.add(s);
+            });
+            console.log(`[HERMES:Velocity] day_gainers (yahoo fallback): +${symbols.size - before} new symbols`);
+        } catch (e) {
+            console.log(`[HERMES:Velocity] day_gainers unavailable: ${e.message}`);
+        }
     }
 
-    // 3. Most actives — highest volume today (institutional accumulation signal)
+    // 3. Most actives — highest volume today (institutional accumulation signal).
+    // Polygon first, Yahoo screener only as fallback.
     try {
-        const res = await rateLimiter.execute(() =>
-            yahooFinance.screener({ scrIds: 'most_actives', count: 30 })
-        );
+        const dataProvider = require('./dataProvider');
         const before = symbols.size;
-        (res?.quotes || []).forEach(q => {
-            const s = (q.symbol || '').toUpperCase();
-            if (s && /^[A-Z]{1,5}$/.test(s)) symbols.add(s);
-        });
-        console.log(`[HERMES:Velocity] most_actives: +${symbols.size - before} new symbols`);
-    } catch (e) {
-        console.log(`[HERMES:Velocity] most_actives unavailable: ${e.message}`);
+        const mostActive = await dataProvider.getMostActive(30);
+        mostActive.forEach(s => { if (/^[A-Z]{1,5}$/.test(s)) symbols.add(s); });
+        console.log(`[HERMES:Velocity] most_actives (polygon): +${symbols.size - before} new symbols`);
+    } catch (polyErr) {
+        try {
+            const res = await rateLimiter.execute(() =>
+                yahooFinance.screener({ scrIds: 'most_actives', count: 30 })
+            );
+            const before = symbols.size;
+            (res?.quotes || []).forEach(q => {
+                const s = (q.symbol || '').toUpperCase();
+                if (s && /^[A-Z]{1,5}$/.test(s)) symbols.add(s);
+            });
+            console.log(`[HERMES:Velocity] most_actives (yahoo fallback): +${symbols.size - before} new symbols`);
+        } catch (e) {
+            console.log(`[HERMES:Velocity] most_actives unavailable: ${e.message}`);
+        }
     }
 
     return symbols;

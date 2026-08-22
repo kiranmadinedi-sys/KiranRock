@@ -35,19 +35,73 @@ const yahooProvider = (() => {
         return fn.call(yf, symbol);
     }
 
+    // ── Circuit breaker for sustained Yahoo outages ─────────────────────────
+    // Confirmed 2026-08-18/2026-08-20: when Yahoo hard-blocks this IP (not a
+    // normal per-minute rate limit — persists for hours, unaffected by the
+    // shared throttle in bootstrapRuntime.js), every _withRetry call still
+    // burns its full 3s+8s retry budget before giving up. With 11+ positions
+    // needing Yahoo fallback in one trading cycle, that adds up past the
+    // scheduler's 4-minute per-user timeout, taking the WHOLE cycle down
+    // instead of just degrading Yahoo-sourced fields (paper account: 100% of
+    // cycles timed out for over 30h straight). Once enough consecutive
+    // rate-limit/network failures are seen, stop attempting Yahoo entirely
+    // for a cooldown window — callers fail fast instead of hanging, and the
+    // rest of the cycle (Alpaca-sourced data, etc.) keeps moving. The next
+    // call after cooldown is a live probe: success fully closes the circuit,
+    // failure re-trips it for another cooldown (no special-casing needed —
+    // falls out of the normal failure-counting below).
+    const CIRCUIT_FAILURE_THRESHOLD = 5;      // consecutive failures to trip
+    const CIRCUIT_COOLDOWN_MS       = 60000;  // fail-fast window once tripped
+    let _circuitConsecutiveFailures = 0;
+    let _circuitOpenUntil           = 0;
+
+    function _circuitIsOpen() {
+        return Date.now() < _circuitOpenUntil;
+    }
+    function _circuitRecordSuccess() {
+        if (_circuitConsecutiveFailures > 0 || _circuitOpenUntil > 0) {
+            logger.info('[DataProvider:Yahoo] Circuit breaker CLOSED — call succeeded');
+        }
+        _circuitConsecutiveFailures = 0;
+        _circuitOpenUntil = 0;
+    }
+    // Only rate-limit/network failures indicate Yahoo itself is down — an
+    // ordinary 404 (symbol not covered) means Yahoo is reachable and working
+    // fine, just doesn't have that ticker, so it must never trip the breaker.
+    function _isRateLimitOrNetworkError(err) {
+        const msg = String(err.message || '');
+        const is429    = msg.includes('429') || err.status === 429 || err.statusCode === 429;
+        const isNetwork = /ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|timeout/i.test(msg);
+        return is429 || isNetwork;
+    }
+    function _circuitRecordFailure(err) {
+        if (!_isRateLimitOrNetworkError(err)) return;
+        _circuitConsecutiveFailures++;
+        if (_circuitConsecutiveFailures >= CIRCUIT_FAILURE_THRESHOLD && !_circuitIsOpen()) {
+            _circuitOpenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+            logger.warn(`[DataProvider:Yahoo] Circuit breaker OPEN — ${_circuitConsecutiveFailures} consecutive rate-limit/network failures, pausing all Yahoo calls for ${CIRCUIT_COOLDOWN_MS / 1000}s`);
+        }
+    }
+
     // Retry helper: re-attempts fn() up to maxAttempts times when Yahoo returns 429.
     // Delays: 3 s then 8 s — Yahoo's crumb rate-limit window is ~10 s.
     async function _withRetry(fn, symbol) {
+        if (_circuitIsOpen()) {
+            throw new Error(`Yahoo circuit breaker open (sustained failures) — skipping ${symbol}`);
+        }
         const delays = [3000, 8000];
         for (let i = 0; i <= delays.length; i++) {
             try {
-                return await fn();
+                const result = await fn();
+                _circuitRecordSuccess();
+                return result;
             } catch (err) {
                 const is429 = String(err.message || '').includes('429') || err.status === 429 || err.statusCode === 429;
                 if (is429 && i < delays.length) {
                     logger.debug(`[DataProvider:Yahoo] 429 on ${symbol}, retry ${i + 1} in ${delays[i] / 1000}s`);
                     await new Promise(r => setTimeout(r, delays[i]));
                 } else {
+                    _circuitRecordFailure(err);
                     throw err;
                 }
             }
@@ -616,6 +670,24 @@ async function withYahooFallback(method, label, ...args) {
             throw err;
         }
 
+        // Try Polygon (paid Stocks Starter tier — already subscribed) before ever
+        // touching Yahoo. Previously this went straight Alpaca → Yahoo for every
+        // quote/search/options failure, never using the paid subscription at all
+        // outside the options-specific path (2026-08-21).
+        if (activeProvider !== polygonProvider) {
+            try {
+                logger.info(`[DataProvider] ${activeProvider.name} ${label} failed, trying Polygon`, {
+                    symbol: args[0], error: err.message
+                });
+                return await polygonProvider[method](...args);
+            } catch (polygonErr) {
+                logger.warn(`[DataProvider] Polygon ${label} also failed, falling back to Yahoo`, {
+                    symbol: args[0], error: polygonErr.message
+                });
+                return yahooProvider[method](...args);
+            }
+        }
+
         logger.warn(`[DataProvider] ${activeProvider.name} ${label} failed, falling back to Yahoo`, {
             symbol: args[0], error: err.message
         });
@@ -693,6 +765,29 @@ const localProvider = (() => {
      *   lookbackDays=220 calendar days ≈ 157 trading days (weekends + ~10 holidays).
      *   Old code required 215 rows for a 220-day window — the cache NEVER hit.
      */
+    // Bars fallback chain: underlyingProvider (Alpaca, already tried by caller in the
+    // cache-miss/delta-fetch paths below) → Polygon (paid Stocks Starter tier, already
+    // subscribed — was completely unused for bars until now) → Yahoo (rare last resort
+    // only, now safely throttled/circuit-breakered so a miss here is cheap, not a hang).
+    // Found 2026-08-21: getBars had ZERO fallback at all — an Alpaca failure just threw
+    // straight up through the nightly scan, contributing to that night's failed-symbol
+    // count even though the account already pays for Polygon coverage that could have
+    // served most of those symbols instead of giving up (or falling straight to Yahoo).
+    async function _getBarsWithFallback(symbol, interval, days) {
+        try {
+            return await underlyingProvider.getBars(symbol, interval, days);
+        } catch (alpacaErr) {
+            if (underlyingProvider === polygonProvider) throw alpacaErr; // already Polygon
+            try {
+                logger.info(`[DataProvider] ${underlyingProvider.name} bars failed for ${symbol}, trying Polygon`, { error: alpacaErr.message });
+                return await polygonProvider.getBars(symbol, interval, days);
+            } catch (polygonErr) {
+                logger.warn(`[DataProvider] Polygon bars also failed for ${symbol}, falling back to Yahoo`, { error: polygonErr.message });
+                return yahooProvider.getBars(symbol, interval, days);
+            }
+        }
+    }
+
     async function getBars(symbol, interval = '1d', lookbackDays = 90) {
         // Index symbols (^VIX, ^GSPC …) are not in daily_bars and not served by Polygon/Alpaca.
         if (symbol.startsWith('^') || symbol.startsWith('=')) {
@@ -733,7 +828,7 @@ const localProvider = (() => {
                     (Date.now() - new Date(latestTs).getTime()) / 86400000
                 ) + 2;
                 logger.debug(`[DataProvider] Delta fetch ${symbol}: ${gapDays} days since ${latestDate}`);
-                const newBars = await underlyingProvider.getBars(symbol, interval, gapDays)
+                const newBars = await _getBarsWithFallback(symbol, interval, gapDays)
                     .catch(() => []);
                 if (newBars.length) _cacheBg(newBars, symbol);
 
@@ -760,7 +855,7 @@ const localProvider = (() => {
         }
 
         // Full fetch from provider
-        const apiBars = await underlyingProvider.getBars(symbol, interval, lookbackDays);
+        const apiBars = await _getBarsWithFallback(symbol, interval, lookbackDays);
         if (apiBars && apiBars.length > 0) _cacheBg(apiBars, symbol);
         return apiBars;
     }

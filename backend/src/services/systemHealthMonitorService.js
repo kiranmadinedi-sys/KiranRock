@@ -64,20 +64,50 @@ function clearCooldown(key) { _alerted.delete(key); }
 // ─── Alpaca credentials ───────────────────────────────────────────────────────
 
 async function getAlpacaClient(userId) {
-    const res = await query(
-        'SELECT alpaca_key_id, alpaca_secret_key, alpaca_paper FROM users WHERE id=$1',
-        [userId]
-    );
-    const row = res.rows[0];
-    if (!row) throw new Error(`No user record for ${userId}`);
-    const base    = row.alpaca_paper === false
+    // Falls back to shared .env credentials when the user has no personal keys saved —
+    // same resolution userDatabaseService.getUserAlpacaCredentials uses everywhere else.
+    // The old version here read `users` directly with no fallback, so any env-fallback
+    // account (e.g. the paper "user" login) would get a null key/secret and every check
+    // below would silently fail for it.
+    const userDb = require('./userDatabaseService');
+    const creds  = await userDb.getUserAlpacaCredentials(userId);
+    if (!creds.keyId || !creds.secretKey) throw new Error(`No Alpaca credentials available for ${userId}`);
+    const base    = creds.isPaper === false
         ? 'https://api.alpaca.markets'
         : 'https://paper-api.alpaca.markets';
     const headers = {
-        'APCA-API-KEY-ID':     row.alpaca_key_id,
-        'APCA-API-SECRET-KEY': row.alpaca_secret_key
+        'APCA-API-KEY-ID':     creds.keyId,
+        'APCA-API-SECRET-KEY': creds.secretKey
     };
     return { base, headers };
+}
+
+/**
+ * Every user with real trading activity in the last 30 days — not just the one
+ * hardcoded KMADINED account. Found 2026-08-17: the whole market-hours sweep below
+ * (SENTINEL, missing-stop repair, phantom reconciliation, trailing-stop upgrades)
+ * only ever ran for KMADINED, so every other account — including live account
+ * anilboddu1, the same account behind the NET/TMUS/MELI naked-stop incident —
+ * had zero automated protection.
+ */
+async function getActiveTradingUserIds() {
+    try {
+        const r = await query(`
+            SELECT DISTINCT user_id FROM (
+                SELECT user_id FROM order_audit_log WHERE created_at > NOW() - INTERVAL '30 days'
+                UNION
+                SELECT id::text AS user_id FROM users WHERE alpaca_key_id IS NOT NULL
+                UNION
+                SELECT user_id FROM holdings
+            ) t
+            WHERE user_id IS NOT NULL
+        `);
+        const ids = r.rows.map(row => row.user_id);
+        return ids.length > 0 ? ids : [KMADINED];
+    } catch (e) {
+        logger.error('[HealthMonitor] Failed to resolve active trading users, falling back to KMADINED only', { error: e.message });
+        return [KMADINED];
+    }
 }
 
 // ─── Individual checks ────────────────────────────────────────────────────────
@@ -388,7 +418,7 @@ async function runHealthCheck() {
 
         // B — HALT_ALL (always, auto-fix)
         const { issue: haltIssue, fixed: haltFixed } = await checkAndClearHaltAll();
-        if (haltFixed) fixes.push(haltFixed);
+        if (haltFixed) fixes.push({ msg: haltFixed, userId: KMADINED }); // system-wide, no single owner
         if (haltIssue) issues.push({ key: 'halt_all', msg: haltIssue });
 
         // H — Nightly scan completion (overnight/pre-market window only, self-gated).
@@ -403,53 +433,77 @@ async function runHealthCheck() {
             );
         }
 
-        // Market-hours-only checks
+        // Market-hours-only checks — run for every active trading account (see
+        // getActiveTradingUserIds above), not one hardcoded user. Each account's
+        // checks are isolated in their own try/catch so one account's failure
+        // (bad credentials, Alpaca error, etc.) can't skip the rest.
         if (isMarketOpen()) {
-            // C — SENTINEL
-            const sentinelIssue = await checkSentinel(KMADINED);
-            if (sentinelIssue) issues.push({ key: 'sentinel', msg: sentinelIssue });
+            const activeUserIds = await getActiveTradingUserIds();
 
-            // D — Bot cycles
-            const cycleIssue = await checkBotCycles(KMADINED);
-            if (cycleIssue) issues.push({ key: 'bot_cycles', msg: cycleIssue });
+            for (const uid of activeUserIds) {
+                const tag = activeUserIds.length > 1 ? ` [user ${uid.slice(0, 8)}]` : '';
+                try {
+                    // C — SENTINEL
+                    const sentinelIssue = await checkSentinel(uid);
+                    if (sentinelIssue) issues.push({ key: `sentinel_${uid}`, msg: sentinelIssue + tag, userId: uid });
 
-            // E — Missing stops (auto-fix, smart level)
-            const { issue: stopIssue, fixed: stopFixed } = await checkAndFixStops(KMADINED);
-            if (stopFixed) fixes.push(stopFixed);
-            if (stopIssue) issues.push({ key: 'stops', msg: stopIssue });
+                    // D — Bot cycles
+                    const cycleIssue = await checkBotCycles(uid);
+                    if (cycleIssue) issues.push({ key: `bot_cycles_${uid}`, msg: cycleIssue + tag, userId: uid });
 
-            // F — Reconciliation (auto-fix)
-            const reconcileFixed = await checkAndFixReconciliation(KMADINED);
-            if (reconcileFixed) fixes.push(reconcileFixed);
+                    // E — Missing stops (auto-fix, smart level)
+                    const { issue: stopIssue, fixed: stopFixed } = await checkAndFixStops(uid);
+                    if (stopFixed) fixes.push({ msg: stopFixed + tag, userId: uid });
+                    if (stopIssue) issues.push({ key: `stops_${uid}`, msg: stopIssue + tag, userId: uid });
 
-            // G — Trailing stop upgrades for profitable positions
-            const trailFixed = await upgradeTrailingStops(KMADINED);
-            if (trailFixed) fixes.push(trailFixed);
+                    // F — Reconciliation (auto-fix)
+                    const reconcileFixed = await checkAndFixReconciliation(uid);
+                    if (reconcileFixed) fixes.push({ msg: reconcileFixed + tag, userId: uid });
 
-            // I — Regime blocking all new entries (CHOPPY/PANIC) — once-per-day FYI,
-            // not an "issue" (the bot is behaving correctly), so alerted separately
-            // from the critical-issues loop below rather than mixed into `issues`.
-            const regimeMsg = await checkRegimeBlocking(KMADINED);
-            if (regimeMsg) {
-                await alert(`regime_blocked_${etDateStr}`,
-                    `⏸️ *KiranRock Trading Update* [${nowCDT()} CDT]\n\n${regimeMsg}\n\nBot is sitting out new entries and managing existing positions only.`,
-                    KMADINED, ONE_DAY_MS
-                );
+                    // G — Trailing stop upgrades for profitable positions
+                    const trailFixed = await upgradeTrailingStops(uid);
+                    if (trailFixed) fixes.push({ msg: trailFixed + tag, userId: uid });
+
+                    // I — Regime blocking all new entries (CHOPPY/PANIC) — once-per-day FYI,
+                    // not an "issue" (the bot is behaving correctly), so alerted separately
+                    // from the critical-issues loop below rather than mixed into `issues`.
+                    const regimeMsg = await checkRegimeBlocking(uid);
+                    if (regimeMsg) {
+                        await alert(`regime_blocked_${etDateStr}_${uid}`,
+                            `⏸️ *KiranRock Trading Update* [${nowCDT()} CDT]\n\n${regimeMsg}\n\nBot is sitting out new entries and managing existing positions only.`,
+                            uid, ONE_DAY_MS
+                        );
+                    }
+                } catch (e) {
+                    logger.error('[HealthMonitor] Per-user sweep failed', { uid, error: e.message });
+                }
             }
         }
 
-        // ── Send Telegram alerts ──────────────────────────────────────────────
-        for (const { key, msg } of issues) {
+        // ── Send Telegram alerts — routed per account, not always to KMADINED ───
+        for (const { key, msg, userId: issueUserId } of issues) {
             await alert(key,
-                `🚨 *KiranRock Health Alert* [${nowCDT()} CDT]\n\n${msg}\n\n_System is monitoring — manual review may be needed._`
+                `🚨 *KiranRock Health Alert* [${nowCDT()} CDT]\n\n${msg}\n\n_System is monitoring — manual review may be needed._`,
+                issueUserId || KMADINED
             );
         }
 
         if (fixes.length > 0) {
-            const fixList = fixes.map(f => `• ${f}`).join('\n');
-            await alert(`fixes_${fixes.join('|').slice(0, 60)}`,
-                `🔧 *KiranRock Auto-Fix* [${nowCDT()} CDT]\n\nIssues detected and resolved:\n${fixList}`
-            );
+            // Group by account so each user gets their own summary instead of one
+            // combined message that only ever reached KMADINED's chat.
+            const byUser = new Map();
+            for (const f of fixes) {
+                const uid = f.userId || KMADINED;
+                if (!byUser.has(uid)) byUser.set(uid, []);
+                byUser.get(uid).push(f.msg);
+            }
+            for (const [uid, msgs] of byUser) {
+                const fixList = msgs.map(m => `• ${m}`).join('\n');
+                await alert(`fixes_${uid}_${msgs.join('|').slice(0, 40)}`,
+                    `🔧 *KiranRock Auto-Fix* [${nowCDT()} CDT]\n\nIssues detected and resolved:\n${fixList}`,
+                    uid
+                );
+            }
         }
 
         if (issues.length === 0 && fixes.length === 0) {

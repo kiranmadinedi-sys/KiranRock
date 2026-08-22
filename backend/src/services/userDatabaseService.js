@@ -179,6 +179,11 @@ async function saveUserAlpacaCredentials(userId, { keyId, secretKey, isPaper }) 
         `UPDATE users SET ${fields.join(', ')} WHERE id = $${values.length} RETURNING alpaca_key_id, alpaca_paper`,
         values
     );
+    // New credentials mean a different (or differently-typed, paper<->live) Alpaca
+    // account — clear cached deposit/portfolio data from the OLD account so the
+    // next fetch reads fresh, instead of serving the previous account's numbers
+    // against this one for up to 24h (found 2026-08-20, see portfolioTrackingService.js).
+    try { require('./portfolioTrackingService').clearUserCache(userId); } catch (_) {}
     return result.rows[0];
 }
 
@@ -190,6 +195,7 @@ async function clearUserAlpacaCredentials(userId) {
         `UPDATE users SET alpaca_key_id = NULL, alpaca_secret_key = NULL, alpaca_paper = true WHERE id = $1`,
         [userId]
     );
+    try { require('./portfolioTrackingService').clearUserCache(userId); } catch (_) {}
 }
 
 module.exports = {

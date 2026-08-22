@@ -1355,10 +1355,18 @@ const _withQuoteTimeout = (promise, fallback, ms = 10000) =>
     Promise.race([promise, new Promise(resolve => setTimeout(() => resolve(fallback), ms))]);
 
 async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null, regime = null) {
+    // Diagnostic timing — added 2026-08-21 to find why per-symbol nightly-scan time grew
+    // steadily over a run (9 min/symbol early, 45+ min/symbol late) with no process-wide
+    // leak (handles/memory/DB-pool all stayed flat, scheduler ticks stayed perfectly
+    // spaced) — pointing at something inside THIS per-symbol pipeline specifically.
+    // Logged once via `finally` below so it fires on every exit path, not just success.
+    const _t0 = Date.now();
+    const _stepTimes = {};
     try {
         // Fetch core market data through provider abstraction to avoid Yahoo-specific 429 failures.
         // Each external call has a 10s hard timeout so a single stalled Yahoo request cannot
         // block the entire scan batch (and starve the DB connection pool).
+        const _tDataStart = Date.now();
         const [quote, historicalData, spyReturn, spyReturn5d, daysToEarnings, newsData, smartMoneyScore, fundamentals, redditData, globalSentiment, shortInterestData] = await Promise.all([
             _withQuoteTimeout(dataProvider.getQuote(symbol), null).catch(() => null),
             _withQuoteTimeout(dataProvider.getBars(symbol, '1d', 220), []).catch(() => []), // 220 days needed for 200-day SMA (Weinstein)
@@ -1374,6 +1382,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             globalSentimentService.getGlobalSentiment().catch(() => null),  // ATLAS — 15min cache
             getShortInterestData(symbol).catch(() => null),        // squeeze potential — 4hr cache
         ]);
+        _stepTimes.dataGatherMs = Date.now() - _tDataStart;
 
         if (!quote || !quote.price) {
             return null;
@@ -1401,11 +1410,15 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             (highs.length > 0 ? Math.max(...highs.slice(-252)) : price);
 
         // PULSE — Gemini headline analysis (cached 30 min; returns null instantly when key absent)
+        const _tPulseStart = Date.now();
         const headlines    = (newsData?.articles || []).map(a => a.title || a.headline || '').filter(Boolean);
         const geminiResult = await geminiPulseService.analyzeHeadlines(symbol, headlines).catch(() => null);
+        _stepTimes.pulseMs = Date.now() - _tPulseStart;
 
         // PROPHET — earnings direction forecast (only fires 15-45 days before earnings)
+        const _tProphetStart = Date.now();
         const prophetResult = await prophetService.forecastEarnings(symbol, daysToEarnings, headlines, fundamentals).catch(() => null);
+        _stepTimes.prophetMs = Date.now() - _tProphetStart;
 
         // ORACLE patterns — synchronous, uses already-fetched OHLCV
         const oraclePattern = detectOraclePatterns(quotes);
@@ -1898,12 +1911,14 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         // Uses this account's own trade data: sector × pattern × regime win rates.
         // Refreshes every 4 hours. No external API. No model. Pure statistics.
         {
+            const _tBrainStart = Date.now();
             const brainResult = await localBrain.getScoreBoost({
                 sector:    sector || 'Unknown',
                 pattern:   oraclePattern.pattern || 'None',
                 regime:    regime?.regime || 'UNKNOWN',
                 entryHour: new Date().getHours(), // local hour — brain converts to ET via SQL
             });
+            _stepTimes.localBrainMs = Date.now() - _tBrainStart;
             if (brainResult.boost !== 0) {
                 aiScore += brainResult.boost;
                 scoringLog.push(`LOCAL_BRAIN: ${brainResult.boost >= 0 ? '+' : ''}${brainResult.boost} (${brainResult.reason})`);
@@ -1914,7 +1929,9 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         // Trained on cached ohlcv_cache data: RSI×MACD×volume×52wk-proximity×trend.
         // Labels: 5-day forward return > 2% = WIN. No GPU, no library — pure stats.
         {
+            const _tEvolveStart = Date.now();
             const evolveResult = await evolveService.getScoreBoost(symbol);
+            _stepTimes.evolveMs = Date.now() - _tEvolveStart;
             if (evolveResult.boost !== 0) {
                 aiScore += evolveResult.boost;
                 scoringLog.push(`EVOLVE: ${evolveResult.boost >= 0 ? '+' : ''}${evolveResult.boost} (${evolveResult.reason})`);
@@ -2293,6 +2310,12 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
     } catch (error) {
         logger.error('Error analyzing stock', { symbol, error: error.message });
         return null;
+    } finally {
+        // Fires on every exit path (success, early return, or catch) — logged as a single
+        // structured line so later symbols' step times can be compared against earlier
+        // ones in the same run to see which specific phase is growing, if any.
+        _stepTimes.totalMs = Date.now() - _t0;
+        logger.info(`[Timing] analyzeStockWithAI ${symbol}`, _stepTimes);
     }
 }
 
@@ -4571,7 +4594,25 @@ async function manageExistingPositions(userId) {
             logger.warn('[StopRepair] Error during stop verification — cycle will retry', { err: _stopRepairErr.message });
         }
 
-        for (const holding of holdings) {
+        // Process holdings concurrently (bounded), not one at a time — with many
+        // positions each taking ~1.5-2 min (SEC EDGAR, SONAR, Ollama, multi-timeframe
+        // signals), sequential processing needed 25-30+ min per cycle for 15 positions,
+        // exceeding even the 15-min per-user force-clear window entirely (confirmed
+        // 2026-08-21: the paper account's cycle never completed a single pass overnight,
+        // restarting from scratch every ~15 min, never reaching more than ~8 of 15
+        // positions — which also starved the nightly scan sharing the same process).
+        // Each holding below only reads/writes its own row and its own symbol's locks
+        // (_sellInProgress/_exitPending are already keyed per-symbol for exactly this
+        // kind of concurrent safety) — no shared accumulator across holdings, so
+        // concurrent processing is safe. Capped at HOLDING_CONCURRENCY rather than
+        // fully unbounded to avoid overwhelming the local Ollama LLM server or the DB
+        // connection pool with many simultaneous heavy calls. The dummy single-element
+        // loop just below preserves every existing `continue` statement's exact
+        // behavior (skip to next holding) without touching any of them individually —
+        // deliberately zero changes to the 400+ lines of per-holding logic itself.
+        const HOLDING_CONCURRENCY = 4;
+        async function _processOneHolding(holding) {
+          for (const _once of [1]) {
             // Race-condition guard: skip if a sell for this holding is already in-flight
             const sellKey = `${userId}:${holding.symbol}`;
             if (_sellInProgress.has(sellKey)) {
@@ -5033,6 +5074,11 @@ async function manageExistingPositions(userId) {
                 _sellInProgress.delete(sellKey);
                 logger.error('Error managing position', { userId, symbol: holding.symbol, error: error.message });
             }
+          } // end dummy _once wrapper — preserves `continue` semantics from the original for-loop
+        }
+        for (let _i = 0; _i < holdings.length; _i += HOLDING_CONCURRENCY) {
+            const _batch = holdings.slice(_i, _i + HOLDING_CONCURRENCY);
+            await Promise.all(_batch.map((h) => _processOneHolding(h)));
         }
         
     } catch (error) {

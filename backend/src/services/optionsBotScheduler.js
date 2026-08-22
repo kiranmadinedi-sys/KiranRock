@@ -151,8 +151,21 @@ async function monitorOpenPositions() {
  * instead of hammering Yahoo Finance at peak time.
  */
 async function collectOptionsChains() {
+    // Skip entirely when no user has the options bot enabled — this cache exists
+    // to serve the options bot's market-hours scans, so warming it for nobody is
+    // pure wasted Yahoo/Polygon traffic (found 2026-08-21: contributed to the
+    // Polygon-403 → Yahoo-429 chain hitting every single day, twice a day,
+    // regardless of whether the feature was even in use — currently zero users
+    // have it enabled after disabling it for the paper account).
+    const activeUsers = await getActiveOptionsBotUsers();
+    if (activeUsers.length === 0) {
+        logger.info('[Options Prewarm] Skipped — no users have the options bot enabled');
+        return;
+    }
+
     logger.info('[Options Prewarm] Starting options chain collection', {
-        symbols: PREWARM_UNIVERSE.length
+        symbols: PREWARM_UNIVERSE.length,
+        forUsers: activeUsers.length
     });
 
     let succeeded = 0;

@@ -22,6 +22,22 @@ const _lastSnapshotGuardAlert = new Map(); // userId -> timestamp
 const _depositsCache = new Map(); // userId -> { totalDeposited, totalWithdrawn, fetchedAt }
 const DEPOSITS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
 
+/**
+ * Clear both per-user caches above. Must be called whenever a user's Alpaca
+ * credentials change (paper<->live switch, or new keys entirely) — otherwise
+ * whichever account was cached first (e.g. the old paper account's ~$100k
+ * synthetic starting balance) keeps being served as this user's real deposit
+ * total for up to 24h against the NEW account's real numbers, producing a
+ * wildly wrong overallPL (found 2026-08-20: showed -$99,000 for a $1,000
+ * account that had just been switched from paper to live). Nothing called
+ * this before — wired into saveUserAlpacaCredentials/clearUserAlpacaCredentials
+ * in userDatabaseService.js.
+ */
+function clearUserCache(userId) {
+    _depositsCache.delete(userId);
+    _alpacaCache.delete(userId);
+}
+
 async function _getAlpacaNetDeposits(userId) {
     const cached = _depositsCache.get(userId);
     if (cached && Date.now() - cached.fetchedAt < DEPOSITS_CACHE_TTL) return cached;
@@ -720,5 +736,6 @@ module.exports = {
     getPerformanceAnalytics,
     getSectorAllocation,
     getRiskMetrics,
-    getPortfolioHistory
+    getPortfolioHistory,
+    clearUserCache
 };

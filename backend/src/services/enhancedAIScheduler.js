@@ -722,7 +722,13 @@ async function runMorningStopVerification() {
     try {
         const Alpaca         = require('@alpacahq/alpaca-trade-api');
         const { query }      = require('../config/database');
-        const alertService   = require('./alertService');
+        // Was requiring './alertService' — that module manages user-configured price
+        // alerts (getAlertsByUserId/addAlert/deleteAlert) and has no sendMessage export
+        // at all. Found 2026-08-18: 83f08677's 9:31 AM stop restore fired the log line
+        // but the "stops restored" Telegram notification silently failed every time
+        // with "alertService.sendMessage is not a function", caught by the outer
+        // per-user try/catch so it never surfaced as anything louder than a warn log.
+        const alertService   = require('./telegramAlertService');
         const userDb         = require('./userDatabaseService');
         const activeUsers    = await getActiveAIUsers();
 
@@ -957,7 +963,7 @@ async function runNightlyScanTrigger() {
     let todayCount = 0;
     try {
         const { rows } = await query(
-            `SELECT COUNT(*) AS cnt
+            `SELECT analysis_date, COUNT(*) FILTER (WHERE ai_score IS NOT NULL) AS cnt
              FROM daily_universe_analysis
              WHERE analysis_date = (
                  SELECT MAX(analysis_date)
@@ -965,9 +971,21 @@ async function runNightlyScanTrigger() {
                  WHERE analysis_date >= CURRENT_DATE - INTERVAL '1 day'
                    AND analysis_date <= CURRENT_DATE
              )
-             AND ai_score IS NOT NULL`
+             GROUP BY analysis_date`
         );
-        todayCount = parseInt(rows[0]?.cnt ?? 0);
+        const row = rows[0];
+        // The window above deliberately allows yesterday's date to match (a scan
+        // started before midnight still needs its in-progress count recognized).
+        // But if NOTHING has been scanned yet today, that same window still
+        // matches yesterday's already-COMPLETED scan, and its count would
+        // wrongly look like today's progress — declaring today "done" without
+        // it ever running. Found 2026-08-20/21: Aug 19's success (434 scored)
+        // sat un-superseded and got misread as complete on both following
+        // evenings, so the real scan never launched for two days straight.
+        // Only trust the count when the matched date is actually today.
+        if (row && new Date(row.analysis_date).toISOString().slice(0, 10) === etDate) {
+            todayCount = parseInt(row.cnt ?? 0);
+        }
     } catch (_) { return; }
 
     // Scan is complete for today — stop checking

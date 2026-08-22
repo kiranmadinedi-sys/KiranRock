@@ -55,7 +55,62 @@ const getFundamentals = async (symbol, options = {}) => {
         }
 
         console.log(`Fetching fundamentals for ${symbol}...`);
-        
+
+        // Try Polygon first — no Yahoo crumb/rate-limit dependency. Covers market cap,
+        // sector, EPS, margins, ROE, revenue/earnings growth, dividend rate (verified
+        // live against the real API 2026-08-22). NOT covered on the current Polygon
+        // plan: PEG ratio and analyst ratings/price targets (both need estimate data
+        // that's gated behind a plan upgrade) — those come back explicitly as
+        // "unavailable" here rather than fabricated, unlike the Yahoo path's fallback.
+        try {
+            const dataProvider = require('./dataProvider');
+            const [poly, quote] = await Promise.all([
+                dataProvider.getFundamentals(symbol),
+                dataProvider.getQuote(symbol).catch(() => null)
+            ]);
+            if (poly && (poly.eps != null || poly.marketCap != null)) {
+                const price          = quote?.price || null;
+                const pe              = (poly.eps && price) ? price / poly.eps : null;
+                const dividendYield   = (poly.dividendRate && price) ? poly.dividendRate / price : null;
+                const revGrowthRounded = poly.revenueGrowth != null ? parseFloat(poly.revenueGrowth.toFixed(2)) : null;
+                const valuation       = assessValuation(pe, null, revGrowthRounded);
+                const growth          = assessGrowth(revGrowthRounded, poly.earningsGrowth);
+
+                return {
+                    metrics: {
+                        peRatio:        pe != null ? pe.toFixed(2) : 'N/A',
+                        pegRatio:       'N/A', // not available on current Polygon plan
+                        eps:            poly.eps != null ? poly.eps.toFixed(2) : 'N/A',
+                        revenueGrowth:  poly.revenueGrowth != null ? `${poly.revenueGrowth.toFixed(2)}%` : 'N/A',
+                        profitMargin:   poly.profitMargin != null ? `${poly.profitMargin.toFixed(2)}%` : 'N/A',
+                        returnOnEquity: poly.returnOnEquity != null ? `${poly.returnOnEquity.toFixed(2)}%` : 'N/A',
+                        marketCap:      poly.marketCap ? formatMarketCap(poly.marketCap) : 'N/A',
+                        dividend:       poly.dividendRate ? `$${poly.dividendRate.toFixed(2)}` : 'None',
+                        dividendYield:  dividendYield != null ? `${(dividendYield * 100).toFixed(2)}%` : 'N/A'
+                    },
+                    sector:         poly.sector || 'Unknown',
+                    industry:       poly.industry || 'Unknown',
+                    marketCap:      poly.marketCap || null,
+                    currentPrice:   price,
+                    earningsGrowth: poly.earningsGrowth != null ? poly.earningsGrowth / 100 : null,
+                    analystRatings: {
+                        strongBuy: null, buy: null, hold: null, sell: null, strongSell: null,
+                        consensus: 'N/A — analyst data not available on current data plan'
+                    },
+                    priceTargets: {
+                        current: price != null ? price.toFixed(2) : 'N/A',
+                        high: 'N/A', low: 'N/A', average: 'N/A'
+                    },
+                    valuation,
+                    growth,
+                    recommendation: generateRecommendation(valuation, growth),
+                    meta: { source: 'polygon' }
+                };
+            }
+        } catch (polyErr) {
+            console.warn(`Polygon fundamentals failed for ${symbol}, falling back to Yahoo: ${polyErr.message}`);
+        }
+
         // Apply rate limiting before each request; use yfClient.quoteSummary (with retry + cache)
         const quoteSummary = await rateLimiter.execute(async () => {
             return await yfClient.quoteSummary(symbol, {

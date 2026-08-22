@@ -1243,7 +1243,41 @@ async function getFundamentalsQuick(symbol) {
         }
     } catch { /* non-fatal — proceed to live fetch */ }
 
-    // Live fetch from Yahoo Finance
+    // Live fetch — Polygon first (no Yahoo crumb/rate-limit dependency, verified live
+    // 2026-08-22), Yahoo as fallback only if Polygon has no key or fails. Polygon returns
+    // growth/margins as percentages (17.79 = 17.79%); normalize to Yahoo's decimal-fraction
+    // convention (0.1779) so this function's contract to callers is unchanged.
+    try {
+        const dataProvider = require('./dataProvider');
+        const poly = await dataProvider.getFundamentals(symbol);
+        if (poly && (poly.revenueGrowth != null || poly.grossMargin != null || poly.earningsGrowth != null)) {
+            const result = {
+                earningsGrowth: poly.earningsGrowth != null ? poly.earningsGrowth / 100 : null,
+                revenueGrowth:  poly.revenueGrowth  != null ? poly.revenueGrowth  / 100 : null,
+                grossMargins:   poly.grossMargin    != null ? poly.grossMargin    / 100 : null,
+            };
+            cacheService.set(memKey, result, 4 * 60 * 60 * 1000);
+            setImmediate(async () => {
+                try {
+                    const { query: dbQuery } = require('../config/database');
+                    await dbQuery(
+                        `INSERT INTO fundamentals_cache
+                             (symbol, fetched_at, earnings_growth, revenue_growth, gross_margins)
+                         VALUES ($1, NOW(), $2, $3, $4)
+                         ON CONFLICT (symbol) DO UPDATE SET
+                             fetched_at      = NOW(),
+                             earnings_growth = EXCLUDED.earnings_growth,
+                             revenue_growth  = EXCLUDED.revenue_growth,
+                             gross_margins   = EXCLUDED.gross_margins`,
+                        [symbol, result.earningsGrowth, result.revenueGrowth, result.grossMargins]
+                    );
+                } catch { /* non-fatal */ }
+            });
+            return result;
+        }
+    } catch { /* non-fatal — fall through to Yahoo */ }
+
+    // Live fetch from Yahoo Finance (fallback)
     try {
         const summary = await yahooFinance.quoteSummary(symbol, { modules: ['financialData'] });
         const fd      = summary?.financialData || {};

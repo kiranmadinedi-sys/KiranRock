@@ -517,7 +517,82 @@ const polygonProvider = (() => {
         }
     }
 
-    return { getBars, getQuote, searchSymbols, getOptionsChain, name: 'Polygon.io' };
+    // Fundamentals — replaces yahoo-finance2's quoteSummary() for the fields Polygon's
+    // Stocks Starter plan actually covers (verified live 2026-08-22): ticker details
+    // (market cap/sector), financials (income statement → EPS/margins/ROE), dividends.
+    // NOT covered on this plan: earnings calendar dates, analyst estimates/PEG, short
+    // interest — those callers (getDaysToEarnings, getShortInterestData) stay on Yahoo,
+    // which already degrades safely to null rather than blocking a decision.
+    async function getFundamentals(symbol) {
+        if (!hasApiKey()) {
+            throw new Error('POLYGON_API_KEY not set — cannot fetch fundamentals from Polygon');
+        }
+        const key = apiKey();
+
+        const [detailsResp, ttmResp, annualResp, divResp] = await Promise.all([
+            http().get(`${BASE}/v3/reference/tickers/${symbol}`, { params: { apiKey: key } })
+                .catch(() => null),
+            http().get(`${BASE}/vX/reference/financials`, { params: { ticker: symbol, timeframe: 'ttm', limit: 1, apiKey: key } })
+                .catch(() => null),
+            http().get(`${BASE}/vX/reference/financials`, { params: { ticker: symbol, timeframe: 'annual', limit: 2, apiKey: key } })
+                .catch(() => null),
+            http().get(`${BASE}/v3/reference/dividends`, { params: { ticker: symbol, limit: 4, apiKey: key } })
+                .catch(() => null),
+        ]);
+
+        const details = detailsResp?.data?.results || {};
+        const ttmInc  = ttmResp?.data?.results?.[0]?.financials?.income_statement || {};
+        const ttmBal  = ttmResp?.data?.results?.[0]?.financials?.balance_sheet || {};
+        const annuals = annualResp?.data?.results || [];
+
+        const revenues     = ttmInc.revenues?.value ?? null;
+        const grossProfit  = ttmInc.gross_profit?.value ?? null;
+        const netIncome    = ttmInc.net_income_loss?.value ?? null;
+        const equity       = ttmBal.equity_attributable_to_parent?.value ?? ttmBal.equity?.value ?? null;
+        const eps          = ttmInc.basic_earnings_per_share?.value ?? ttmInc.diluted_earnings_per_share?.value ?? null;
+
+        // Revenue growth from the two most recent annual filings (YoY), when both present.
+        let revenueGrowth = null;
+        let earningsGrowth = null;
+        if (annuals.length >= 2) {
+            const curInc  = annuals[0]?.financials?.income_statement || {};
+            const prevInc = annuals[1]?.financials?.income_statement || {};
+            const curRev  = curInc.revenues?.value;
+            const prevRev = prevInc.revenues?.value;
+            if (curRev && prevRev) revenueGrowth = ((curRev - prevRev) / prevRev) * 100;
+            const curNI   = curInc.net_income_loss?.value;
+            const prevNI  = prevInc.net_income_loss?.value;
+            if (curNI != null && prevNI) earningsGrowth = ((curNI - prevNI) / Math.abs(prevNI)) * 100;
+        }
+
+        // Trailing 12mo dividend rate from up to 4 most recent declared dividends.
+        const dividends = divResp?.data?.results || [];
+        const dividendRate = dividends.length
+            ? dividends.reduce((sum, d) => sum + (d.cash_amount || 0), 0) * (4 / Math.max(1, Math.min(4, dividends.length)))
+            : null;
+
+        return {
+            symbol,
+            name:        details.name || symbol,
+            sector:      details.sic_description || null,
+            industry:    details.sic_description || null,
+            exchange:    details.primary_exchange || null,
+            marketCap:   details.market_cap || null,
+            eps,
+            revenueGrowth,
+            earningsGrowth,
+            profitMargin: (netIncome != null && revenues) ? (netIncome / revenues) * 100 : null,
+            grossMargin:  (grossProfit != null && revenues) ? (grossProfit / revenues) * 100 : null,
+            returnOnEquity: (netIncome != null && equity) ? (netIncome / equity) * 100 : null,
+            dividendRate,
+            // PEG / analyst estimates are not available on this Polygon plan — leave null
+            // rather than guessing; fundamentalsService falls back to the static-defaults
+            // note only when nothing at all could be sourced.
+            pegRatio: null
+        };
+    }
+
+    return { getBars, getQuote, searchSymbols, getOptionsChain, getFundamentals, name: 'Polygon.io' };
 })();
 
 // ─── ACTIVE PROVIDER SELECTION ───────────────────────────────────────────────
@@ -876,5 +951,9 @@ module.exports = {
     getQuote:        (...args) => withYahooFallback('getQuote',      'quote fetch',   ...args),
     searchSymbols:   (...args) => withYahooFallback('searchSymbols', 'symbol search', ...args),
     getOptionsChain: (...args) => withYahooFallback('getOptionsChain', 'options chain fetch', ...args),
+    // No Yahoo fallback here by design — Polygon is the only implementer (Yahoo's
+    // equivalent is quoteSummary, which callers already have their own fallback to).
+    // Throws when POLYGON_API_KEY is unset so callers know to use their existing path.
+    getFundamentals: (...args) => polygonProvider.getFundamentals(...args),
     getActiveProvider: () => activeProvider
 };

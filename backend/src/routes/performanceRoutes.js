@@ -1997,6 +1997,70 @@ router.get('/exit-breakdown', protect, async (req, res) => {
 });
 
 /**
+ * GET /api/performance/exit-health?days=90
+ * Bot-managed vs. passive-exit health check: what share of closes were the bot actively
+ * managing (trailing stop, take-profit, etc. firing on schedule) vs. detected after the fact
+ * by the position reconciler / health monitor (Alpaca's own stop/target already filled and
+ * the DB simply hadn't caught up yet — i.e. the bot cycle stalled or missed a check window).
+ * A rising passive share is an early warning that the trading cycle is falling behind, even
+ * when P&L still looks fine — cheap to compute since `executed_by` already tags the source.
+ */
+router.get('/exit-health', protect, async (req, res) => {
+    try {
+        const { query } = require('../config/database');
+        const userId = req.userId;
+        const days   = Math.max(7, Math.min(parseInt(req.query.days) || 90, 365));
+
+        const result = await query(`
+            SELECT
+                CASE
+                    WHEN executed_by IN ('reconciler', 'health_monitor_dup') THEN 'passive'
+                    ELSE 'bot_managed'
+                END                                                   AS exit_source,
+                COUNT(*)                                              AS trades,
+                COUNT(*) FILTER (WHERE pnl > 0)                      AS winners,
+                ROUND((AVG(pnl_percent))::numeric, 2)                AS avg_return_pct,
+                ROUND((SUM(pnl))::numeric, 2)                        AS total_pnl_usd,
+                ROUND(
+                    (COUNT(*) FILTER (WHERE pnl > 0))::numeric /
+                    NULLIF(COUNT(*), 0) * 100, 1
+                )                                                     AS win_rate
+            FROM trades
+            WHERE user_id   = $1
+              AND action     = 'SELL'
+              AND pnl        IS NOT NULL
+              AND trade_date >= NOW() - ($2 * INTERVAL '1 day')
+            GROUP BY 1
+            ORDER BY exit_source
+        `, [userId, days]);
+
+        const rows = result.rows.map(r => ({
+            exitSource:   r.exit_source,
+            trades:       parseInt(r.trades),
+            winners:      parseInt(r.winners),
+            winRate:      parseFloat(r.win_rate || 0),
+            avgReturnPct: parseFloat(r.avg_return_pct || 0),
+            totalPnlUsd:  parseFloat(r.total_pnl_usd || 0),
+        }));
+
+        const totalTrades  = rows.reduce((sum, r) => sum + r.trades, 0);
+        const passiveTrades = rows.find(r => r.exitSource === 'passive')?.trades || 0;
+        const passivePct = totalTrades > 0 ? parseFloat(((passiveTrades / totalTrades) * 100).toFixed(1)) : 0;
+
+        res.json({
+            days,
+            rows,
+            passiveExitPct: passivePct,
+            note: 'A high/rising passiveExitPct means Alpaca is filling stops/targets before the bot cycle catches up to record them as bot-managed — a reliability signal, not just a trading one.'
+        });
+    } catch (err) {
+        const logger = require('../utils/logger');
+        logger.error('Exit health endpoint error', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+/**
  * GET /api/performance/holdback-sim?days=90
  * For every trailing-stop and break-even exit, looks up what the stock did on
  * the next trading day (using daily_bars, which is already ingested nightly).

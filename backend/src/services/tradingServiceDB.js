@@ -280,12 +280,36 @@ const executeSellOrder = async (userId, symbol, quantity, executedBy = 'MANUAL',
                 ]);
             }
             
+            // Look up ai_score, sector, entry_regime, and buy date from the most recent BUY
+            // so the SELL row carries the same entry context (mirrors positionReconciliationService.js)
+            // — without this, entry_regime/hold_hours were left NULL on nearly every bot-managed exit.
+            let entryScore = null, entrySector = null, entryRegime = null, holdHours = null;
+            try {
+                const buyRow = await client.query(
+                    `SELECT ai_score, sector, entry_regime, trade_date FROM trades
+                     WHERE user_id=$1 AND symbol=$2 AND action='BUY'
+                     ORDER BY trade_date DESC LIMIT 1`,
+                    [userId, symbol.toUpperCase()]
+                );
+                if (buyRow.rows[0]) {
+                    entryScore  = buyRow.rows[0].ai_score;
+                    entrySector = buyRow.rows[0].sector;
+                    entryRegime = buyRow.rows[0].entry_regime;
+                    if (buyRow.rows[0].trade_date) {
+                        holdHours = parseFloat(
+                            ((Date.now() - new Date(buyRow.rows[0].trade_date).getTime()) / 3600000).toFixed(2)
+                        );
+                    }
+                }
+            } catch (_) {}
+
             // Record trade — include realized P/L computed above
             const tradeResult = await client.query(`
                 INSERT INTO trades (
                     user_id, symbol, action, quantity, price, total,
-                    commission, executed_by, notes, pnl, pnl_percent
-                ) VALUES ($1, $2, 'SELL', $3, $4, $5, $6, $7, $8, $9, $10)
+                    commission, executed_by, notes, pnl, pnl_percent,
+                    ai_score, sector, entry_regime, hold_hours
+                ) VALUES ($1, $2, 'SELL', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                 RETURNING *
             `, [
                 userId,
@@ -297,7 +321,11 @@ const executeSellOrder = async (userId, symbol, quantity, executedBy = 'MANUAL',
                 executedBy,
                 notes,
                 parseFloat(profitLoss.toFixed(4)),
-                parseFloat(profitLossPercent.toFixed(4))
+                parseFloat(profitLossPercent.toFixed(4)),
+                entryScore,
+                entrySector,
+                entryRegime,
+                holdHours
             ]);
 
             // Consume buy lots (FIFO) for this sell

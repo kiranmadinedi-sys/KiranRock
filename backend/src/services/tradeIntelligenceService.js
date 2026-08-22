@@ -315,6 +315,12 @@ async function closeLatestOpenExecution(userId, closure) {
             (normalizeNumber(closure.pnlPercent) || 0) > 0.5 ? 'win' :
             (normalizeNumber(closure.pnlPercent) || 0) < -0.5 ? 'loss' : 'breakeven'
         );
+        // FIFO, not LIFO: when a symbol was bought more than once before being fully sold
+        // (averaging up, re-entry after a re-score), each buy leaves its own EXECUTED row.
+        // Closing "opened_at DESC" always matched the newest lot, permanently orphaning the
+        // older one(s) as EXECUTED forever — this was the majority cause (26 of 31 checked
+        // cases) of trade_decision_journal's closed-trade undercount (found 2026-08-22).
+        // Closing oldest-first mirrors the FIFO buy-lot consumption already used for P&L.
         await query(
             `WITH target AS (
                 SELECT id
@@ -323,7 +329,7 @@ async function closeLatestOpenExecution(userId, closure) {
                   AND bot_type = $2
                   AND symbol = $3
                   AND decision_phase = 'EXECUTED'
-                ORDER BY opened_at DESC, id DESC
+                ORDER BY opened_at ASC, id ASC
                 LIMIT 1
              )
              UPDATE trade_decision_journal journal

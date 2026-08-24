@@ -72,7 +72,12 @@ async function runEveningRefresh() {
         const masterResult = await assetUniverseService.refreshMasterAssets();
         logger.info('[AssetUniverseScheduler] Master assets refreshed', masterResult);
 
-        const dailyResult = await assetUniverseService.buildDailyAnalysisUniverse();
+        // This job runs at 8 PM ET — it's preparing the universe for the NEXT trading
+        // session, not literally "today". Must target that date explicitly (weekend-aware)
+        // rather than defaulting to "today", which silently mislabeled Friday's run as
+        // Saturday (found 2026-08-24 — see nextTradingDayET's own comment for the full story).
+        const targetDate = assetUniverseService.nextTradingDayET();
+        const dailyResult = await assetUniverseService.buildDailyAnalysisUniverse(targetDate);
         logger.info('[AssetUniverseScheduler] Daily universe built', dailyResult);
 
         logger.info('[AssetUniverseScheduler] Evening refresh done', { ms: Date.now() - t0 });
@@ -95,23 +100,33 @@ async function runPremarketRefresh() {
             await assetUniverseService.buildDailyAnalysisUniverse();
         }
 
-        // Pull premarket movers from Yahoo via the rateLimiter-wrapped screener
-        // (reuse existing velocity logic rather than adding new Yahoo calls)
+        // Pull premarket movers — Polygon first (no Yahoo crumb/rate-limit dependency,
+        // same fix already applied to marketScreenerService.js's getVelocitySymbols;
+        // this was an independent raw Yahoo screener call that sweep missed, found
+        // 2026-08-24), Yahoo screener only as fallback.
         try {
-            const yahooFinance = require('yahoo-finance2').default;
-            const yf = new yahooFinance();
-            const rateLimiter = require('../utils/yahooFinanceRateLimiter');
-
-            const [gainers, actives] = await Promise.all([
-                rateLimiter.execute(() => yf.screener({ scrIds: 'day_gainers',   count: 30 })).catch(() => ({ quotes: [] })),
-                rateLimiter.execute(() => yf.screener({ scrIds: 'most_actives',  count: 30 })).catch(() => ({ quotes: [] }))
-            ]);
-
             const movers = new Set();
-            [...(gainers?.quotes || []), ...(actives?.quotes || [])].forEach(q => {
-                const s = (q.symbol || '').toUpperCase();
-                if (s && /^[A-Z]{1,5}$/.test(s)) movers.add(s);
-            });
+            try {
+                const dataProvider = require('./dataProvider');
+                const [gainers, actives] = await Promise.all([
+                    dataProvider.getGainers(30),
+                    dataProvider.getMostActive(30)
+                ]);
+                [...gainers, ...actives].forEach(s => { if (/^[A-Z]{1,5}$/.test(s)) movers.add(s); });
+            } catch (polyErr) {
+                const yahooFinance = require('yahoo-finance2').default;
+                const yf = new yahooFinance();
+                const rateLimiter = require('../utils/yahooFinanceRateLimiter');
+
+                const [gainers, actives] = await Promise.all([
+                    rateLimiter.execute(() => yf.screener({ scrIds: 'day_gainers',   count: 30 })).catch(() => ({ quotes: [] })),
+                    rateLimiter.execute(() => yf.screener({ scrIds: 'most_actives',  count: 30 })).catch(() => ({ quotes: [] }))
+                ]);
+                [...(gainers?.quotes || []), ...(actives?.quotes || [])].forEach(q => {
+                    const s = (q.symbol || '').toUpperCase();
+                    if (s && /^[A-Z]{1,5}$/.test(s)) movers.add(s);
+                });
+            }
 
             // Add each mover to today's universe and check if any are halted
             for (const symbol of movers) {
@@ -120,7 +135,7 @@ async function runPremarketRefresh() {
 
             logger.info('[AssetUniverseScheduler] Pre-market movers added', { count: movers.size });
         } catch (yErr) {
-            logger.warn('[AssetUniverseScheduler] Pre-market Yahoo screener failed', { error: yErr.message });
+            logger.warn('[AssetUniverseScheduler] Pre-market movers failed', { error: yErr.message });
         }
 
     } catch (err) {

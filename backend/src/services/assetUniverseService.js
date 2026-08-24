@@ -226,8 +226,32 @@ async function addDynamicSymbol(symbol, source = 'velocity', meta = {}) {
  *
  * Runs nightly and optionally pre-market.
  */
-async function buildDailyAnalysisUniverse() {
-    const today = new Date().toISOString().slice(0, 10);
+// Formats a Date as YYYY-MM-DD in America/New_York, regardless of the machine's own
+// timezone or time of day — 'en-CA' conveniently formats as ISO (YYYY-MM-DD) directly.
+function _etDateString(date = new Date()) {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(date);
+}
+
+// The next weekday (Mon-Fri) after today, in ET. Used by the 8 PM evening refresh to
+// know which date it's actually preparing the universe FOR — not "raw UTC tomorrow",
+// which is what new Date().toISOString().slice(0,10) silently computes once it's past
+// 8 PM ET (already past midnight UTC). That coincidentally self-corrects Mon-Thu (UTC
+// tomorrow does equal the next weekday) but breaks every Friday: it writes Saturday's
+// date, nothing runs Sat/Sun to fix it, and Monday's actual trading falls back to the
+// stale ~800-symbol master-list fallback instead of the full ~13k-symbol daily universe
+// until the 7:30 AM pre-market self-heal catches up hours into the morning (found 2026-08-24
+// auditing "why does universe diversity feel limited").
+function nextTradingDayET() {
+    const [y, m, d] = _etDateString().split('-').map(Number);
+    const next = new Date(Date.UTC(y, m - 1, d + 1)); // +1 calendar day, UTC-safe arithmetic
+    const dow = next.getUTCDay(); // 0=Sun, 6=Sat
+    if (dow === 6) next.setUTCDate(next.getUTCDate() + 2); // Sat → Mon
+    else if (dow === 0) next.setUTCDate(next.getUTCDate() + 1); // Sun → Mon
+    return next.toISOString().slice(0, 10);
+}
+
+async function buildDailyAnalysisUniverse(targetDate = null) {
+    const today = targetDate || _etDateString();
 
     // Already built for today?
     const existing = await query(`
@@ -392,5 +416,6 @@ module.exports = {
     markResumed,
     isHalted,
     getActiveHalts,
-    getStatus
+    getStatus,
+    nextTradingDayET
 };

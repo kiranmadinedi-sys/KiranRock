@@ -955,10 +955,17 @@ async function runNightlyScanTrigger() {
     const etMin  = et.getMinutes();
     const etDate = et.toISOString().slice(0, 10);
 
-    // Mon–Fri only, between 4:15 PM and 11:00 PM ET
+    // Mon–Fri only, either the main evening window (4:15 PM–11 PM ET, right after
+    // close) or a morning catch-up window (6:00–9:25 AM ET, before/at open) for when
+    // the prior evening's run never completed. The raw symbol universe already had
+    // a self-heal for exactly this case (assetUniverseScheduler's runPremarketRefresh);
+    // the AI-scored analysis never did — found 2026-08-24 when Monday's bot traded the
+    // whole morning on Saturday's scan with literally no path to a fresher one until
+    // 4:15 PM that evening, no matter how incomplete Friday's run had been.
     if (etDay < 1 || etDay > 5) return;
-    if (etHour < 16 || (etHour === 16 && etMin < 15)) return;
-    if (etHour >= 23) return;
+    const inEveningWindow = (etHour > 16 || (etHour === 16 && etMin >= 15)) && etHour < 23;
+    const inMorningCatchupWindow = etHour >= 6 && (etHour < 9 || (etHour === 9 && etMin <= 25));
+    if (!inEveningWindow && !inMorningCatchupWindow) return;
 
     // Already confirmed complete for today
     if (_scanCompletedDate === etDate) return;

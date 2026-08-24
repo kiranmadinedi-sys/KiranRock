@@ -102,6 +102,22 @@ function isYahooRateLimited() {
     return Date.now() < _yahooRateLimitedUntil;
 }
 
+// yahoo-finance2's crumb-fetch failure throws a plain Error with statusCode/code both
+// undefined — the 429 only ever exists as text inside .message ("Failed to get crumb,
+// status 429..."). withRetry below was checking err.statusCode/err.code exclusively, so
+// it NEVER matched a real 429 and the shared cooldown breaker never tripped — every
+// single call independently retried into an active rate-limit wall instead of any of
+// them backing off for the others. Confirmed live: thousands of retries logged, zero
+// "tripping shared cooldown" messages, and per-symbol scan steps stretching past half an
+// hour each during this morning's catch-up scan (found 2026-08-24, right before market
+// open). Falls back to matching the message text since that's the only place it exists.
+function _extractStatus(err) {
+    if (err && err.statusCode) return err.statusCode;
+    if (err && err.code) return err.code;
+    if (err && typeof err.message === 'string' && /\b429\b/.test(err.message)) return 429;
+    return null;
+}
+
 async function withRetry(fn, args = [], opts = {}) {
     const maxAttempts = opts.maxAttempts || 4;
     const baseDelay = opts.baseDelay || 300; // ms
@@ -120,7 +136,7 @@ async function withRetry(fn, args = [], opts = {}) {
             return await fn(...args);
         } catch (err) {
             attempt++;
-            const status = err && err.statusCode ? err.statusCode : err && err.code ? err.code : null;
+            const status = _extractStatus(err);
             if (status === 429) {
                 // Trip the shared breaker immediately so every OTHER in-flight or
                 // future call backs off too, not just this one's own retry loop.

@@ -354,6 +354,11 @@ function getMidCapSymbols() {
         'MTDR', 'CRGY', 'VTLE', 'GPRE', 'RES', 'NGL', 'PUMP', 'PTEN', 'NINE', 'KOS',
         // REITs — specialty mid-cap
         'COLD', 'IIPR', 'STAG', 'EGP', 'REXR', 'NNN', 'RHP', 'DEA', 'PLYM', 'ROIC',
+        // Materials — gold/silver/precious-metals miners, industrial metals (not S&P 500,
+        // so absent from getSP500Symbols' Materials section above — added here specifically
+        // for gold-sector exposure, since GLD/GDX (the ETF route) never scored, ever).
+        'GOLD', 'AEM', 'KGC', 'AU', 'HL', 'CDE', 'PAAS', 'SSRM', 'RGLD', 'WPM',
+        'AA', 'CLF', 'X', 'CMC', 'RS', 'SCCO', 'TECK', 'MP',
     ];
 }
 
@@ -397,6 +402,14 @@ async function getSP500Symbols() {
         // Utilities + REITs (15)
         'NEE', 'DUK', 'SO', 'AEP', 'EXC', 'SRE', 'PEG', 'AMT', 'PLD', 'CCI',
         'EQIX', 'PSA', 'WELL', 'SPG', 'O',
+        // Materials — chemicals, industrial metals, gold miners (S&P 500 constituents).
+        // Previously the ONLY sector with no dedicated names at all: the sole coverage was
+        // GLD/XLB (ETFs, not individual stocks), and both scored ai_score=NULL every single
+        // day going back to at least May and dropped out of the scan universe entirely after
+        // 2026-06-01 — Materials/Gold had effectively zero working coverage (found 2026-08-24).
+        'LIN', 'SHW', 'ECL', 'APD', 'FCX', 'NEM', 'NUE', 'DOW', 'DD', 'PPG',
+        'VMC', 'MLM', 'ALB', 'CTVA', 'IFF', 'CF', 'MOS', 'AVY', 'PKG', 'IP',
+        'BALL', 'STLD', 'AMCR', 'LYB', 'CE', 'EMN',
     ];
 }
 

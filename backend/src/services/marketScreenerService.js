@@ -359,6 +359,13 @@ function getMidCapSymbols() {
         // for gold-sector exposure, since GLD/GDX (the ETF route) never scored, ever).
         'GOLD', 'AEM', 'KGC', 'AU', 'HL', 'CDE', 'PAAS', 'SSRM', 'RGLD', 'WPM',
         'AA', 'CLF', 'X', 'CMC', 'RS', 'SCCO', 'TECK', 'MP',
+        // Uranium/nuclear — zero prior coverage despite being one of the more actively
+        // trending momentum themes (AI datacenter power demand), and crypto miners as
+        // their own high-beta category distinct from COIN (found 2026-08-24).
+        'CCJ', 'SMR', 'OKLO', 'NNE', 'LEU', 'UUUU', 'DNN', 'UEC',
+        'MARA', 'RIOT', 'CLSK', 'CIFR',
+        // Smaller airlines (majors DAL/UAL/AAL/LUV are in the S&P 500 list above)
+        'ALK', 'JBLU',
     ];
 }
 
@@ -410,6 +417,16 @@ async function getSP500Symbols() {
         'LIN', 'SHW', 'ECL', 'APD', 'FCX', 'NEM', 'NUE', 'DOW', 'DD', 'PPG',
         'VMC', 'MLM', 'ALB', 'CTVA', 'IFF', 'CF', 'MOS', 'AVY', 'PKG', 'IP',
         'BALL', 'STLD', 'AMCR', 'LYB', 'CE', 'EMN',
+        // Airlines, homebuilders, defense, insurance, gaming, AI-networking hardware —
+        // each had zero dedicated coverage (found auditing sector gaps 2026-08-24, same
+        // sweep that found Materials/Gold). LMT/RTX/BA already covered defense partially;
+        // this fills in the rest of that sector plus five others with none at all.
+        'DAL', 'UAL', 'AAL', 'LUV',
+        'DHI', 'LEN', 'PHM', 'NVR',
+        'GD', 'NOC', 'LHX', 'LDOS', 'HII', 'TXT',
+        'TRV', 'MET', 'PRU', 'AFL', 'HIG',
+        'LVS', 'WYNN', 'MGM', 'CZR', 'DKNG',
+        'ANET', 'CIEN', 'FFIV', 'DLR',
     ];
 }
 

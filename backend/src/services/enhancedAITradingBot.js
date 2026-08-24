@@ -4915,6 +4915,11 @@ async function manageExistingPositions(userId) {
                 }
 
                 if (shouldSell && sellQuantity > 0) {
+                    // Captured BEFORE the broker-qty guard below can touch sellQuantity — tells
+                    // that guard whether this was a "sell everything" exit (stop-loss, trailing
+                    // stop, take-profit, etc.) as opposed to a deliberate partial sell.
+                    const intendedFullExit = parseFloat(sellQuantity) >= parseFloat(holding.quantity);
+
                     // ── Alpaca long-position guard ──────────────────────────────────────
                     // Before placing a sell order in Alpaca, verify we actually hold a long
                     // position there. If the DB says we own it but Alpaca doesn't, selling
@@ -4959,6 +4964,20 @@ async function manageExistingPositions(userId) {
                             if (alpacaQty < sellQuantity) {
                                 logger.warn('[AlpacaGuard] Capping sell qty to Alpaca position', {
                                     userId, symbol: holding.symbol, requested: sellQuantity, actual: alpacaQty
+                                });
+                                sellQuantity = alpacaQty;
+                            } else if (intendedFullExit && alpacaQty > sellQuantity) {
+                                // Full-exit intent but Alpaca's live qty is LARGER than our stored
+                                // holding.quantity. trades/holdings.quantity are NUMERIC(18,8) while
+                                // Alpaca fills fractional buys with 9-decimal precision — the 9th
+                                // digit silently truncates on write, so a "sell everything" order
+                                // built from our own stored qty always undersold by up to ~5e-9
+                                // shares, leaving a permanent near-zero dust position behind.
+                                // Confirmed on AZO/PNC (kmadined account), both off by exactly
+                                // 0.000000003 shares from this exact truncation (2026-08-23).
+                                // Sync exactly to Alpaca's live qty instead of only capping downward.
+                                logger.info('[AlpacaGuard] Syncing full-exit qty to Alpaca (avoids fractional dust)', {
+                                    userId, symbol: holding.symbol, dbQty: sellQuantity, alpacaQty
                                 });
                                 sellQuantity = alpacaQty;
                             }

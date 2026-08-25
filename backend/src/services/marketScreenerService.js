@@ -215,8 +215,18 @@ async function _buildStockUniverse() {
             const assetUniverseService = require('./assetUniverseService');
             dbUniverseSymbols = await assetUniverseService.getDailyUniverseSymbols();
             if (dbUniverseSymbols.length > 0) {
-                // Add with tier 3 (unknown — will be scored by HERMES like any other)
-                dbUniverseSymbols.forEach(sym => { if (!tierMap.has(sym)) tierMap.set(sym, 3); });
+                // Tier 6, not 3 — deliberately distinct from the curated "Tier 3: earnings
+                // watch" bucket below. This pool is now Alpaca's full ~13,000-symbol active
+                // list (fixed 2026-08-24), and the earnings-check block a few lines down
+                // does a per-symbol Yahoo quoteSummary call for every tier that isn't 2/4/
+                // ETF/speculative — at ~12,400 DB-driven symbols against the shared 30/min
+                // Yahoo throttle, that alone is 400+ minutes per build even with zero
+                // failures, which is what actually made a single getStockUniverse() build
+                // take many hours (found 2026-08-25, right after fixing the cache-stampede
+                // that was compounding it). Tier 6 is still scored by HERMES like any other —
+                // it just skips the earnings-proximity refinement, which was only ever a
+                // meaningful signal for the small curated list, not a 12k-symbol bulk pool.
+                dbUniverseSymbols.forEach(sym => { if (!tierMap.has(sym)) tierMap.set(sym, 6); });
                 staticSymbols = [...new Set([...staticSymbols, ...dbUniverseSymbols])];
                 console.log(`[HERMES] DB universe: +${dbUniverseSymbols.length} Alpaca symbols merged (total static: ${staticSymbols.length})`);
             }
@@ -260,10 +270,13 @@ async function _buildStockUniverse() {
                         let industry = quote.industry || 'Unknown';
 
                         // --- Tier 3: Earnings watch (within 20 days) ---
+                        // Excludes tier 6 (bulk DB-driven pool, ~12,400 symbols) — see the
+                        // tier-6 assignment comment above for why this one check alone made
+                        // a full build take 400+ minutes against the shared Yahoo throttle.
                         let daysToEarnings = null;
-                        if (!isETF && !isSpec && tier !== 4 && tier !== 2) {
+                        if (!isETF && !isSpec && tier !== 4 && tier !== 2 && tier !== 6) {
                             try {
-                                // Only check for non-ETF, non-speculative, non-midcap, non-megacap
+                                // Only check for non-ETF, non-speculative, non-midcap, non-megacap, non-bulk-DB
                                 const summary = await yahooFinance.quoteSummary(symbol, { modules: ['calendarEvents'] });
                                 const earningsDate = summary?.calendarEvents?.earnings?.earningsDate?.[0];
                                 if (earningsDate) {

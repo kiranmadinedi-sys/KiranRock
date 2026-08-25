@@ -389,6 +389,10 @@ function getMidCapSymbols() {
         // Energy — oil & gas, clean energy
         'ENPH', 'SEDG', 'ARRY', 'BE', 'PLUG', 'RUN', 'CEIX', 'CHRD', 'CIVI', 'SM',
         'MTDR', 'CRGY', 'VTLE', 'GPRE', 'RES', 'NGL', 'PUMP', 'PTEN', 'NINE', 'KOS',
+        // Offshore drilling — distinct sub-segment from the upstream E&P names above
+        // (XOM/CVX/OXY etc. in the S&P 500 list). RIG (Transocean, $6.6B, Swiss-domiciled
+        // so not S&P 500 eligible) found missing 2026-08-25.
+        'RIG',
         // REITs — specialty mid-cap
         'COLD', 'IIPR', 'STAG', 'EGP', 'REXR', 'NNN', 'RHP', 'DEA', 'PLYM', 'ROIC',
         // Materials — gold/silver/precious-metals miners, industrial metals (not S&P 500,

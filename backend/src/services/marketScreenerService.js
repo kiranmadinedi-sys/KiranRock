@@ -394,13 +394,42 @@ function getMidCapSymbols() {
         // Materials — gold/silver/precious-metals miners, industrial metals (not S&P 500,
         // so absent from getSP500Symbols' Materials section above — added here specifically
         // for gold-sector exposure, since GLD/GDX (the ETF route) never scored, ever).
-        'GOLD', 'AEM', 'KGC', 'AU', 'HL', 'CDE', 'PAAS', 'SSRM', 'RGLD', 'WPM',
-        'AA', 'CLF', 'X', 'CMC', 'RS', 'SCCO', 'TECK', 'MP',
+        // 'GOLD' was a mistake here (2026-08-24): Barrick Gold renamed to "Barrick Mining
+        // Corporation" and moved to ticker B ($78B market cap) — the vacated GOLD ticker
+        // was picked up by an unrelated $1.3B company, "Gold.com, Inc.". Found and fixed
+        // 2026-08-25 auditing for other misses like CBRS. VALE (Vale SA, major iron-ore
+        // miner) added alongside — same category, was also missing.
+        'B', 'AEM', 'KGC', 'AU', 'HL', 'CDE', 'PAAS', 'SSRM', 'RGLD', 'WPM',
+        'AA', 'CLF', 'X', 'CMC', 'RS', 'SCCO', 'TECK', 'MP', 'VALE',
         // Uranium/nuclear — zero prior coverage despite being one of the more actively
         // trending momentum themes (AI datacenter power demand), and crypto miners as
         // their own high-beta category distinct from COIN (found 2026-08-24).
         'CCJ', 'SMR', 'OKLO', 'NNE', 'LEU', 'UUUU', 'DNN', 'UEC',
         'MARA', 'RIOT', 'CLSK', 'CIFR',
+        // AI-datacenter power & cooling infrastructure — a whole theme with zero prior
+        // coverage despite being directly adjacent to the uranium/nuclear one above (that's
+        // power generation; this is delivery, grid buildout, and cooling). Found 2026-08-25
+        // ranking the full market by dollar volume and diffing against this list — GEV, VRT,
+        // and CEG all placed in the top ~150 most actively-traded US stocks that day.
+        'GEV', 'VRT', 'CEG', 'VST', 'PWR', 'FIX', 'TT', 'CMI', 'HWM',
+        // AI-optical-networking hardware — extends the ANET/CIEN/FFIV coverage already in
+        // the S&P 500 list above with names not yet index-eligible.
+        'LITE', 'COHR', 'CRDO', 'AAOI', 'APH',
+        // Major global ADRs — not S&P 500 eligible (foreign-domiciled) but among the most
+        // heavily-traded US-listed names, full stop. SHOP (Canada) and SPOT (Luxembourg)
+        // grouped here too for the same reason, despite being large/well-known.
+        'TSM', 'BABA', 'PDD', 'SHOP', 'SPOT',
+        // Crypto-finance ecosystem — extends the crypto-miner coverage above with the
+        // adjacent categories (Bitcoin-treasury proxy, stablecoin issuer, mining/AI pivot).
+        'MSTR', 'CRCL', 'IREN', 'BMNR',
+        // AI infrastructure / compute — cloud GPU, AI inference, quantum, automation.
+        'NBIS', 'CRWV', 'IONQ', 'TEM', 'PATH',
+        // Memory — SanDisk, spun off from Western Digital in 2025; WDC/STX/MU already
+        // covered memory/storage broadly, this was the one clear remaining gap.
+        'SNDK',
+        // Individually notable large caps that turned up missing in the same dollar-volume
+        // sweep — no unifying theme, just real gaps (Carvana, SoFi, AXT).
+        'CVNA', 'SOFI', 'AXTI',
         // Smaller airlines (majors DAL/UAL/AAL/LUV are in the S&P 500 list above)
         'ALK', 'JBLU',
     ];
@@ -464,6 +493,9 @@ async function getSP500Symbols() {
         'TRV', 'MET', 'PRU', 'AFL', 'HIG',
         'LVS', 'WYNN', 'MGM', 'CZR', 'DKNG',
         'ANET', 'CIEN', 'FFIV', 'DLR',
+        // True S&P 500 constituents that turned up missing in the same dollar-volume sweep
+        // (2026-08-25) — Berkshire Hathaway is a top-10 index weight, this was a notable gap.
+        'BRK.B', 'F', 'SYK', 'HUM', 'DKS',
     ];
 }
 

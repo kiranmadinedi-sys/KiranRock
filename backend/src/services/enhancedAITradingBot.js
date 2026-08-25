@@ -2541,6 +2541,25 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
         }
     }
     
+    // Per-user scan outcome summary — analyzeStockWithAI itself is shared/cached across
+    // users (its own "AI Decision" log line carries no userId, by design, so the same
+    // analysis isn't redone per user), which made it impossible to tell whether a given
+    // user's scan cycle ever actually saw a qualifying candidate versus finding none.
+    // Needed this 2026-08-25 tracing why anilboddu1 has gone ~19 days without a trade
+    // despite a low (65) score bar — couldn't tell from logs whether candidates were
+    // scored and fell short, or something upstream (e.g. the known zero-holdings
+    // full-loop-every-cycle cost flagged in the comment below) kept the loop from
+    // ever completing far enough to know.
+    const _topScore = allAnalyzed.length
+        ? Math.max(...allAnalyzed.map(a => Number(a.aiScore) || 0)) : null;
+    logger.info('User scan outcome', {
+        userId,
+        candidatesAnalyzed: allAnalyzed.length,
+        opportunitiesFound: opportunities.length,
+        topScore: _topScore,
+        minBuyScore
+    });
+
     // Refresh sector rotation cache from this scan (applied as boost/penalty in the next cycle)
     if (allAnalyzed.length > 0) {
         refreshSectorRotationCache(allAnalyzed);

@@ -408,12 +408,36 @@ async function getKellyMetrics(userId, minTrades = 10) {
 async function getConsecutiveLosses(userId) {
     try {
         const result = await query(`
-            SELECT total_profit_loss
+            SELECT date, total_profit_loss
             FROM ai_performance_metrics
             WHERE user_id = $1
             ORDER BY date DESC
             LIMIT 20
         `, [userId]);
+
+        // A row here is only ever written as a side-effect of a completed trade
+        // (updateDailyLoss), not a scheduled daily snapshot — there is no "flat $0 day"
+        // row for a day nothing traded. That makes this streak a permanent deadlock for
+        // any account that stops trading while mid-streak: the 0.5x/0x sizing penalty
+        // this feeds shrinks positions below the $100 minimum notional, which stops
+        // trades, which stops new rows from ever being written, which leaves the same
+        // stale streak in place forever with no way to complete the trade that would
+        // reset it. Confirmed live 2026-08-25: anilboddu1's most recent row was from
+        // 2026-07-23 — a full month stale — and was still actively halving today's
+        // position sizes to $38 on a stock that scored 100. A losing streak that old
+        // is no longer a meaningful "trading badly right now" signal, so treat it as
+        // expired rather than let ancient data indefinitely suppress a healthy account.
+        const STALE_DAYS = 10;
+        if (result.rows.length > 0) {
+            const mostRecentDate = new Date(result.rows[0].date);
+            const ageDays = (Date.now() - mostRecentDate.getTime()) / 86400000;
+            if (ageDays > STALE_DAYS) {
+                logger.info('[CircuitBreaker] Loss streak expired — most recent data is stale', {
+                    userId, ageDays: Math.round(ageDays), mostRecentDate: result.rows[0].date
+                });
+                return 0;
+            }
+        }
 
         let streak = 0;
         for (const row of result.rows) {

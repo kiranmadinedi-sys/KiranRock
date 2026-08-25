@@ -955,17 +955,21 @@ async function runNightlyScanTrigger() {
     const etMin  = et.getMinutes();
     const etDate = et.toISOString().slice(0, 10);
 
-    // Mon–Fri only, either the main evening window (4:15 PM–11 PM ET, right after
-    // close) or a morning catch-up window (6:00–9:25 AM ET, before/at open) for when
-    // the prior evening's run never completed. The raw symbol universe already had
-    // a self-heal for exactly this case (assetUniverseScheduler's runPremarketRefresh);
-    // the AI-scored analysis never did — found 2026-08-24 when Monday's bot traded the
-    // whole morning on Saturday's scan with literally no path to a fresher one until
-    // 4:15 PM that evening, no matter how incomplete Friday's run had been.
+    // One continuous overnight window: 4:15 PM ET (15 min after close) through 9:25 AM ET
+    // the next morning (5 min before open) — the entire quiet stretch when there's no live
+    // trading to compete with for API throughput. Previously this was two separate windows
+    // (4:15 PM–11 PM, then 6:00–9:25 AM) with a 7-hour dead zone between 11 PM and 6 AM
+    // where an incomplete scan just sat stalled doing nothing — found 2026-08-25: the scan
+    // now switched to the full ~13,000-symbol universe (see the getStockUniverse() comment
+    // a few lines below in nightlyUniverseScanService.js) genuinely needs the full night to
+    // reliably finish before market open, not just fragments of it. Modeled as "blocked
+    // only during market-adjacent daytime hours" (9:26 AM–4:14 PM ET) rather than two
+    // separate allow-windows, so it naturally covers the full night including the midnight
+    // crossover without special-casing it.
     if (etDay < 1 || etDay > 5) return;
-    const inEveningWindow = (etHour > 16 || (etHour === 16 && etMin >= 15)) && etHour < 23;
-    const inMorningCatchupWindow = etHour >= 6 && (etHour < 9 || (etHour === 9 && etMin <= 25));
-    if (!inEveningWindow && !inMorningCatchupWindow) return;
+    const inDaytimeBlock = (etHour > 9 || (etHour === 9 && etMin > 25)) &&
+                            (etHour < 16 || (etHour === 16 && etMin < 15));
+    if (inDaytimeBlock) return;
 
     // Already confirmed complete for today
     if (_scanCompletedDate === etDate) return;

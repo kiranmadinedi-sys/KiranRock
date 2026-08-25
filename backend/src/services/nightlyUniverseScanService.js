@@ -204,18 +204,33 @@ async function runNightlyUniverseScan(opts = {}) {
     let analyzed = 0, passed = 0, filtered = 0, failed = 0;
 
     try {
-        // Use the static symbol list — no Yahoo Finance calls for universe discovery.
-        // getStockUniverse() hits Yahoo for every symbol to get price/volume data,
-        // which floods the rate limit before AI analysis even starts.
-        // analyzeStockWithAI() fetches its own data per-ticker at a safe throttled rate.
+        // Full market universe via getStockUniverse() — HERMES-filtered by real market cap
+        // (≥$2B) and volume (≥300K avg) across the whole ~13,000-symbol Alpaca-tradable
+        // pool, capped to the best HERMES_MAX_STOCKS by tier+relative-strength. Switched
+        // from the hand-curated static list (getStockOnlySymbolList) on 2026-08-25 — that
+        // list required someone to notice and manually add every individual company (RIG,
+        // CBRS, and the other 2026-08-24/25 gap-hunting sessions found dozens missing this
+        // way), when the actual reason it existed — getStockUniverse() flooding Yahoo's
+        // rate limit before AI analysis even started — no longer applies after this
+        // session's fixes (Polygon-first quotes, the cache-stampede fix, and excluding the
+        // bulk DB-driven tier from the per-symbol earnings check). A cold getStockUniverse()
+        // build now takes ~20-30 min (validated live), and it's shared/cached 24h across
+        // every other caller (istPipelineScheduler ticks it every 60s all day), so in
+        // practice this scan usually rides an already-warm cache instead of paying that
+        // cost itself. The AI-analysis loop below is completely unchanged — same pacing
+        // (BATCH_SIZE=1, 10s delay), same per-symbol cost — only the candidate SOURCE
+        // changed, and the result stays bounded by HERMES_MAX_STOCKS either way, so this
+        // does not turn into an unbounded flood of the ~13,000 raw pool.
         const _timeout = (p, ms, fallback) =>
             Promise.race([p, new Promise(r => setTimeout(() => r(fallback), ms))]);
 
-        const [symbolList, vixLevel, regime] = await Promise.all([
-            marketScreenerService.getStockOnlySymbolList(), // ETFs excluded — analyzeStockWithAI returns null for them
+        const [fullUniverse, vixLevel, regime] = await Promise.all([
+            marketScreenerService.getStockUniverse(),
             _timeout(getVixLevel(), 15000, 15),                          // fallback VIX=15 if Yahoo hangs
             _timeout(marketRegimeService.getMarketRegime(), 15000, null) // fallback regime=null → NEUTRAL
         ]);
+        // ETFs excluded — analyzeStockWithAI returns null for them (no earnings/fundamentals)
+        const symbolList = fullUniverse.filter(s => !s.isETF).map(s => s.symbol);
 
         let symbols = symbolList;
 

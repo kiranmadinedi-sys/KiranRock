@@ -484,8 +484,16 @@ async function getTopNasdaqSymbols() {
         'TTD', 'TWLO', 'HUBS', 'BILL', 'ZI', 'SMAR', 'ESTC', 'MDB', 'GTLB', 'CFLT',
         'IOT', 'AEHR', 'ASTS', 'RKLB', 'ACHR', 'JOBY', 'EVTL', 'LIDR', 'LUNR', 'RDW',
         // AI / Semiconductor cycle
+        // CBRS (Cerebras Systems, $46.6B mkt cap, IPO'd 2026-05-14, AI training/inference
+        // hardware) was missing — the recent-IPO auto-catch (getRecentIPOSymbols) exists
+        // and does fire, but 95% of asset_universe's rows carry a placeholder
+        // first_added_at (2000-01-01) instead of a real date, so it can never match the
+        // 90-day window. That's a real, systemic bug (found 2026-08-25) — flagged, not
+        // fixed here: a blanket "set every placeholder to NOW()" would make it worse,
+        // flooding the recent-IPO list with thousands of unrelated old symbols all tied
+        // for "most recent" instead of surfacing genuinely new ones. Added CBRS directly.
         'ARM', 'SMCI', 'ALAB', 'NVDA', 'AMD', 'AVGO', 'QCOM', 'MRVL', 'MCHP', 'ON',
-        'TER', 'MKSI', 'ENTG', 'IPGP', 'CEVA', 'SLAB', 'DIOD', 'SITM', 'ALGM', 'MPWR',
+        'TER', 'MKSI', 'ENTG', 'IPGP', 'CEVA', 'SLAB', 'DIOD', 'SITM', 'ALGM', 'MPWR', 'CBRS',
         // Biotech momentum
         'MRNA', 'BNTX', 'RXRX', 'SANA', 'BEAM', 'EDIT', 'CRSP', 'NTLA', 'FATE', 'KYMR',
     ];

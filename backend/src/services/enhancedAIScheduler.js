@@ -1030,6 +1030,81 @@ async function runNightlyScanTrigger() {
         .catch(err => console.error('[NightlyScanTrigger] Run error:', err.message));
 }
 
+// Debounce state for runScanHealthCheck — module-level so it survives across the
+// 5-minute ticks that call it.
+let _lastStallAlertAt     = 0;
+let _deadlineAlertSentFor = null;
+
+/**
+ * Nightly scan health check — the actual gap this closes: every failure mode found
+ * this session (the 38-min/symbol slowdown, the cache stampede, the 7+ hour single-build
+ * cost) was only ever discovered by manually watching logs for hours. Nothing paged
+ * anyone when the scan silently underperformed. Two checks, both admin-only via the
+ * existing alertNightlyScanFailure Telegram alert:
+ *   1. Stall detection — the scan believes it's still running (isScanRunning() true)
+ *      but hasn't written a new scored symbol in 45+ minutes. Fires at most once per
+ *      hour so a genuinely slow-but-alive scan doesn't spam.
+ *   2. Deadline miss — checked once, in the last few minutes before market open: did
+ *      today's scan actually reach SCAN_COMPLETE_THRESHOLD? If not, today's trading
+ *      is about to run on stale/fallback data and someone should know before 9:30,
+ *      not discover it by accident hours later.
+ */
+async function runScanHealthCheck() {
+    const et    = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const etDay = et.getDay();
+    if (etDay < 1 || etDay > 5) return;
+    const etHour = et.getHours();
+    const etMin  = et.getMinutes();
+    const etDate = et.toISOString().slice(0, 10);
+
+    const nightlyScanSvc = require('./nightlyUniverseScanService');
+
+    // --- Stall detection ---
+    if (nightlyScanSvc.isScanRunning()) {
+        try {
+            const { rows } = await query(
+                `SELECT MAX(created_at) AS last_write,
+                        COUNT(*) FILTER (WHERE ai_score IS NOT NULL) AS scored
+                 FROM daily_universe_analysis WHERE analysis_date = CURRENT_DATE`
+            );
+            const lastWrite     = rows[0]?.last_write ? new Date(rows[0].last_write) : null;
+            const scored        = parseInt(rows[0]?.scored ?? 0, 10);
+            const staleMinutes  = lastWrite ? (Date.now() - lastWrite.getTime()) / 60000 : Infinity;
+            const cooldownOk    = Date.now() - _lastStallAlertAt > 60 * 60 * 1000;
+
+            if (staleMinutes >= 45 && cooldownOk) {
+                _lastStallAlertAt = Date.now();
+                await alertService.alertNightlyScanFailure({
+                    analyzed: scored, universe: 0, failed: 0,
+                    reason: `Scan appears stalled — no new symbol scored in ${Math.round(staleMinutes)} min, still marked running`
+                });
+            }
+        } catch (e) {
+            console.warn('[ScanHealthCheck] Stall check failed:', e.message);
+        }
+    }
+
+    // --- Deadline miss — check once, 9:20-9:29 AM ET, right before open ---
+    if (etHour === 9 && etMin >= 20 && etMin <= 29 && _deadlineAlertSentFor !== etDate) {
+        try {
+            const { rows } = await query(
+                `SELECT COUNT(*) FILTER (WHERE ai_score IS NOT NULL) AS scored
+                 FROM daily_universe_analysis WHERE analysis_date = CURRENT_DATE`
+            );
+            const scored = parseInt(rows[0]?.scored ?? 0, 10);
+            if (scored < SCAN_COMPLETE_THRESHOLD) {
+                _deadlineAlertSentFor = etDate;
+                await alertService.alertNightlyScanFailure({
+                    analyzed: scored, universe: SCAN_COMPLETE_THRESHOLD, failed: 0,
+                    reason: `Only ${scored} symbols scored before market open — today's trading will run on stale/fallback data`
+                });
+            }
+        } catch (e) {
+            console.warn('[ScanHealthCheck] Deadline check failed:', e.message);
+        }
+    }
+}
+
 /**
  * Pre-Market Gap Briefing — fires once at 8:30 AM ET Mon-Fri.
  * Checks each STRONG BUY setup from last night's scan against the current
@@ -1391,6 +1466,7 @@ function startScheduler() {
         runScheduledTrading();
         runEodCleanup();                   // cancel partial fills at 15:44 ET
         runNightlyScanTrigger();           // nightly universe scan at 16:15 ET (after close)
+        runScanHealthCheck();              // stall/deadline alert — catches a bad scan in hours, not days
         runWeeklyParameterHealthCheck();   // Friday 15:45 ET: health check + backtest summary
         runMorningBriefing();              // 8:00 AM ET Mon-Fri: STRONG BUY pre-market alert
         runPremarketGapBriefing();         // 8:30 AM ET Mon-Fri: gap check on tonight's setups

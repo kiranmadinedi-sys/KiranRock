@@ -27,6 +27,20 @@ const TIER5_SPECULATIVE = [
 let cachedStockUniverse = null;
 let lastScreenTime = null;
 const CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
+// In-flight build, shared by every concurrent caller instead of each starting its own.
+// Without this, a build slower than the calling interval (istPipelineScheduler alone
+// calls getStockUniverse() from 3 places inside its own 60-second loop) means every
+// caller during that window sees no valid cache yet and kicks off its own independent
+// full rebuild — a classic cache stampede. Harmless when a rebuild was fast (small
+// candidate pool), but the DB-driven pool now correctly resolves to ~13,000 symbols
+// (fixed 2026-08-24 asset-universe date bug) instead of an ~800-symbol fallback, so a
+// single build now takes many minutes — long enough for dozens of redundant concurrent
+// rebuilds to pile up over a day, each competing for the same Yahoo/Alpaca/Polygon
+// throughput as the nightly AI scan. Found 2026-08-25 diagnosing why the nightly scan's
+// per-symbol rate degraded from ~4 min to ~50+ min over its run: 43 full rebuilds fired
+// in one day (should be ~1 per 24h) with zero "Returning cached universe" hits between
+// them — the cache was never once winning the race before another rebuild started.
+let _buildingPromise = null;
 
 // ── Relative Strength Score ───────────────────────────────────────────────────
 // IBD-style RS proxy using live quote fields only (no extra API calls).
@@ -153,8 +167,18 @@ async function getStockUniverse() {
         return cachedStockUniverse;
     }
 
-    console.log('[Market Screener] Fetching fresh stock universe...');
+    // A build is already in flight — share it instead of starting a redundant one.
+    // See the _buildingPromise declaration above for why this matters now.
+    if (_buildingPromise) {
+        return _buildingPromise;
+    }
 
+    console.log('[Market Screener] Fetching fresh stock universe...');
+    _buildingPromise = _buildStockUniverse().finally(() => { _buildingPromise = null; });
+    return _buildingPromise;
+}
+
+async function _buildStockUniverse() {
     try {
         const desired = (process.env.STOCK_UNIVERSE || 'ALL').toUpperCase();
         let staticSymbols = [];

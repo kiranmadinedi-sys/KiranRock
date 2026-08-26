@@ -232,15 +232,27 @@ async function runNightlyUniverseScan(opts = {}) {
         // this Promise.all forever, taking the nightly scan AND every other
         // getStockUniverse() caller (istPipelineScheduler's HERMES stage included, via the
         // shared _buildingPromise) down with it for 5h45m with zero error/crash logged.
-        // 20 min is generous headroom above the validated 20-30 min cold-build time.
+        //
+        // IMPORTANT: this was first shipped at 20 min and had to be corrected same night —
+        // a real (non-hung) pass over the full ~13,000-symbol pool legitimately takes well
+        // over an hour even with the per-call timeouts in place (batches of 10, 2s between
+        // batches, individual calls that can each legitimately take up to 15s). 20 min fired
+        // on every healthy build, aborted it, reset _scanRunning, and let the next 5-min
+        // scheduler tick immediately retry against the SAME still-in-flight shared
+        // _buildingPromise — an infinite "abort at 20min, retry, abort at 20min" loop that
+        // never let missingOnly resume mode make any real progress (repeatedly observed
+        // live: '+0 analyzed ... 0.0min' followed by the same 'Resuming (43 done...)'
+        // checkpoint, over and over). 3h is comfortably above the realistic worst case and
+        // this now only exists as a true last-resort backstop, not a normal-operation bound.
         const [fullUniverse, vixLevel, regime] = await Promise.all([
-            _timeout(marketScreenerService.getStockUniverse(), 20 * 60 * 1000, []),
+            _timeout(marketScreenerService.getStockUniverse(), 3 * 60 * 60 * 1000, []),
             _timeout(getVixLevel(), 15000, 15),                          // fallback VIX=15 if Yahoo hangs
             _timeout(marketRegimeService.getMarketRegime(), 15000, null) // fallback regime=null → NEUTRAL
         ]);
         if (fullUniverse.length === 0) {
-            console.error('[NightlyScan] getStockUniverse() timed out after 20min — aborting this run rather than scanning an empty universe');
-            return { analyzed: 0, passed: 0, filtered: 0, failed: 0, date: today, elapsedMin: '0.0', error: 'universe_timeout' };
+            const elapsedMin = ((Date.now() - startTime) / 60000).toFixed(1);
+            console.error(`[NightlyScan] getStockUniverse() timed out after 3h — aborting this run rather than scanning an empty universe (elapsed ${elapsedMin}min)`);
+            return { analyzed: 0, passed: 0, filtered: 0, failed: 0, date: today, elapsedMin, error: 'universe_timeout' };
         }
         // ETFs excluded — analyzeStockWithAI returns null for them (no earnings/fundamentals)
         const symbolList = fullUniverse.filter(s => !s.isETF).map(s => s.symbol);

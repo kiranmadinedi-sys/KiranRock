@@ -13,6 +13,36 @@ const extendedHoursTradingService = require('./extendedHoursTradingService');
  * Runs autonomous trading for all enabled users during market hours
  */
 
+// Safe ET "now" accessor — returns wall-clock ET day-of-week, hour, minute, and calendar
+// date, derived directly from Intl.DateTimeFormat's ET-formatted parts. Replaces the
+// pattern used throughout this file until 2026-08-25,
+// `new Date(new Date().toLocaleString('en-US', {timeZone:'America/New_York'}))
+//    .toISOString().slice(0, 10)`,
+// which has two independent bugs: (1) re-parsing an already-localized string
+// reinterprets it in the machine's OWN local timezone, not ET; (2) even setting that
+// aside, .toISOString() always normalizes to UTC, so the date portion reflects the UTC
+// calendar day, not the ET one — meaning every site using this pattern reported
+// TOMORROW's date for the entire 8 PM-midnight ET window, every single day, regardless
+// of the machine's own timezone. Confirmed firing live 2026-08-25 ~9:30 PM ET: the
+// nightly scan trigger read etDate as 2026-08-26 — a full day ahead of the true ET
+// date — and launched a redundant full re-scan of a day that had already completed.
+function _getETNow() {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York',
+        weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit'
+    });
+    const parts = formatter.formatToParts(new Date());
+    const get = (type) => parts.find(p => p.type === type).value;
+    const weekdayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+    return {
+        day:  weekdayMap[get('weekday')],
+        hour: parseInt(get('hour'), 10) % 24, // Intl can return '24' for midnight
+        min:  parseInt(get('minute'), 10),
+        date: `${get('year')}-${get('month')}-${get('day')}`
+    };
+}
+
 // Check every 5 minutes
 const CHECK_INTERVAL = 5 * 60 * 1000;
 let schedulerInterval = null;
@@ -673,11 +703,7 @@ async function runDailyDigest(activeUsers, etDate) {
 let _morningReconRanDate = null;
 
 async function runMorningReconciliationTick() {
-    const et    = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const day   = et.getDay();   // 0=Sun … 6=Sat
-    const hour  = et.getHours();
-    const min   = et.getMinutes();
-    const etDate = et.toISOString().slice(0, 10);
+    const { day, hour, min, date: etDate } = _getETNow();
 
     // Mon-Fri only, 09:00-09:09 ET window (before market open at 09:30)
     if (day < 1 || day > 5) return;
@@ -706,11 +732,7 @@ async function runMorningReconciliationTick() {
 let _morningStopVerifyRanDate = null;
 
 async function runMorningStopVerification() {
-    const et    = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const day   = et.getDay();
-    const hour  = et.getHours();
-    const min   = et.getMinutes();
-    const etDate = et.toISOString().slice(0, 10);
+    const { day, hour, min, date: etDate } = _getETNow();
 
     // Mon-Fri only, 09:31-09:44 ET window (just after market open)
     if (day < 1 || day > 5) return;
@@ -829,11 +851,7 @@ let _morningBriefRanDate = null;
 const _morningBriefSentChats = new Set();
 
 async function runMorningBriefing() {
-    const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const day  = et.getDay();   // 0=Sun … 6=Sat
-    const hour = et.getHours();
-    const min  = et.getMinutes();
-    const etDate = et.toISOString().slice(0, 10);
+    const { day, hour, min, date: etDate } = _getETNow();
 
     // Mon-Fri only, 08:00-08:09 ET window
     if (day < 1 || day > 5) return;
@@ -949,11 +967,7 @@ const SCAN_COMPLETE_THRESHOLD = 420; // ~92% of 455-symbol universe (allows for 
 let _scanCompletedDate = null;       // date string when we saw >= threshold for the day
 
 async function runNightlyScanTrigger() {
-    const et     = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const etDay  = et.getDay();   // 0=Sun, 6=Sat
-    const etHour = et.getHours();
-    const etMin  = et.getMinutes();
-    const etDate = et.toISOString().slice(0, 10);
+    const { day: etDay, hour: etHour, min: etMin, date: etDate } = _getETNow();
 
     // One continuous overnight window: 4:15 PM ET (15 min after close) through 9:25 AM ET
     // the next morning (5 min before open) — the entire quiet stretch when there's no live
@@ -1050,12 +1064,8 @@ let _deadlineAlertSentFor = null;
  *      not discover it by accident hours later.
  */
 async function runScanHealthCheck() {
-    const et    = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const etDay = et.getDay();
+    const { day: etDay, hour: etHour, min: etMin, date: etDate } = _getETNow();
     if (etDay < 1 || etDay > 5) return;
-    const etHour = et.getHours();
-    const etMin  = et.getMinutes();
-    const etDate = et.toISOString().slice(0, 10);
 
     const nightlyScanSvc = require('./nightlyUniverseScanService');
 
@@ -1116,11 +1126,7 @@ async function runScanHealthCheck() {
 let _premarketGapRanDate = null;
 
 async function runPremarketGapBriefing() {
-    const et     = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const day    = et.getDay();
-    const hour   = et.getHours();
-    const min    = et.getMinutes();
-    const etDate = et.toISOString().slice(0, 10);
+    const { day, hour, min, date: etDate } = _getETNow();
 
     // Mon-Fri only, 08:30-08:39 ET window
     if (day < 1 || day > 5) return;
@@ -1152,10 +1158,7 @@ async function runPremarketGapBriefing() {
 let _sundayScoutRanDate = null;
 
 async function runSundayGlobalScout() {
-    const et  = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const day  = et.getDay();   // 0 = Sunday
-    const hour = et.getHours();
-    const etDate = et.toISOString().slice(0, 10);
+    const { day, hour, date: etDate } = _getETNow();
 
     // Sunday only, 20:00–20:59 ET window
     if (day !== 0) return;
@@ -1337,11 +1340,7 @@ let _morningDigestRanDate = null;
 const _morningDigestSentChats = new Set();
 
 async function runMorningDigest() {
-    const et    = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const day   = et.getDay();
-    const hour  = et.getHours();
-    const min   = et.getMinutes();
-    const etDate = et.toISOString().slice(0, 10);
+    const { day, hour, min, date: etDate } = _getETNow();
 
     // Mon-Fri only, 09:25-09:34 ET window
     if (day < 1 || day > 5) return;

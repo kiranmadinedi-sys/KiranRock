@@ -269,6 +269,12 @@ async function _buildStockUniverse() {
         const maxStocks  = parseInt(process.env.HERMES_MAX_STOCKS      || '500',        10); // raised to 500
         const fallbackCap = 10000000000;
 
+        // Diagnostic counters — added 2026-08-26 to answer "why does only ~427 of ~13,000
+        // qualify?" with real numbers instead of guessing. Tracks exactly why each
+        // non-velocity symbol was excluded so a future threshold change (if any) is
+        // evidence-based rather than a blind guess.
+        const excludeStats = { capFail: 0, volumeFail: 0, bothFail: 0, quoteErrorFallback: 0, velocityExcluded: 0 };
+
         for (let i = 0; i < allSymbols.length; i += batchSize) {
             const batch = allSymbols.slice(i, i + batchSize);
             const results = await Promise.allSettled(
@@ -331,10 +337,16 @@ async function _buildStockUniverse() {
                                 daysToEarnings,
                             };
                         }
+                        const capOk = marketCap >= capFloor;
+                        const volOk = avgVol >= minVolume;
+                        if (!capOk && !volOk) excludeStats.bothFail++;
+                        else if (!capOk) excludeStats.capFail++;
+                        else excludeStats.volumeFail++;
                         return null;
                     } catch (error) {
                         console.log(`[Market Screener] Error fetching ${symbol}: ${error.message}`);
                         if (!isVelocity) {
+                            excludeStats.quoteErrorFallback++;
                             return {
                                 symbol,
                                 marketCap: fallbackCap,
@@ -351,6 +363,7 @@ async function _buildStockUniverse() {
                                 daysToEarnings: null,
                             };
                         }
+                        excludeStats.velocityExcluded++;
                         return null;
                     }
                 })
@@ -376,6 +389,13 @@ async function _buildStockUniverse() {
             `[HERMES] ✓ Universe: ${selected.length} stocks | ` +
             `${selected.length - velocityCount} static + ${velocityCount} velocity breakouts | ` +
             `sorted by Tier + Relative Strength`
+        );
+        console.log(
+            `[HERMES] Exclusion breakdown (of ${allSymbols.length} candidates): ` +
+            `capFail=${excludeStats.capFail} volumeFail=${excludeStats.volumeFail} ` +
+            `bothFail=${excludeStats.bothFail} quoteErrorFallback=${excludeStats.quoteErrorFallback} ` +
+            `velocityExcluded=${excludeStats.velocityExcluded} qualified=${qualified.length} ` +
+            `(cap floor $${(minCap / 1e9).toFixed(1)}B, volume floor ${minVolume.toLocaleString()})`
         );
         return selected;
     } catch (error) {

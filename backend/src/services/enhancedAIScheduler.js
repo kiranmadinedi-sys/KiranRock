@@ -993,8 +993,14 @@ async function runNightlyScanTrigger() {
     // Querying CURRENT_DATE would always find 0 on the same evening and re-launch redundantly.
     let todayCount = 0;
     try {
+        // COUNT(*) of all rows, not just ai_score IS NOT NULL — the latter never reached
+        // SCAN_COMPLETE_THRESHOLD on a night with any permanent failures (delisted/bad
+        // data symbols), since those write a row with a null score and stay null forever.
+        // Paired with the same fix in nightlyUniverseScanService.js's missingOnly resume
+        // set: found 2026-08-26, both together caused an infinite ~9min retry loop on the
+        // same 17 permanently-failing symbols, all day, every day a batch had failures.
         const { rows } = await query(
-            `SELECT analysis_date, COUNT(*) FILTER (WHERE ai_score IS NOT NULL) AS cnt
+            `SELECT analysis_date, COUNT(*) AS cnt
              FROM daily_universe_analysis
              WHERE analysis_date = (
                  SELECT MAX(analysis_date)

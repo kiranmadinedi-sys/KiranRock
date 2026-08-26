@@ -260,10 +260,22 @@ async function runNightlyUniverseScan(opts = {}) {
         let symbols = symbolList;
 
         // missingOnly mode: skip symbols already stored for today so retries are cheap
+        //
+        // Was `AND ai_score IS NOT NULL` — only treated a *successful* score as "done",
+        // so a symbol that fails permanently (delisted, no data, etc.) never leaves the
+        // remaining set. Found 2026-08-26: 17 symbols failed the main run, and the
+        // automatic 5-min scheduler trigger (runNightlyScanTrigger in
+        // enhancedAIScheduler.js) then re-attempted those same 17 forever — each attempt
+        // ~9min (retry-with-backoff), no error, no progress, indefinitely across the whole
+        // day, since the completion threshold check has the identical bug (fixed alongside
+        // this one). Each symbol already gets 2 in-call attempts with backoff via
+        // _analyzeWithRetry before its row is written, so "row exists at all" is a
+        // reasonable stopping point for the *automatic* trigger — a deliberate one-time
+        // retry later is still available via rescanFailedSymbols()/rescanFailedNightlySymbols.js.
         if (opts.missingOnly) {
             try {
                 const doneRes = await query(
-                    `SELECT symbol FROM daily_universe_analysis WHERE analysis_date = $1::date AND ai_score IS NOT NULL`,
+                    `SELECT symbol FROM daily_universe_analysis WHERE analysis_date = $1::date`,
                     [today]
                 );
                 const doneSet = new Set(doneRes.rows.map(r => r.symbol));

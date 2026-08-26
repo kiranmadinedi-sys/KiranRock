@@ -274,6 +274,7 @@ async function _buildStockUniverse() {
         // non-velocity symbol was excluded so a future threshold change (if any) is
         // evidence-based rather than a blind guess.
         const excludeStats = { capFail: 0, volumeFail: 0, bothFail: 0, quoteErrorFallback: 0, velocityExcluded: 0 };
+        const volumeBuckets = { '250k-300k': 0, '200k-250k': 0, '150k-200k': 0, '100k-150k': 0, '50k-100k': 0, 'under-50k': 0 };
 
         for (let i = 0; i < allSymbols.length; i += batchSize) {
             const batch = allSymbols.slice(i, i + batchSize);
@@ -342,6 +343,20 @@ async function _buildStockUniverse() {
                         if (!capOk && !volOk) excludeStats.bothFail++;
                         else if (!capOk) excludeStats.capFail++;
                         else excludeStats.volumeFail++;
+                        // Bucket cap-passing, volume-failing symbols by their actual avgVol —
+                        // added 2026-08-26 alongside the exclusion breakdown so a future
+                        // HERMES_MIN_AVG_VOLUME change is picked from a real gain/threshold
+                        // curve instead of guessing a number and burning a restart to find out.
+                        // Only counted when cap already passes: a symbol failing on cap too
+                        // wouldn't newly qualify just from lowering the volume floor.
+                        if (capOk && !volOk) {
+                            if      (avgVol >= 250000) volumeBuckets['250k-300k']++;
+                            else if (avgVol >= 200000) volumeBuckets['200k-250k']++;
+                            else if (avgVol >= 150000) volumeBuckets['150k-200k']++;
+                            else if (avgVol >= 100000) volumeBuckets['100k-150k']++;
+                            else if (avgVol >= 50000)  volumeBuckets['50k-100k']++;
+                            else                       volumeBuckets['under-50k']++;
+                        }
                         return null;
                     } catch (error) {
                         console.log(`[Market Screener] Error fetching ${symbol}: ${error.message}`);
@@ -397,6 +412,19 @@ async function _buildStockUniverse() {
             `velocityExcluded=${excludeStats.velocityExcluded} qualified=${qualified.length} ` +
             `(cap floor $${(minCap / 1e9).toFixed(1)}B, volume floor ${minVolume.toLocaleString()})`
         );
+        // Cumulative gain curve: how many MORE symbols would qualify if the volume floor
+        // were lowered to each level, given the current $2B cap floor stays fixed (cap
+        // barely constrains anything — see capFail/bothFail above). Reads directly as
+        // "lower to 200K -> +N tickers" without needing a separate restart to find out.
+        let cumulative = 0;
+        const gainCurve = ['250k-300k', '200k-250k', '150k-200k', '100k-150k', '50k-100k', 'under-50k']
+            .map(bucket => {
+                cumulative += volumeBuckets[bucket];
+                const floorLabel = bucket.split('-')[0];
+                return `${floorLabel}:+${cumulative}`;
+            })
+            .join(' ');
+        console.log(`[HERMES] Volume-floor gain curve (lowering from current ${minVolume.toLocaleString()}): ${gainCurve}`);
         return selected;
     } catch (error) {
         console.error('[Market Screener] Error:', error);

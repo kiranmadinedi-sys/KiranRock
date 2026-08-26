@@ -365,7 +365,20 @@ const alpacaProvider = (() => {
             change:        price && prevClose ? price - prevClose : 0,
             changePercent: price && prevClose ? ((price - prevClose) / prevClose) * 100 : 0,
             volume:        d.Volume   || 0,
-            avgVolume:     d.Volume   || 0,
+            // Alpaca's snapshot has no real rolling-average volume field, so this reused
+            // today's single DailyBar as a stand-in — which silently breaks overnight: once
+            // Alpaca rolls DailyBar over to a fresh, still-forming next session (observed
+            // happening well before midnight ET), that bar reads near-zero for even the most
+            // liquid mega-caps (confirmed live: IBM showed avgVolume=94,999 at 11:39 PM ET,
+            // versus its normal multi-million-share day). Since the nightly scan runs
+            // specifically overnight, this was quietly filtering out the vast majority of
+            // legitimately liquid stocks against HERMES_MIN_AVG_VOLUME every single night —
+            // found 2026-08-25 debugging why the DB-driven pool (~13,000 symbols) was
+            // contributing almost nothing to the qualified candidate list. Taking the max of
+            // today's and the prior completed session's volume is a same-data, no-extra-calls
+            // fix: a genuinely illiquid stock will be low in both, a liquid one high in at
+            // least one, regardless of exactly where in Alpaca's day-rollover this call lands.
+            avgVolume:     Math.max(d.Volume || 0, p.Volume || 0),
             marketCap:     0,
             high52w:       null,
             low52w:        null,

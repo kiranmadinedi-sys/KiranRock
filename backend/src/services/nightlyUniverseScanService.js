@@ -224,11 +224,24 @@ async function runNightlyUniverseScan(opts = {}) {
         const _timeout = (p, ms, fallback) =>
             Promise.race([p, new Promise(r => setTimeout(() => r(fallback), ms))]);
 
+        // getStockUniverse() itself now has per-call timeouts on its own internal Yahoo
+        // calls (fixed 2026-08-26, see marketScreenerService.js's _withTimeout), but this
+        // outer safety net stays too: it's the only thing standing between one unforeseen
+        // unbounded await anywhere in that build chain and a repeat of the 2026-08-26
+        // incident, where a single hung yahooFinance.quote() call — unbounded here — froze
+        // this Promise.all forever, taking the nightly scan AND every other
+        // getStockUniverse() caller (istPipelineScheduler's HERMES stage included, via the
+        // shared _buildingPromise) down with it for 5h45m with zero error/crash logged.
+        // 20 min is generous headroom above the validated 20-30 min cold-build time.
         const [fullUniverse, vixLevel, regime] = await Promise.all([
-            marketScreenerService.getStockUniverse(),
+            _timeout(marketScreenerService.getStockUniverse(), 20 * 60 * 1000, []),
             _timeout(getVixLevel(), 15000, 15),                          // fallback VIX=15 if Yahoo hangs
             _timeout(marketRegimeService.getMarketRegime(), 15000, null) // fallback regime=null → NEUTRAL
         ]);
+        if (fullUniverse.length === 0) {
+            console.error('[NightlyScan] getStockUniverse() timed out after 20min — aborting this run rather than scanning an empty universe');
+            return { analyzed: 0, passed: 0, filtered: 0, failed: 0, date: today, elapsedMin: '0.0', error: 'universe_timeout' };
+        }
         // ETFs excluded — analyzeStockWithAI returns null for them (no earnings/fundamentals)
         const symbolList = fullUniverse.filter(s => !s.isETF).map(s => s.symbol);
 

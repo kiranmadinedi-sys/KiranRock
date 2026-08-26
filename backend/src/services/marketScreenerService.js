@@ -42,6 +42,27 @@ const CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
 // them — the cache was never once winning the race before another rebuild started.
 let _buildingPromise = null;
 
+// Per-call timeout for the two unbounded Yahoo calls inside the HERMES batch loop
+// below. Root cause of the 2026-08-26 ~5.75h freeze: rateLimiter.execute() only
+// throttles spacing, it never bounds how long a single yahooFinance.quote()/
+// quoteSummary() call can hang — and Promise.allSettled() inside the batch loop
+// will not settle until EVERY symbol in that batch of 10 has settled. One symbol
+// stuck on a stalled Yahoo TCP connection therefore froze that batch forever, which
+// froze _buildStockUniverse() forever, which left _buildingPromise permanently
+// pending — silently stalling every other caller too (nightlyUniverseScanService's
+// Promise.all has no timeout on this call either, and istPipelineScheduler's HERMES
+// stage shares the same promise), with zero error/crash logged. Confirmed live:
+// daily_universe_analysis had 0 rows for 2026-08-26 after 5h45m, current log had
+// zero universe/IST-Pipeline lines of any kind in that window, yet the 5-min
+// scheduler tick kept running fine — proof the hang was scoped to this one
+// unbounded await, not a process-wide lockup.
+function _withTimeout(promise, ms) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`timeout after ${ms}ms`)), ms))
+    ]);
+}
+
 // ── Relative Strength Score ───────────────────────────────────────────────────
 // IBD-style RS proxy using live quote fields only (no extra API calls).
 // Stocks in Stage 2 uptrends naturally score highest:
@@ -91,9 +112,9 @@ async function getVelocitySymbols() {
 
     // 1. Yahoo trending symbols — real-time market buzz
     try {
-        const res = await rateLimiter.execute(() =>
+        const res = await _withTimeout(rateLimiter.execute(() =>
             yahooFinance.trendingSymbols('US', { count: 40 })
-        );
+        ), 15000);
         (res?.quotes || []).forEach(q => {
             const s = (q.symbol || '').toUpperCase();
             // Exclude options, forex, futures (contain -, =, ^, /)
@@ -115,9 +136,9 @@ async function getVelocitySymbols() {
         console.log(`[HERMES:Velocity] day_gainers (polygon): +${symbols.size - before} new symbols`);
     } catch (polyErr) {
         try {
-            const res = await rateLimiter.execute(() =>
+            const res = await _withTimeout(rateLimiter.execute(() =>
                 yahooFinance.screener({ scrIds: 'day_gainers', count: 30 })
-            );
+            ), 15000);
             const before = symbols.size;
             (res?.quotes || []).forEach(q => {
                 const s = (q.symbol || '').toUpperCase();
@@ -139,9 +160,9 @@ async function getVelocitySymbols() {
         console.log(`[HERMES:Velocity] most_actives (polygon): +${symbols.size - before} new symbols`);
     } catch (polyErr) {
         try {
-            const res = await rateLimiter.execute(() =>
+            const res = await _withTimeout(rateLimiter.execute(() =>
                 yahooFinance.screener({ scrIds: 'most_actives', count: 30 })
-            );
+            ), 15000);
             const before = symbols.size;
             (res?.quotes || []).forEach(q => {
                 const s = (q.symbol || '').toUpperCase();
@@ -258,7 +279,7 @@ async function _buildStockUniverse() {
                     const isSpec = TIER5_SPECULATIVE.includes(symbol);
                     let tier = tierMap.get(symbol) || 3; // default to 3 (earnings watch, tagged below)
                     try {
-                        const quote = await rateLimiter.execute(() => yahooFinance.quote(symbol));
+                        const quote = await _withTimeout(rateLimiter.execute(() => yahooFinance.quote(symbol)), 15000);
                         const rawCap   = quote.marketCap || quote?.price?.marketCap || 0;
                         const marketCap = rawCap > 0 ? rawCap : (isVelocity ? 0 : fallbackCap);
                         const avgVol = quote.averageDailyVolume3Month || quote.regularMarketVolume || 0;
@@ -277,7 +298,7 @@ async function _buildStockUniverse() {
                         if (!isETF && !isSpec && tier !== 4 && tier !== 2 && tier !== 6) {
                             try {
                                 // Only check for non-ETF, non-speculative, non-midcap, non-megacap, non-bulk-DB
-                                const summary = await yahooFinance.quoteSummary(symbol, { modules: ['calendarEvents'] });
+                                const summary = await _withTimeout(yahooFinance.quoteSummary(symbol, { modules: ['calendarEvents'] }), 15000);
                                 const earningsDate = summary?.calendarEvents?.earnings?.earningsDate?.[0];
                                 if (earningsDate) {
                                     daysToEarnings = Math.ceil((new Date(earningsDate) - new Date()) / (1000 * 60 * 60 * 24));

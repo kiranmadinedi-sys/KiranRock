@@ -63,6 +63,37 @@ function _withTimeout(promise, ms) {
     ]);
 }
 
+// Per-symbol HERMES read log — added 2026-08-27. daily_universe_analysis only ever gets
+// a row for symbols that CLEAR this prescreen, so a symbol excluded by cap/volume leaves
+// zero trace anywhere — "why didn't the app catch [stock X]?" couldn't be answered with
+// certainty after the fact, only reconstructed by re-querying Yahoo live (which hits the
+// same rate limits the app itself fights, and even then only gives the CURRENT read, not
+// what HERMES actually saw that night). This persists the real cap/volume/pass-fail HERMES
+// used for every symbol, so that question is a lookup instead of a re-investigation.
+// Fire-and-forget: never blocks or fails the actual HERMES computation.
+async function _logHermesSymbol(universeDate, symbol, marketCap, avgVol, capFloor, minVolume, passed, failReason, isVelocity, tier) {
+    try {
+        const { query } = require('../config/database');
+        await query(
+            `INSERT INTO hermes_symbol_log
+                 (universe_date, symbol, market_cap, avg_volume, cap_floor, volume_floor, passed, fail_reason, is_velocity, tier)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+             ON CONFLICT (universe_date, symbol) DO UPDATE SET
+                 market_cap   = EXCLUDED.market_cap,
+                 avg_volume   = EXCLUDED.avg_volume,
+                 cap_floor    = EXCLUDED.cap_floor,
+                 volume_floor = EXCLUDED.volume_floor,
+                 passed       = EXCLUDED.passed,
+                 fail_reason  = EXCLUDED.fail_reason,
+                 is_velocity  = EXCLUDED.is_velocity,
+                 tier         = EXCLUDED.tier`,
+            [universeDate, symbol, marketCap, avgVol, capFloor, minVolume, passed, failReason, isVelocity, tier]
+        );
+    } catch (_) {
+        // Diagnostic-only — never let a logging failure affect the actual HERMES build.
+    }
+}
+
 // ── Relative Strength Score ───────────────────────────────────────────────────
 // IBD-style RS proxy using live quote fields only (no extra API calls).
 // Stocks in Stage 2 uptrends naturally score highest:
@@ -199,7 +230,21 @@ async function getStockUniverse() {
     return _buildingPromise;
 }
 
+// Safe ET-date computation — matches the fix applied elsewhere 2026-08-26
+// (enhancedAIScheduler.js's _getETNow()). Deliberately NOT
+// new Date(new Date().toLocaleString(...)).toISOString() — that pattern
+// re-parses into local machine time and then normalizes to UTC regardless,
+// which reads tomorrow's date for hours every evening.
+function _todayET() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit'
+    }).formatToParts(new Date());
+    const get = (type) => parts.find(p => p.type === type).value;
+    return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
 async function _buildStockUniverse() {
+    const universeDate = _todayET();
     try {
         const desired = (process.env.STOCK_UNIVERSE || 'ALL').toUpperCase();
         let staticSymbols = [];
@@ -317,6 +362,7 @@ async function _buildStockUniverse() {
                         }
 
                         if (marketCap >= capFloor && avgVol >= minVolume) {
+                            _logHermesSymbol(universeDate, symbol, marketCap, avgVol, capFloor, minVolume, true, null, isVelocity, tier);
                             return {
                                 symbol,
                                 marketCap,
@@ -340,9 +386,11 @@ async function _buildStockUniverse() {
                         }
                         const capOk = marketCap >= capFloor;
                         const volOk = avgVol >= minVolume;
+                        const failReason = (!capOk && !volOk) ? 'both' : (!capOk ? 'cap' : 'volume');
                         if (!capOk && !volOk) excludeStats.bothFail++;
                         else if (!capOk) excludeStats.capFail++;
                         else excludeStats.volumeFail++;
+                        _logHermesSymbol(universeDate, symbol, marketCap, avgVol, capFloor, minVolume, false, failReason, isVelocity, tier);
                         // Bucket cap-passing, volume-failing symbols by their actual avgVol —
                         // added 2026-08-26 alongside the exclusion breakdown so a future
                         // HERMES_MIN_AVG_VOLUME change is picked from a real gain/threshold
@@ -362,6 +410,7 @@ async function _buildStockUniverse() {
                         console.log(`[Market Screener] Error fetching ${symbol}: ${error.message}`);
                         if (!isVelocity) {
                             excludeStats.quoteErrorFallback++;
+                            _logHermesSymbol(universeDate, symbol, fallbackCap, 0, capFloor, minVolume, true, 'quote_error_fallback', false, tier);
                             return {
                                 symbol,
                                 marketCap: fallbackCap,
@@ -379,6 +428,7 @@ async function _buildStockUniverse() {
                             };
                         }
                         excludeStats.velocityExcluded++;
+                        _logHermesSymbol(universeDate, symbol, null, null, capFloor, minVolume, false, 'velocity_quote_error', true, tier);
                         return null;
                     }
                 })

@@ -360,6 +360,14 @@ async function checkNightlyScanCompletion() {
     if (!overnightWindow) return null;
 
     try {
+        // Was `AND ai_score IS NOT NULL` — a third, independent copy of the same bug
+        // fixed 2026-08-27 in enhancedAIScheduler.js/nightlyUniverseScanService.js: a
+        // symbol that fails permanently (delisted, no data) writes a row with a null
+        // score that stays null forever, so a fully-complete scan with a handful of
+        // permanent failures could never reach threshold by this count and always
+        // false-alarms here. Confirmed live: Aug 26 scan genuinely completed (422 total
+        // rows, 17 permanent failures unrelated to this restart), but this check still
+        // fired "may have been interrupted" off the old ai_score-only count of 405.
         const { rows } = await query(
             `SELECT COUNT(*) AS cnt
              FROM daily_universe_analysis
@@ -368,12 +376,11 @@ async function checkNightlyScanCompletion() {
                  FROM daily_universe_analysis
                  WHERE analysis_date >= CURRENT_DATE - INTERVAL '3 day'
                    AND analysis_date <= CURRENT_DATE
-             )
-             AND ai_score IS NOT NULL`
+             )`
         );
         const scored = parseInt(rows[0]?.cnt ?? 0);
         if (scored < SCAN_COMPLETE_THRESHOLD) {
-            return `WARNING: Last night's universe scan only reached ${scored}/${SCAN_COMPLETE_THRESHOLD}+ symbols scored — may have been interrupted (desktop/process downtime?). Consider a manual resume before market open.`;
+            return `WARNING: Last night's universe scan only reached ${scored}/${SCAN_COMPLETE_THRESHOLD}+ symbols attempted — may have been interrupted (desktop/process downtime?). Consider a manual resume before market open.`;
         }
         return null;
     } catch (e) {

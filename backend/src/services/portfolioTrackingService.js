@@ -17,6 +17,20 @@ const _alpacaCache = new Map(); // userId -> { positions, equity, cash, fetchedA
 // one Telegram message per user per hour is enough to know it's happening.
 const _lastSnapshotGuardAlert = new Map(); // userId -> timestamp
 
+// Snapshot-guard deviation threshold — was 0.25 (25%), too coarse to catch a real class
+// of bad reads. Found 2026-08-27 on kmadined's account: 4 isolated snapshots in one day
+// (08:15, 08:36, 14:02, 14:20 UTC) all read cash_balance as exactly $4,226.15 — identical
+// to the cent, each time surrounded by correct readings 30s-few min before/after — visible
+// on the portfolio chart as sharp V-shaped dips. Deviation was only ~9.4% (515/5496),
+// well under the 25% gate this guard already has (built 2026-07-13 for a similar but
+// larger-magnitude incident), so these slipped through unretried and got saved straight
+// to history. For a small account this size (2 modest stock positions against mostly
+// cash), a genuine holdings-driven swing this large in one poll interval is implausible
+// without a real large trade — which the existing activity cross-check below would catch
+// anyway. 0.07 gives comfortable margin under the observed ~9.4% incidents while staying
+// well above ordinary noise.
+const SUSPICIOUS_DEVIATION_THRESHOLD = 0.07;
+
 // Deposit history cache — Alpaca ledger activities rarely change (new deposit = rare event).
 // TTL: 24h. Automatically refreshed on the next portfolio fetch after expiry.
 const _depositsCache = new Map(); // userId -> { totalDeposited, totalWithdrawn, fetchedAt }
@@ -348,7 +362,7 @@ const getPortfolioSummary = async (userId) => {
                     : recentValues[mid];
 
                 let deviation = Math.abs(totalPortfolioValue - baselineValue) / baselineValue;
-                if (deviation > 0.25) {
+                if (deviation > SUSPICIOUS_DEVIATION_THRESHOLD) {
                     const gapDollars = totalPortfolioValue - baselineValue;
                     console.warn(`[PortfolioTracking] Suspicious value swing for user ${userId}: ${totalPortfolioValue.toFixed(2)} vs recent median ${baselineValue.toFixed(2)} (n=${recentValues.length}, ${(deviation * 100).toFixed(1)}% dev, gap=$${gapDollars.toFixed(2)})`, {
                         userId, recentValues, baselineValue, totalPortfolioValue, cashBalance, alpacaEquity, alpacaCash,
@@ -391,7 +405,7 @@ const getPortfolioSummary = async (userId) => {
                         console.warn(`[PortfolioTracking] No corroborating activity found for user ${userId} since ${new Date(oldestRecentAt).toISOString()} — retrying with fresh Alpaca fetches`);
                         const MAX_ATTEMPTS = 3;
                         const RETRY_DELAY_MS = 2000;
-                        for (let attempt = 1; attempt <= MAX_ATTEMPTS && deviation > 0.25; attempt++) {
+                        for (let attempt = 1; attempt <= MAX_ATTEMPTS && deviation > SUSPICIOUS_DEVIATION_THRESHOLD; attempt++) {
                             if (attempt > 1) await new Promise(resolve => setTimeout(resolve, RETRY_DELAY_MS));
                             const fresh = await _getAlpacaData(userId, true);
                             const retriedCashBalance = fresh.cash ?? account.balance;
@@ -411,7 +425,7 @@ const getPortfolioSummary = async (userId) => {
                             }
                         }
 
-                        if (deviation > 0.25) {
+                        if (deviation > SUSPICIOUS_DEVIATION_THRESHOLD) {
                             skipSnapshotSave = true;
                             console.warn(`[PortfolioTracking] Unresolved, uncorroborated swing for user ${userId} after ${MAX_ATTEMPTS} attempts (${(deviation * 100).toFixed(1)}% dev vs median ${baselineValue.toFixed(2)}) — skipping snapshot save, not writing an unconfirmed value to history`);
 

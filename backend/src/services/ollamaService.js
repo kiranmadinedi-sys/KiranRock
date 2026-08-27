@@ -125,6 +125,13 @@ async function generate(userPrompt, systemPrompt = '', options = {}) {
         const res = await _post('/api/chat', {
             model:  options.model || MODEL,
             stream: false,
+            // think:false — added 2026-08-27 alongside the switch to a "thinking"-capable
+            // model (qwen3.8:27b). Without this, the model spends its entire num_predict
+            // budget on an internal reasoning trace and never emits the actual answer —
+            // confirmed live: a 450-token ORACLE call returned empty content, 100% consumed
+            // by <thinking>. Every caller here wants a short direct answer (sentiment score,
+            // narrative text), not visible chain-of-thought.
+            think:  false,
             messages,
             options: {
                 temperature: options.temperature ?? 0.4,
@@ -199,6 +206,7 @@ async function getVerdict(data) {
         const res = await _post('/api/chat', {
             model:    MODEL,
             stream:   false,
+            think:    false, // see generate()'s comment — required for qwen3.8:27b to emit an answer at all
             messages: [
                 { role: 'system', content: ORACLE_SYSTEM },
                 { role: 'user',   content: userPrompt },
@@ -437,6 +445,7 @@ async function chat(messages, options = {}) {
         const res = await _post('/api/chat', {
             model: options.model || MODEL,
             stream: false,
+            think: false, // see generate()'s comment — same "thinking" model behavior applies here
             messages,
             options: {
                 temperature: options.temperature ?? 0.7, // Higher for more natural responses

@@ -937,6 +937,77 @@ async function isTooCorrelated(heldSymbols, newSymbol, threshold = 0.70, maxCorr
     }
 }
 
+// Slippage-multiplier cache — symbol -> { multiplier, sampleSize, avgSlip, fetchedAt }.
+// 1hr TTL: this symbol's own trade history changes at most a few times a day, no need
+// to hit the DB on every scan cycle for the same name.
+const _slippageMultiplierCache = new Map();
+const SLIPPAGE_CACHE_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * Real-time slippage feedback loop — added 2026-08-27.
+ *
+ * Root problem: slippage_pct has been recorded on every fill for a while, but only ever
+ * surfaced in the Friday-only Weekly Parameter Health Check report — a human has to read
+ * it and manually decide to act. No automatic feedback into sizing. Found while discussing
+ * lowering HERMES_MIN_AVG_VOLUME to admit more (necessarily thinner) tickers: that's
+ * exactly the direction where execution cost erodes edge fastest, and until now nothing
+ * would notice in real time if a specific symbol's actual fills were chronically worse
+ * than its score implied.
+ *
+ * Requires MIN_SAMPLES trades before applying any penalty — with only ~37 slippage-tagged
+ * trades system-wide as of this writing, most symbols have 1-2 fills, nowhere near enough
+ * to distinguish real chronic slippage from one noisy print. Defaults to a neutral 1.0
+ * multiplier (no reward, no penalty) whenever data is too thin or the query fails —
+ * this loop should only ever shrink size on real evidence, never block a trade outright
+ * (that's a separate, larger decision this file doesn't make unilaterally).
+ *
+ * @param {string} symbol
+ * @returns {Promise<{ multiplier: number, sampleSize: number, avgSlipPct: number|null }>}
+ */
+async function getSlippageSizeMultiplier(symbol) {
+    const cached = _slippageMultiplierCache.get(symbol);
+    if (cached && Date.now() - cached.fetchedAt < SLIPPAGE_CACHE_TTL_MS) return cached;
+
+    const neutral = { multiplier: 1.0, sampleSize: 0, avgSlipPct: null, fetchedAt: Date.now() };
+    const MIN_SAMPLES = 3;
+
+    try {
+        const res = await query(
+            `SELECT AVG(ABS(slippage_pct)) AS avg_slip, COUNT(*) AS n
+             FROM trades
+             WHERE symbol = $1
+               AND slippage_pct IS NOT NULL
+               AND trade_date >= NOW() - INTERVAL '90 days'`,
+            [symbol]
+        );
+        const n = parseInt(res.rows[0]?.n || 0, 10);
+        if (n < MIN_SAMPLES) {
+            _slippageMultiplierCache.set(symbol, neutral);
+            return neutral;
+        }
+
+        const avgSlipPct = parseFloat(res.rows[0].avg_slip);
+        // Tiers set against this account's own observed distribution (2026-08-27): overall
+        // avg across all symbols was ~0.014%, but a handful of thinner names (NTNX 0.61%,
+        // LNG 0.52%, GOLD 0.38%) ran 25-45x that. Below 0.10% is unremarkable; above 0.60%
+        // is already a clear outlier worth meaningfully sizing down, not just noting.
+        const multiplier = avgSlipPct >= 0.60 ? 0.40 :
+                            avgSlipPct >= 0.40 ? 0.55 :
+                            avgSlipPct >= 0.25 ? 0.75 :
+                            avgSlipPct >= 0.10 ? 0.90 : 1.0;
+
+        const result = { multiplier, sampleSize: n, avgSlipPct, fetchedAt: Date.now() };
+        _slippageMultiplierCache.set(symbol, result);
+        if (multiplier < 1.0) {
+            logger.info(`[SlippageGuard] ${symbol}: avg ${avgSlipPct.toFixed(3)}% over ${n} fills — sizing at ${(multiplier * 100).toFixed(0)}%`);
+        }
+        return result;
+    } catch (err) {
+        logger.warn(`[SlippageGuard] ${symbol} lookup failed: ${err.message} — using neutral multiplier`);
+        return neutral;
+    }
+}
+
 // High-water mark per userId — reset on process restart (safe: resets protection to current value)
 const _portfolioPeaks = new Map();
 
@@ -3862,7 +3933,13 @@ async function executeAutonomousTrading(userId) {
                 }
             }
 
-            const combinedMultiplier = effectiveSizeMultiplier * streakBreaker.multiplier * expectancySizeMultiplier * scoreTierMultiplier * signalClarityMultiplier;
+            // Slippage feedback loop — sizes down (never blocks) symbols with a real track
+            // record of chronic execution cost eating into edge. See getSlippageSizeMultiplier
+            // for why this exists now specifically (2026-08-27).
+            const slippageInfo = await getSlippageSizeMultiplier(opportunity.symbol);
+            const slippageMultiplier = slippageInfo.multiplier;
+
+            const combinedMultiplier = effectiveSizeMultiplier * streakBreaker.multiplier * expectancySizeMultiplier * scoreTierMultiplier * signalClarityMultiplier * slippageMultiplier;
             let positionFraction = kellyFraction * combinedMultiplier;
 
             // VIX-level size reduction — EXTREME/PANIC already blocks entries upstream.
@@ -3943,6 +4020,8 @@ async function executeAutonomousTrading(userId) {
                 scoreTierMultiplier,
                 expectancyMultiplier: expectancySizeMultiplier,
                 signalClarityMultiplier,
+                slippageMultiplier,
+                slippageSampleSize: slippageInfo.sampleSize,
                 bullBearRatio: _bullBearRatio !== null ? parseFloat(_bullBearRatio.toFixed(2)) : 'n/a',
                 tradeProfile: opportunity.tradeProfile || 'STANDARD',
                 atr: opportunity.atr,

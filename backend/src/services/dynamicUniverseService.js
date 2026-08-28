@@ -452,9 +452,22 @@ async function refreshIntradayMovers() {
         const yf           = new YahooFinance();
         const rateLimiter  = require('../utils/yahooFinanceRateLimiter');
 
+        // Polygon-first, Yahoo screener only as fallback — added 2026-08-28, same
+        // pattern already proven in marketScreenerService.js's getVelocitySymbols()
+        // (verified live 2026-08-23). This was a genuine Yahoo-only single point of
+        // failure before: on a rate-limited night both screener calls would silently
+        // degrade to empty via the .catch() below, and this function would report
+        // 'no_new_symbols' for a reason unrelated to the actual dedup bug fixed
+        // earlier tonight. Wrapped into the same {quotes:[{symbol}]} shape Yahoo
+        // returns so the merge logic below doesn't need to change.
+        const dataProvider = require('./dataProvider');
         const [gainers, actives] = await Promise.all([
-            rateLimiter.execute(() => yf.screener({ scrIds: 'day_gainers',  count: 25 })).catch(() => ({ quotes: [] })),
-            rateLimiter.execute(() => yf.screener({ scrIds: 'most_actives', count: 25 })).catch(() => ({ quotes: [] })),
+            dataProvider.getGainers(25)
+                .then(symbols => ({ quotes: symbols.map(symbol => ({ symbol })) }))
+                .catch(() => rateLimiter.execute(() => yf.screener({ scrIds: 'day_gainers', count: 25 })).catch(() => ({ quotes: [] }))),
+            dataProvider.getMostActive(25)
+                .then(symbols => ({ quotes: symbols.map(symbol => ({ symbol })) }))
+                .catch(() => rateLimiter.execute(() => yf.screener({ scrIds: 'most_actives', count: 25 })).catch(() => ({ quotes: [] }))),
         ]);
 
         // Was a plain Set + skip-if-present check. Broke silently 2026-08-2x once

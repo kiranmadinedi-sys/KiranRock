@@ -36,9 +36,14 @@ async function runTick() {
     for (const user of users) {
         try {
             const result = await cryptoBot.runCycleForUser(user);
-            if (result.trades > 0) {
-                logger.info('[CryptoBot] Cycle result', { userId: user.id, ...result });
-            }
+            // Always log, not just when trades>0 — added 2026-08-28. The only other
+            // record of a "found nothing" cycle was a crypto_trading_logs DB row;
+            // the PM2 log itself stayed completely silent, so "is it actually
+            // running?" could only be answered by querying the DB directly. A
+            // 5-min heartbeat is cheap (288 lines/day/user, same order of
+            // magnitude as other schedulers' routine ticks) and makes that
+            // question answerable at a glance from the log alone.
+            logger.info('[CryptoBot] Cycle result', { userId: user.id, ...result });
         } catch (err) {
             logger.error('[CryptoBot] Cycle error for user', { userId: user.id, error: err.message });
         }

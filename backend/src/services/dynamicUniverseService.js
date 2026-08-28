@@ -457,12 +457,34 @@ async function refreshIntradayMovers() {
             rateLimiter.execute(() => yf.screener({ scrIds: 'most_actives', count: 25 })).catch(() => ({ quotes: [] })),
         ]);
 
-        const existingSymbols = new Set(_universeCache.map(s => s.symbol));
-        const candidates      = [];
+        // Was a plain Set + skip-if-present check. Broke silently 2026-08-2x once
+        // _universeCache grew from a few hundred curated names to the ~13,000-symbol
+        // DB-backed pool (source #2 above): virtually every real day-gainer is already
+        // *somewhere* in that huge cache (just never tagged isVelocity), so this filter
+        // excluded almost every real candidate, every refresh, every day -- confirmed
+        // live 2026-08-28: '{"added":0,"reason":"no_new_symbols"}' on every single
+        // refresh, which meant getIntradayMovers() (filters isVelocity===true) always
+        // returned empty, and Blitz never saw a single one of today's actual movers,
+        // only its fixed 18-symbol core list. The original intent was "don't duplicate
+        // an entry already in the cache" -- that's still correct and still needed. What
+        // was missing: an existing entry should still get *tagged* as a mover instead of
+        // being silently dropped. Now a Map (symbol -> cache index) so an already-present
+        // symbol can be flagged in place; only genuinely absent symbols go through a
+        // fresh quote fetch below.
+        const existingIndex = new Map(_universeCache.map((s, i) => [s.symbol, i]));
+        const candidates       = [];
+        const alreadyCachedNew = new Set(); // dedupe within this one refresh's gainers+actives merge
 
         [...(gainers?.quotes || []), ...(actives?.quotes || [])].forEach(q => {
             const s = (q.symbol || '').toUpperCase();
-            if (s && /^[A-Z]{1,5}$/.test(s) && !existingSymbols.has(s)) candidates.push(s);
+            if (!s || !/^[A-Z]{1,5}$/.test(s)) return;
+            if (existingIndex.has(s)) {
+                const idx = existingIndex.get(s);
+                if (!_universeCache[idx].isVelocity) _universeCache[idx].isVelocity = true;
+            } else if (!alreadyCachedNew.has(s)) {
+                alreadyCachedNew.add(s);
+                candidates.push(s);
+            }
         });
 
         if (candidates.length === 0) {

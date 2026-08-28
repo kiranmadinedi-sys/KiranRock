@@ -199,7 +199,7 @@ async function stageSHIELD(users) {
 async function stageSCALE(users) {
     logger.info('[IST-SCALE] Pre-computing Kelly position sizing');
     try {
-        const performanceService = require('./performanceService');
+        const performanceService = require('./performanceMetricsService');
         for (const user of users) {
             try {
                 if (typeof performanceService.getConsecutiveLosses === 'function') {

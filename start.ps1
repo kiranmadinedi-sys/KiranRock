@@ -50,6 +50,7 @@ $backendPath  = Join-Path $projectRoot "backend"
 $frontendPath = Join-Path $projectRoot "frontend"
 $backendEnvPath = Join-Path $backendPath ".env"
 $startupStatusPath = Join-Path $projectRoot ".startup-status"
+$cryptoLogsPidFile = Join-Path $env:TEMP 'kiranrock_crypto_logs.pid'
 
 if (-not (Test-Path $backendPath))  { Write-Error "Backend not found: $backendPath";  exit 1 }
 if (-not (Test-Path $frontendPath)) { Write-Error "Frontend not found: $frontendPath"; exit 1 }
@@ -306,6 +307,7 @@ function Get-ProjectProcesses {
         $normalizedCommandLine = $commandLine.ToLowerInvariant()
         return $normalizedCommandLine -match '(^|[\s"''])src[\\/]app\.js($|[\s"''])' -or
             $normalizedCommandLine -match '(^|[\s"''])src[\\/]worker\.js($|[\s"''])' -or
+            $normalizedCommandLine -match '(^|[\s"''])src[\\/]cryptoworker\.js($|[\s"''])' -or
             $normalizedCommandLine -match '(^|[\s"''])src[\\/]runstocksignalcycle\.js($|[\s"''])' -or
             $normalizedCommandLine -match 'node_modules[\\/](?:next[\\/]dist[\\/]server[\\/]lib[\\/]start-server\.js)' -or
             $normalizedCommandLine -match 'node_modules[\\/]\.bin[\\/].*next[\\/]dist[\\/]bin[\\/]next(?:\.js)?([\s"'']|$)' -or
@@ -355,6 +357,10 @@ function Get-ProjectProcessRole {
         return 'worker'
     }
 
+    if ($normalizedCommandLine -match '(^|[\s"''])src[\\/]cryptoworker\.js($|[\s"''])') {
+        return 'crypto'
+    }
+
     if ($normalizedCommandLine -match '(^|[\s"''])src[\\/]app\.js($|[\s"''])' -or
         $normalizedCommandLine -match 'npm\s+start($|\s)' -or
         $normalizedCommandLine.Contains($normalizedBackendPath)) {
@@ -384,7 +390,7 @@ function Write-ShutdownSummary {
 
     foreach ($summary in $PassSummaries) {
         $parts = @()
-        foreach ($role in @('backend', 'worker', 'frontend', 'unknown')) {
+        foreach ($role in @('backend', 'worker', 'crypto', 'frontend', 'unknown')) {
             $stoppedIds = @($summary.StoppedByRole[$role])
             $skippedIds = @($summary.SkippedByRole[$role])
 
@@ -423,6 +429,7 @@ function Stop-ProjectProcesses {
     $stoppedByRole = @{
         backend = @()
         worker = @()
+        crypto = @()
         frontend = @()
         unknown = @()
     }
@@ -430,6 +437,7 @@ function Stop-ProjectProcesses {
     $skippedByRole = @{
         backend = @()
         worker = @()
+        crypto = @()
         frontend = @()
         unknown = @()
     }
@@ -490,6 +498,14 @@ if (Test-Path $workerLogsPidFile) {
         Stop-Process -Id ([int]$oldWorkerLogsPid) -Force -ErrorAction SilentlyContinue
     }
     Remove-Item $workerLogsPidFile -Force -ErrorAction SilentlyContinue
+}
+
+if (Test-Path $cryptoLogsPidFile) {
+    $oldCryptoLogsPid = Get-Content $cryptoLogsPidFile -ErrorAction SilentlyContinue
+    if ($oldCryptoLogsPid -match '^\d+$') {
+        Stop-Process -Id ([int]$oldCryptoLogsPid) -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item $cryptoLogsPidFile -Force -ErrorAction SilentlyContinue
 }
 
 # ── PM2: kill daemon + wipe stale sockets BEFORE the general kill loop ───────
@@ -844,6 +860,57 @@ if ($null -eq $pm2Cmd) {
 Write-Host ""
 
 # ----------------------------------------------------------------
+#  Crypto Worker — dedicated 24/7 process, opt-in per user (own terminal)
+# ----------------------------------------------------------------
+Write-Host "[2.5/4] Starting Crypto Trading process (5-min cycle, 24/7) via PM2..." -ForegroundColor Cyan
+Write-Host "      Fully opt-in — costs zero API calls with nobody enrolled" -ForegroundColor Gray
+
+# Kill any previous crypto worker Node.js process not caught by the shutdown pass above
+$staleCryptoWorkers = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match 'cryptoWorker\.js' }
+foreach ($proc in $staleCryptoWorkers) {
+    Write-Host "      Killing stale crypto worker Node process (PID $($proc.ProcessId))..." -ForegroundColor DarkGray
+    Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+}
+if ($staleCryptoWorkers.Count -gt 0) { Start-Sleep -Seconds 1 }
+
+if ($null -eq $pm2Cmd) {
+    Write-Host "      PM2 not found — falling back to raw node (no auto-restart)" -ForegroundColor Yellow
+    $cryptoCommand  = "Set-Location -Path $backendPathLiteral; "
+    $cryptoCommand += "`$env:NODE_ENV = 'development'; "
+    $cryptoCommand += "Write-Host ''; "
+    $cryptoCommand += "Write-Host '=== CRYPTO WORKER (5-min cycle, 24/7) ===' -ForegroundColor DarkYellow; "
+    $cryptoCommand += "Write-Host ''; "
+    $cryptoCommand += "node src/cryptoWorker.js"
+    $cryptoProcess = Start-Process powershell -ArgumentList "-NoExit", "-Command", $cryptoCommand -PassThru
+    Write-Host "      Crypto worker terminal PID: $($cryptoProcess.Id)" -ForegroundColor DarkGray
+} else {
+    Push-Location $backendPath
+    & pm2 start src/cryptoWorker.js --name kiranrock-crypto --node-args="--max-old-space-size=256" --cwd $backendPath | Out-Null
+    & pm2 save | Out-Null
+    Pop-Location
+    Write-Host "      PM2 started kiranrock-crypto (auto-restart on crash enabled)" -ForegroundColor Green
+    $pm2CryptoPidText = (& pm2 pid kiranrock-crypto 2>$null) -join ''
+    $cryptoPidValue   = if ($pm2CryptoPidText -match '^\d+$') { [int]$pm2CryptoPidText } else { 0 }
+    $cryptoProcess    = [pscustomobject]@{ Id = $cryptoPidValue }
+    # Close any stale crypto log windows from a previous run
+    Get-Process -Name powershell -ErrorAction SilentlyContinue | Where-Object {
+        try { $_.MainWindowTitle -match 'kiranrock-crypto' } catch { $false }
+    } | Stop-Process -Force -ErrorAction SilentlyContinue
+    # Stream crypto worker PM2 logs in a separate window, same pattern as backend/worker
+    $pm2CryptoOutLog = "$env:USERPROFILE\.pm2\logs\kiranrock-crypto-out.log"
+    $cryptoLogsCmd  = "Write-Host '=== CRYPTO WORKER LOGS (PM2: kiranrock-crypto) ===' -ForegroundColor DarkYellow; "
+    $cryptoLogsCmd += "Write-Host ''; "
+    $cryptoLogsCmd += "`$out = '$pm2CryptoOutLog'; "
+    $cryptoLogsCmd += "`$w = 0; while (-not (Test-Path `$out) -and `$w -lt 20) { Start-Sleep 1; `$w++ }; "
+    $cryptoLogsCmd += "if (Test-Path `$out) { Get-Content `$out -Wait -Tail 80 } else { Write-Host 'Log file not yet created.' -ForegroundColor Yellow; Start-Sleep 5; Get-Content `$out -Wait -Tail 80 }"
+    $cryptoLogsProcess = Start-Process powershell -ArgumentList "-NoExit", "-Command", $cryptoLogsCmd -PassThru
+    $cryptoLogsProcess.Id | Out-File -FilePath $cryptoLogsPidFile -Encoding ascii -Force
+    Write-Host "      Crypto worker logs window opened (PID: $($cryptoLogsProcess.Id))" -ForegroundColor DarkGray
+}
+Write-Host ""
+
+# ----------------------------------------------------------------
 #  Startup Stock Signal Delivery
 # ----------------------------------------------------------------
 Write-Host "[3/4] Running startup stock-signal delivery..." -ForegroundColor Cyan
@@ -982,12 +1049,13 @@ Write-Host "   Network:  http://99.47.183.33:3000" -ForegroundColor White
 Write-Host "   Domain:   https://getmytbot.com" -ForegroundColor Green
 Write-Host "   Backend:  http://localhost:3001" -ForegroundColor White
 Write-Host "   Worker:   own terminal (all schedulers — see header for full list)" -ForegroundColor White
+Write-Host "   Crypto:   own terminal (5-min cycle, 24/7, opt-in per user — off by default)" -ForegroundColor White
 Write-Host "   EOD:      bars ingested nightly at 6:30 PM ET (worker cron, no manual step)" -ForegroundColor White
 Write-Host "   Signals:  one startup real-delivery pass in separate terminal" -ForegroundColor White
 Write-Host "   Health:   http://localhost:3001/health" -ForegroundColor White
 $cfService = Get-Service -Name "cloudflared" -ErrorAction SilentlyContinue
 $cfStatus = if ($cfService) { $cfService.Status } else { "not installed" }
-Write-Host "   PIDs:     backend=$($backendProcess.Id) (PM2) | worker=$($workerProcess.Id) (PM2) | delivery=$($signalDeliveryProcess.Id) | frontend=$($frontendProcess.Id) | tunnel-service=$cfStatus" -ForegroundColor White
+Write-Host "   PIDs:     backend=$($backendProcess.Id) (PM2) | worker=$($workerProcess.Id) (PM2) | crypto=$($cryptoProcess.Id) (PM2) | delivery=$($signalDeliveryProcess.Id) | frontend=$($frontendProcess.Id) | tunnel-service=$cfStatus" -ForegroundColor White
 Write-Host "-----------------------------------------------" -ForegroundColor Green
 Write-Host "   Telegram: @KiranTradePro_bot" -ForegroundColor White
 Write-Host "   Reports:  Mon-Fri 7:00 AM (predictions) + 4:15 PM (AI bot summary) | Sun 8 AM (weekly buy list) + 9 AM (weekly recap)" -ForegroundColor White

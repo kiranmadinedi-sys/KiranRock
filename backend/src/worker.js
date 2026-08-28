@@ -17,7 +17,8 @@ const telegramLinkService          = require('./services/telegramLinkService');
 const marketMonitorService         = require('./services/marketMonitorService');
 const systemHealthMonitor          = require('./services/systemHealthMonitorService');
 const intradayScheduler            = require('./services/intradayScheduler');
-const cryptoScheduler              = require('./services/cryptoScheduler');
+// Crypto trading runs in its own dedicated PM2 process (cryptoWorker.js), not
+// here — see that file's docstring for why. Not required in this process.
 const {
     acquireLeadership,
     releaseLeadership,
@@ -75,7 +76,6 @@ async function shutdownWorker(signal, options = {}) {
         marketMonitorService.stopMarketMonitor();
         systemHealthMonitor.stopSystemHealthMonitor();
         intradayScheduler.stopScheduler();
-        cryptoScheduler.stopScheduler();
     } catch (error) {
         console.error('[Worker] Error while stopping services:', error.message);
     }
@@ -172,9 +172,6 @@ async function startWorker(options = {}) {
 
     console.log('\n⚡ Starting Blitz Intraday Scheduler (opt-in, 1-min cycle during market hours)...');
     intradayScheduler.startScheduler();
-
-    console.log('\n₿ Starting Crypto Trading Scheduler (opt-in, 5-min cycle, 24/7)...');
-    cryptoScheduler.startScheduler();
 
     console.log('\n🏥 Starting System Health Monitor (5-min checks + Telegram alerts)...');
     systemHealthMonitor.startSystemHealthMonitor();

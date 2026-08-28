@@ -1085,14 +1085,40 @@ async function runScanHealthCheck() {
             );
             const lastWrite     = rows[0]?.last_write ? new Date(rows[0].last_write) : null;
             const scored        = parseInt(rows[0]?.scored ?? 0, 10);
-            const staleMinutes  = lastWrite ? (Date.now() - lastWrite.getTime()) / 60000 : Infinity;
             const cooldownOk    = Date.now() - _lastStallAlertAt > 60 * 60 * 1000;
 
-            if (staleMinutes >= 45 && cooldownOk) {
+            // Was `lastWrite ? ... : Infinity` — zero rows written yet is the NORMAL
+            // state for the first 1-2+ hours of a run (the HERMES universe-build pass
+            // over ~13,000 symbols happens entirely before the first AI-analysis row is
+            // ever upserted; validated live this session at well over an hour on a slow
+            // night). Infinity trivially exceeds any threshold, so this fired a false
+            // "stalled — Infinity min" alert on every restart, every single night,
+            // during the completely normal pre-scoring build phase. Confirmed live
+            // 2026-08-28. Now falls back to elapsed time since the scan actually
+            // started (nightlyUniverseScanService now tracks and exposes this) instead
+            // of a sentinel that always trips. Threshold for "never written anything
+            // yet" is deliberately looser (90 min) than "went quiet after scoring
+            // started" (45 min) — the build phase legitimately runs long; genuine
+            // per-symbol stalls after scoring starts are what the tighter 45 min
+            // threshold still exists to catch.
+            let staleMinutes;
+            let stallThreshold;
+            if (lastWrite) {
+                staleMinutes = (Date.now() - lastWrite.getTime()) / 60000;
+                stallThreshold = 45;
+            } else {
+                const scanStart = nightlyScanSvc.getScanStartTime();
+                staleMinutes = scanStart ? (Date.now() - scanStart) / 60000 : 0;
+                stallThreshold = 90;
+            }
+
+            if (staleMinutes >= stallThreshold && cooldownOk) {
                 _lastStallAlertAt = Date.now();
+                const reason = lastWrite
+                    ? `Scan appears stalled — no new symbol scored in ${Math.round(staleMinutes)} min, still marked running`
+                    : `Scan has been running ${Math.round(staleMinutes)} min without writing its first row — universe build may be stuck`;
                 await alertService.alertNightlyScanFailure({
-                    analyzed: scored, universe: 0, failed: 0,
-                    reason: `Scan appears stalled — no new symbol scored in ${Math.round(staleMinutes)} min, still marked running`
+                    analyzed: scored, universe: 0, failed: 0, reason
                 });
             }
         } catch (e) {

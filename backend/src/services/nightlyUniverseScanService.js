@@ -26,6 +26,7 @@ const BATCH_SIZE     = 1;
 const BATCH_DELAY_MS = 10_000;
 
 let _scanRunning = false;
+let _scanStartTime = null; // exposed via getScanStartTime() — see enhancedAIScheduler.js's runScanHealthCheck for why
 
 /**
  * Calls analyzeStockWithAI with retry on null result, 429 rate-limits, or any transient error.
@@ -173,6 +174,7 @@ async function _upsert(symbol, date, analysis, passedPrescreen, exclusionReason)
  * Returns true while a scan is running — used by the scheduler to avoid double-launches.
  */
 function isScanRunning() { return _scanRunning; }
+function getScanStartTime() { return _scanStartTime; }
 
 /**
  * Main entry point — call from scheduler or standalone script.
@@ -197,6 +199,7 @@ async function runNightlyUniverseScan(opts = {}) {
 
     _scanRunning = true;
     const startTime = Date.now();
+    _scanStartTime = startTime;
     const today     = _todayET();
 
     console.log(`[NightlyScan] ── ${opts.missingOnly ? 'Resuming' : 'Starting'} nightly universe scan for ${today} ──`);
@@ -534,6 +537,7 @@ async function runNightlyUniverseScan(opts = {}) {
         return { analyzed, passed, filtered, failed, date: today, error: err.message };
     } finally {
         _scanRunning = false;
+        _scanStartTime = null;
     }
 }
 
@@ -648,4 +652,4 @@ async function rescanFailedSymbols(date, symbols) {
     return { date, attempted: symbols.length, analyzed, passed, filtered, stillFailed, results };
 }
 
-module.exports = { runNightlyUniverseScan, rescanSymbol, rescanFailedSymbols, isScanRunning };
+module.exports = { runNightlyUniverseScan, rescanSymbol, rescanFailedSymbols, isScanRunning, getScanStartTime };

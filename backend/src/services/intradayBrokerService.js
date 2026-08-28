@@ -74,12 +74,47 @@ async function buyIntraday(userId, symbol, quantity, { stopLossPercent, takeProf
     const stopLossPrice = parseFloat((fillPrice * (1 - stopLossPercent / 100)).toFixed(2));
     const takeProfitPrice = parseFloat((fillPrice * (1 + takeProfitPercent / 100)).toFixed(2));
 
-    try {
-        await brokerService.placeStopOrder(userId, symbol, filledQty, stopLossPrice);
-    } catch (stopErr) {
-        logger.error('[Blitz] Failed to place protective stop after entry — position is temporarily naked', {
-            userId, symbol, err: stopErr.message
-        });
+    // Retry + loud alert on failure — added 2026-08-28. Found by auditing 9 historical
+    // Blitz trades: 4 (44%) exited via the software-only "stop-loss-backstop" path
+    // instead of a real broker-side fill, meaning placeStopOrder was silently failing
+    // nearly half the time and the only prior signal was a single logger.error line
+    // nobody was watching in real time. The software backstop (intradayTradingBot.js)
+    // still eventually catches these, but only on its next ~1-min poll tick instead of
+    // an instant broker-side fill, and not at all if the process itself is down. A
+    // couple of retries costs little and covers the common transient case (network
+    // blip, momentary 429); if it still fails, this now pages Telegram immediately
+    // instead of waiting for someone to go digging through trade history to notice.
+    let stopPlaced = false;
+    const STOP_RETRY_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= STOP_RETRY_ATTEMPTS && !stopPlaced; attempt++) {
+        try {
+            await brokerService.placeStopOrder(userId, symbol, filledQty, stopLossPrice);
+            stopPlaced = true;
+            if (attempt > 1) {
+                logger.info('[Blitz] Protective stop placed on retry', { userId, symbol, attempt });
+            }
+        } catch (stopErr) {
+            if (attempt < STOP_RETRY_ATTEMPTS) {
+                logger.warn(`[Blitz] Stop placement attempt ${attempt}/${STOP_RETRY_ATTEMPTS} failed, retrying`, {
+                    userId, symbol, err: stopErr.message
+                });
+                await new Promise(r => setTimeout(r, 1500));
+            } else {
+                logger.error('[Blitz] Failed to place protective stop after entry, all retries exhausted — position relies on software backstop only', {
+                    userId, symbol, err: stopErr.message
+                });
+                try {
+                    const tg = require('./telegramAlertService');
+                    await tg.sendMessage(userId,
+                        `⚠️ *Blitz Stop-Loss Warning*\n\n` +
+                        `Bought ${filledQty} ${symbol} @ $${fillPrice.toFixed(2)}, but the protective stop order failed ` +
+                        `${STOP_RETRY_ATTEMPTS}x in a row: ${stopErr.message}\n\n` +
+                        `This position is running on the software-only backstop (checked ~once/min) instead of a ` +
+                        `real broker-side stop until the next scan cycle. Consider checking it manually.`
+                    );
+                } catch (_alertErr) { /* best-effort — never block the entry on alert failure */ }
+            }
+        }
     }
 
     const position = await intradayDb.openPosition(userId, symbol, {

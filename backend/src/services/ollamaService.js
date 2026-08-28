@@ -74,6 +74,24 @@ Reply with ONLY valid JSON — no markdown, no explanation outside JSON.`;
 // instead of silently competing. Revisit raising this only if this box ever
 // gets real GPU offload (size_vram > 0) for this model.
 const MAX_CONCURRENT_OLLAMA = 1;
+// Added same night as the queue itself, found actively happening in production:
+// the nightly scan's sheer request volume (500+ candidates, each wanting a
+// PULSE and/or ORACLE call) completely swamped the single FIFO lane — a live
+// trading cycle's own Ollama call got stuck behind 227 queued requests,
+// confirmed live: "Request waited 8076.8s in queue (227 still behind it)"
+// (2.24 HOURS). That starved the live per-user trading cycle, which has its
+// own internal >4min timeout, causing 3 consecutive real "bot may be stuck"
+// alerts. A pure FIFO queue with unbounded depth has no way to protect a
+// latency-sensitive caller from a high-volume one sharing the same lane.
+// Bounding queue depth converts "wait unboundedly, however long that takes"
+// into "fail fast past this point" — every caller here already has a
+// try/catch + neutral/null fallback for an Ollama failure (that's the whole
+// design these features already treat this local server as: optional,
+// never load-bearing), so failing fast is a correct degrade, not a new risk.
+// Real priority-based scheduling (let live-trading calls jump the nightly
+// scan's queue rather than just capping it) is the more correct fix but a
+// bigger change — this is the safe stopgap for tonight.
+const MAX_OLLAMA_QUEUE_DEPTH = 5;
 let _activeOllamaRequests = 0;
 const _ollamaQueue = [];
 
@@ -81,6 +99,9 @@ async function _acquireOllamaSlot() {
     if (_activeOllamaRequests < MAX_CONCURRENT_OLLAMA) {
         _activeOllamaRequests++;
         return;
+    }
+    if (_ollamaQueue.length >= MAX_OLLAMA_QUEUE_DEPTH) {
+        throw new Error(`Ollama queue full (${_ollamaQueue.length} already waiting) — failing fast instead of piling on`);
     }
     const queuedAt = Date.now();
     await new Promise(resolve => _ollamaQueue.push(resolve));

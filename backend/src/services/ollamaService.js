@@ -60,8 +60,54 @@ VERDICT: >=70 TRADE, 50-69 WATCHLIST, <50 SKIP.
 
 Reply with ONLY valid JSON — no markdown, no explanation outside JSON.`;
 
+// ─── Concurrency queue ─────────────────────────────────────────────────────
+// Added 2026-08-28. Every caller in this file (ORACLE, PROPHET, PULSE's
+// fallback, backtest narrative, local-brain coaching, chat) shares this one
+// Ollama server, and `ollama ps` confirms it's running the 27B model with
+// size_vram:0 — pure CPU inference, no GPU offload on this box. Confirmed live
+// the same night: ORACLE calls that took ~36.5s isolated started timing out at
+// 60s under real conditions, and PULSE calls (normally a short ~120-token task)
+// were logged taking 30-45s. Two CPU-bound generations "running concurrently"
+// don't get more compute — they just split the same cores, making both slower
+// and more likely to blow past their own timeout. Queuing to MAX_CONCURRENT=1
+// means every request gets the full CPU to itself; callers wait in FIFO order
+// instead of silently competing. Revisit raising this only if this box ever
+// gets real GPU offload (size_vram > 0) for this model.
+const MAX_CONCURRENT_OLLAMA = 1;
+let _activeOllamaRequests = 0;
+const _ollamaQueue = [];
+
+async function _acquireOllamaSlot() {
+    if (_activeOllamaRequests < MAX_CONCURRENT_OLLAMA) {
+        _activeOllamaRequests++;
+        return;
+    }
+    const queuedAt = Date.now();
+    await new Promise(resolve => _ollamaQueue.push(resolve));
+    _activeOllamaRequests++;
+    const waitedMs = Date.now() - queuedAt;
+    if (waitedMs > 2000) {
+        logger.info(`[Ollama] Request waited ${(waitedMs / 1000).toFixed(1)}s in queue (${_ollamaQueue.length} still behind it)`);
+    }
+}
+
+function _releaseOllamaSlot() {
+    _activeOllamaRequests--;
+    const next = _ollamaQueue.shift();
+    if (next) next();
+}
+
 // ─── HTTP helper (native — no extra npm packages) ────────────────────────────
 async function _post(path, body) {
+    await _acquireOllamaSlot();
+    try {
+        return await _rawPost(path, body);
+    } finally {
+        _releaseOllamaSlot();
+    }
+}
+
+async function _rawPost(path, body) {
     const url     = new URL(path, BASE_URL);
     const payload = JSON.stringify(body);
     const isHttps = url.protocol === 'https:';

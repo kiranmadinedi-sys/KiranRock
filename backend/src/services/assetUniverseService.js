@@ -152,7 +152,17 @@ async function refreshMasterAssets() {
  */
 async function getDailyUniverseSymbols() {
     try {
-        const today = new Date().toISOString().slice(0, 10);
+        // Was new Date().toISOString().slice(0, 10) -- always normalizes to UTC, so
+        // any call after 8 PM ET (once UTC has already rolled to the next calendar
+        // day) looked up asset_universe_daily for tomorrow's date, which has zero
+        // rows yet. Confirmed live 2026-08-28: a late-evening HERMES rebuild fell
+        // through to zero merged DB symbols (no "[HERMES] DB universe: +N merged"
+        // line at all that build), silently shrinking the pool from the normal
+        // ~13,000 down to just the ~1,350-symbol static fallback lists -- same bug
+        // class already fixed in enhancedAIScheduler.js's _getETNow() this session,
+        // just never propagated here. _etDateString() (already defined below in
+        // this same file) is the correct, already-proven fix.
+        const today = _etDateString();
         const result = await query(`
             SELECT symbol FROM asset_universe_daily
             WHERE universe_date = $1
@@ -191,7 +201,10 @@ async function addDynamicSymbol(symbol, source = 'velocity', meta = {}) {
     if (!symbol || !/^[A-Z]{1,5}$/.test(symbol)) return;
     if (await isBlacklisted(symbol)) return;
 
-    const today = new Date().toISOString().slice(0, 10);
+    // Same UTC/ET bug as getDailyUniverseSymbols() above -- a symbol discovered
+    // after 8 PM ET would otherwise get inserted under tomorrow's (UTC) date and
+    // silently never appear under today's (ET) universe_date lookup.
+    const today = _etDateString();
     try {
         await query(`
             INSERT INTO asset_universe_daily

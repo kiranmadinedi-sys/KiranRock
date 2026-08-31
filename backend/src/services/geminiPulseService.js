@@ -89,13 +89,13 @@ function _buildPrompt(symbol, headlineBlock) {
 // Free, local fallback when Gemini is unconfigured, quota-exhausted, or failing.
 // Uses the same locally-running Ollama model already powering ORACLE/PROPHET —
 // zero API cost, no rate limit.
-async function _analyzeWithOllama(symbol, headlineBlock) {
+async function _analyzeWithOllama(symbol, headlineBlock, fast = false) {
     if (!ollamaService.isEnabled()) return null;
     try {
-        const raw    = await ollamaService.generate(_buildPrompt(symbol, headlineBlock), '', { maxTokens: 120, temperature: 0.1 });
+        const raw    = await ollamaService.generate(_buildPrompt(symbol, headlineBlock), '', { maxTokens: 120, temperature: 0.1, fast });
         if (!raw) return null;
         const result = _parsePulseJSON(raw);
-        logger.info(`[PULSE/Ollama] ${symbol}: score=${result.score} ${result.label} (fallback)`);
+        logger.info(`[PULSE/Ollama] ${symbol}: score=${result.score} ${result.label} (fallback${fast ? ', fast model' : ''})`);
         return { ...result, source: 'ollama' };
     } catch (err) {
         logger.warn(`[PULSE/Ollama] ${symbol} fallback failed: ${err.message}`);
@@ -103,7 +103,13 @@ async function _analyzeWithOllama(symbol, headlineBlock) {
     }
 }
 
-async function analyzeHeadlines(symbol, headlines = []) {
+/**
+ * @param {object} [opts]
+ * @param {boolean} [opts.fast] — true from a live per-user trading cycle, routes the
+ *   Ollama fallback (when Gemini is down/exhausted) to the smaller/faster model
+ *   instead of the nightly-scan default.
+ */
+async function analyzeHeadlines(symbol, headlines = [], opts = {}) {
     const cacheKey = `gemini_pulse_${symbol}`;
     const cached   = cacheService.get(cacheKey);
     if (cached) return cached;
@@ -144,7 +150,7 @@ async function analyzeHeadlines(symbol, headlines = []) {
         }
     }
 
-    const ollamaResult = await _analyzeWithOllama(symbol, headlineBlock);
+    const ollamaResult = await _analyzeWithOllama(symbol, headlineBlock, opts.fast);
     if (ollamaResult) {
         cacheService.set(cacheKey, ollamaResult, CACHE_TTL);
         return ollamaResult;

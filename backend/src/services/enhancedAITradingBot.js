@@ -1459,7 +1459,14 @@ function getWeeklySignalFromDailyBars(bars) {
 const _withQuoteTimeout = (promise, fallback, ms = 10000) =>
     Promise.race([promise, new Promise(resolve => setTimeout(() => resolve(fallback), ms))]);
 
-async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null, regime = null) {
+// liveMode: true from a live per-user trading cycle (real-time entry scan or an open
+// position's decay re-score) — routes PULSE/ORACLE's Ollama calls to the smaller/faster
+// model (see ollamaService.js FAST_MODEL) instead of the nightly batch scan's thorough
+// 27B default. The nightly scan (nightlyUniverseScanService.js) calls this with the
+// default false, unchanged. Added 2026-08-31 after this CPU-only box's shared Ollama
+// queue couldn't keep up with real trading-hours concurrent demand (anilboddu1: 8
+// consecutive >4min cycle timeouts, queue waits up to 342s).
+async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null, regime = null, liveMode = false) {
     // Diagnostic timing — added 2026-08-21 to find why per-symbol nightly-scan time grew
     // steadily over a run (9 min/symbol early, 45+ min/symbol late) with no process-wide
     // leak (handles/memory/DB-pool all stayed flat, scheduler ticks stayed perfectly
@@ -1517,7 +1524,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         // PULSE — Gemini headline analysis (cached 30 min; returns null instantly when key absent)
         const _tPulseStart = Date.now();
         const headlines    = (newsData?.articles || []).map(a => a.title || a.headline || '').filter(Boolean);
-        const geminiResult = await geminiPulseService.analyzeHeadlines(symbol, headlines).catch(() => null);
+        const geminiResult = await geminiPulseService.analyzeHeadlines(symbol, headlines, { fast: liveMode }).catch(() => null);
         _stepTimes.pulseMs = Date.now() - _tPulseStart;
 
         // PROPHET — earnings direction forecast (only fires 15-45 days before earnings)
@@ -2254,7 +2261,8 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
                 entry:          price,
                 stop:           price - (atr * 1.5),
                 target:         price + Math.max(week52High > price ? week52High - price : atr * 3, atr * 3),
-                regime:         regime?.regime || 'UNKNOWN'
+                regime:         regime?.regime || 'UNKNOWN',
+                fast:           liveMode
             }).catch(() => null);
 
             agentHealth.recordHeartbeat('ORACLE', oracleVerdict ? 'OK' : 'ERROR', { symbol });
@@ -2442,7 +2450,7 @@ function analyzeStockWithAICached(symbol, vixLevel, regime) {
     if (cached && Date.now() < cached.expiresAt) {
         return cached.promise;
     }
-    const promise = analyzeStockWithAI(symbol, vixLevel, null, regime);
+    const promise = analyzeStockWithAI(symbol, vixLevel, null, regime, true); // liveMode — real-time entry scan
     _analysisCache.set(symbol, { promise, expiresAt: Date.now() + ANALYSIS_CACHE_TTL_MS });
     // A failed analysis shouldn't poison the cache for the full TTL — let the next caller retry fresh.
     promise.catch(() => { _analysisCache.delete(symbol); });
@@ -4799,7 +4807,7 @@ async function manageExistingPositions(userId) {
                     : Infinity;
                 if (_rescoreAgeHrs >= 20) {
                     try {
-                        const _reAnalysis = await analyzeStockWithAI(holding.symbol, null, null, null);
+                        const _reAnalysis = await analyzeStockWithAI(holding.symbol, null, null, null, true); // liveMode — decay re-score
                         if (_reAnalysis && typeof _reAnalysis.aiScore === 'number') {
                             decayScore = _reAnalysis.aiScore;
                             lowScoreStreak = decayScore < 65 ? lowScoreStreak + 1 : 0;

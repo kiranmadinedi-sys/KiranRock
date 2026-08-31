@@ -27,13 +27,25 @@ const BASE_URL   = process.env.OLLAMA_BASE_URL  || '';
 const MODEL      = process.env.OLLAMA_MODEL     || 'llama3.2:3b';
 const TIMEOUT_MS = parseInt(process.env.OLLAMA_TIMEOUT_MS || '45000', 10);
 
+// Second, faster model for latency-sensitive real-time callers (live per-user trading
+// cycles) — MODEL stays the thorough 27B for the nightly batch scan, which has hours,
+// not seconds, to work with. Added 2026-08-31: this box runs qwen3.8:27b on 100% CPU
+// (no usable GPU offload — confirmed via `ollama ps`, size_vram:0), and today's real
+// concurrent live-trading demand pushed per-request queue waits to 27s-342s, with the
+// queue-full fail-fast (depth 5) dropping verdicts outright — anilboddu1's live cycles
+// timed out 8x in a row (>4min each) as a direct result. qwen2.5:7b-instruct is ~4x
+// smaller (4.7GB vs 17GB) and meaningfully faster on CPU while still a real instruct
+// model — not reverting to llama3.2:3b, which was already tried and rejected for
+// "templated" ORACLE verdicts (2026-08-27).
+const FAST_MODEL = process.env.OLLAMA_MODEL_LIVE || 'qwen2.5:7b-instruct-q4_K_M';
+
 // 15-min verdict cache — intraday setup doesn't shift faster than this.
 // Prevents re-running Ollama on the same stock every scan cycle (every ~10 min).
 const ORACLE_CACHE_TTL_MS = 15 * 60 * 1000;
 const _oracleCacheWindow  = () => Math.floor(Date.now() / ORACLE_CACHE_TTL_MS);
 
 if (BASE_URL) {
-    logger.info(`[Ollama] Local LLM enabled — ${BASE_URL}  model=${MODEL}`);
+    logger.info(`[Ollama] Local LLM enabled — ${BASE_URL}  model=${MODEL} (batch)  fastModel=${FAST_MODEL} (live)`);
 } else {
     logger.warn('[Ollama] OLLAMA_BASE_URL not set — local AI disabled. Set it in .env to activate.');
 }
@@ -190,7 +202,7 @@ async function generate(userPrompt, systemPrompt = '', options = {}) {
 
     try {
         const res = await _post('/api/chat', {
-            model:  options.model || MODEL,
+            model:  options.model || (options.fast ? FAST_MODEL : MODEL),
             stream: false,
             // think:false — added 2026-08-27 alongside the switch to a "thinking"-capable
             // model (qwen3.8:27b). Without this, the model spends its entire num_predict
@@ -223,8 +235,13 @@ async function generate(userPrompt, systemPrompt = '', options = {}) {
 async function getVerdict(data) {
     if (!BASE_URL) return null;
 
+    // data.fast (set by live per-user trading cycles, unset for the nightly batch scan)
+    // routes this call to the smaller/faster model — see FAST_MODEL comment above.
+    // Cache key includes it so a live-hours verdict and a nightly-batch verdict for the
+    // same symbol/window never collide and serve each other's (different-model) result.
+    const modelUsed = data.fast ? FAST_MODEL : MODEL;
     // Cache hit — skip Ollama entirely if this symbol was analyzed in the current 15-min window
-    const cacheKey = `ollama_oracle_${data.symbol}_${_oracleCacheWindow()}`;
+    const cacheKey = `ollama_oracle_${data.symbol}_${_oracleCacheWindow()}_${data.fast ? 'fast' : 'batch'}`;
     const cached   = cacheService.get(cacheKey);
     if (cached) {
         logger.debug(`[Ollama/ORACLE] ${data.symbol}: cached verdict reused (${cached.verdict})`);
@@ -271,9 +288,11 @@ async function getVerdict(data) {
 
     try {
         const res = await _post('/api/chat', {
-            model:    MODEL,
+            model:    modelUsed,
             stream:   false,
-            think:    false, // see generate()'s comment — required for qwen3.8:27b to emit an answer at all
+            // think:false — required for qwen3.8:27b to emit an answer at all (see generate()'s
+            // comment). Harmless no-op for FAST_MODEL (qwen2.5:7b-instruct isn't a "thinking" model).
+            think:    false,
             messages: [
                 { role: 'system', content: ORACLE_SYSTEM },
                 { role: 'user',   content: userPrompt },
@@ -308,11 +327,11 @@ async function getVerdict(data) {
         };
 
         cacheService.set(cacheKey, result, ORACLE_CACHE_TTL_MS);
-        logger.info(`[Ollama/ORACLE] ${data.symbol}: ${verdict} score=${score} ${result.confidence} size=${positionSizePct}%`);
+        logger.info(`[Ollama/ORACLE] ${data.symbol} (${modelUsed}): ${verdict} score=${score} ${result.confidence} size=${positionSizePct}%`);
         return result;
 
     } catch (err) {
-        logger.warn(`[Ollama/ORACLE] ${data.symbol} verdict failed: ${err.message}`);
+        logger.warn(`[Ollama/ORACLE] ${data.symbol} (${modelUsed}) verdict failed: ${err.message}`);
         return null;
     }
 }

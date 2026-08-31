@@ -176,6 +176,32 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
         const dbRow    = dbRows.find(r => r.symbol.toUpperCase() === symbol) || {};
         const entryPrice = parseFloat(dbRow.average_price || 0);
 
+        // Guard against double-booking: if the app's OWN sell logic (quality-score decay,
+        // trailing stop, etc.) already closed this exact position and logged its own SELL —
+        // but for whatever reason left the `holdings` row behind — this loop would otherwise
+        // see the same stale row as a fresh "phantom" and log a SECOND SELL for it, double-
+        // counting the realized loss/gain. Found 2026-08-31: AVGO sold once for real at 13:34
+        // (bot's own quality-decay exit, -$39.48), reconciler ran 18 min later, found the
+        // still-present holdings row, and logged its own "reconciled" close for the same 6
+        // shares (-$40.86) — same class of bug as the CEVA/ALGM double-count from 2026-08-15.
+        // A recent same-symbol/same-qty SELL means this is a stale-row artifact, not a real
+        // second exit — clean up the row but skip writing a duplicate trade record.
+        const recentSell = await query(
+            `SELECT id FROM trades
+             WHERE user_id = $1 AND UPPER(symbol) = $2 AND action = 'SELL'
+               AND ABS(quantity - $3) < 0.0001
+               AND trade_date > NOW() - INTERVAL '2 hours'
+             ORDER BY trade_date DESC LIMIT 1`,
+            [userId, symbol, dbQty]
+        );
+        if (recentSell.rows.length > 0) {
+            await query(`DELETE FROM holdings WHERE user_id = $1 AND UPPER(symbol) = $2`, [userId, symbol]);
+            logger.warn('[Reconcile] Phantom matches a recent SELL already on record — cleaning up stale holdings row without double-logging', {
+                userId, symbol, dbQty, matchingTradeId: recentSell.rows[0].id
+            });
+            continue;
+        }
+
         // Prefer actual Alpaca FILL activity price for this symbol (most accurate).
         // Fall back to current_price, then stored stop price (least accurate — stop orders
         // may have been trailed up significantly since the original bracket was placed).

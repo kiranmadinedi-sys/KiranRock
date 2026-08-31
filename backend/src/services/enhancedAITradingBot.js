@@ -2558,14 +2558,36 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
         minMarketCap: riskConfig.minMarketCap,
         source:       _universeSourceLabel
     });
-    
+
+    // Cap live-scan candidates to what this account can actually use. `qualified` is
+    // already sorted best-score-first (nightly pre-scoring, ORDER BY ai_score DESC), so
+    // trimming the tail loses little quality but directly cuts the per-cycle time budget —
+    // each candidate costs one full live PULSE+ORACLE Ollama round trip plus data-gather,
+    // and under today's real conditions (Yahoo network instability + concurrent live-cycle
+    // Ollama demand) that's running 40-200s+ per symbol, not the few seconds this was tuned
+    // for. An account with maxOpenPositions=1 gains nothing from evaluating 37 candidates
+    // it can only ever fill one slot from — confirmed live 2026-08-31: anilboddu1
+    // (maxOpenPositions=1) blew the 4-min cycle timeout scanning all 37, NFLX alone taking
+    // 234.8s. 10x maxOpenPositions (floor 15) keeps a real buffer for candidates that fail
+    // downstream filters (R/R, sector, extension, min-notional) without scanning far more
+    // than any account could ever act on. Live-cycle scan only (scanMarketForOpportunities
+    // is exclusively called with a userId, never from the nightly batch scan) — nightly
+    // scoring of the full universe is unaffected.
+    const CANDIDATE_CAP = Math.max(15, (riskConfig.maxOpenPositions || 1) * 10);
+    const scanList = qualified.length > CANDIDATE_CAP ? qualified.slice(0, CANDIDATE_CAP) : qualified;
+    if (scanList.length < qualified.length) {
+        logger.info('[LiveCandidateCap] Trimmed live-scan candidates to fit cycle budget', {
+            userId, qualified: qualified.length, capped: scanList.length, maxOpenPositions: riskConfig.maxOpenPositions
+        });
+    }
+
     // Analyze all stocks in batches (reduced to prevent Yahoo Finance rate limiting)
     const opportunities = [];
     const allAnalyzed = []; // all fulfilled results — used to build sector rotation cache
     const batchSize = 5;  // Reduced from 20 to 5 to respect rate limits
 
-    for (let i = 0; i < qualified.length; i += batchSize) {
-        const batch = qualified.slice(i, i + batchSize);
+    for (let i = 0; i < scanList.length; i += batchSize) {
+        const batch = scanList.slice(i, i + batchSize);
         const results = await Promise.allSettled(
             batch.map(stock => analyzeStockWithAICached(stock.symbol, vixLevel, regime))
         );
@@ -2611,10 +2633,10 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
         
         // Progress update
         if ((i + batchSize) % 100 === 0) {
-            logger.info('Market scan progress', { 
+            logger.info('Market scan progress', {
                 userId,
-                analyzed: Math.min(i + batchSize, qualified.length),
-                total: qualified.length,
+                analyzed: Math.min(i + batchSize, scanList.length),
+                total: scanList.length,
                 opportunitiesFound: opportunities.length
             });
         }

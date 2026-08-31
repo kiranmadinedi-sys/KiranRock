@@ -920,12 +920,30 @@ const alpacaBroker = (() => {
     async function getOpenOrders(userId, symbol) {
         try {
             const { client } = await getClientForUser(userId);
-            const all = await client.getOrders({ status: 'all', limit: 200 });
-            const active = (all || []).filter(o => !TERMINAL_ORDER_STATUSES.has(o.status));
-            // When no symbol given, return ALL open orders (used by stop-repair scan).
-            if (!symbol) return active;
-            const sym = symbol.toUpperCase();
-            return active.filter(o => (o.symbol || '').toUpperCase() === sym);
+            // A per-symbol lookup MUST filter server-side (Alpaca's `symbols` param) rather
+            // than fetch the account's whole recent order history and filter client-side —
+            // an active account can rack up 500+ orders in a few weeks, and a fixed local
+            // `limit` silently truncates older-but-still-live orders out of view. Found
+            // 2026-08-31: SLAB's real, active GTC stop (placed 2026-08-14) sat at position
+            // 256 in the account's order history, invisible to a limit:200 fetch — StopRepair
+            // concluded the position was naked and retried placing a duplicate stop every
+            // ~5 min, each attempt correctly 403'd by Alpaca ("insufficient qty available",
+            // the existing stop already held both shares) — noisy, and not itself a naked
+            // position, but the same blind spot could mask a genuinely unprotected position
+            // on an old-enough order.
+            if (symbol) {
+                const sym = symbol.toUpperCase();
+                const bySymbol = await client.getOrders({ status: 'all', limit: 500, symbols: sym });
+                return (bySymbol || []).filter(o => !TERMINAL_ORDER_STATUSES.has(o.status));
+            }
+            // No symbol given (full-portfolio stop-repair scan) — can't filter server-side
+            // by symbol, so raise the limit as far as Alpaca allows (500) to buy headroom;
+            // this is a mitigation, not a full fix — an account generating 500+ orders across
+            // ALL symbols between scans would still hit the same truncation. True fix would
+            // be cursor-based pagination (`until`/`after`); not done here since 500 covers
+            // several weeks at this account's current order volume.
+            const all = await client.getOrders({ status: 'all', limit: 500 });
+            return (all || []).filter(o => !TERMINAL_ORDER_STATUSES.has(o.status));
         } catch (err) {
             logger.warn('[Broker:Alpaca] getOpenOrders failed', { symbol, err: err.message });
             return [];

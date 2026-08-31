@@ -136,19 +136,18 @@ function _isNetworkOrRateLimitError(status, err) {
     return NETWORK_ERROR_RE.test(String(err?.message || ''));
 }
 
-// Hard per-attempt timeout — without this, a hung (not actively-rejecting) Yahoo
-// connection has no bound at all beyond whatever Node's default socket timeout is,
-// and withRetry's 4 attempts could each hang that long before ever reaching the
-// error-handling/backoff logic below. Mirrors the 10s convention already used for
-// the quote/bars path in enhancedAITradingBot.js (_withQuoteTimeout).
-const YF_ATTEMPT_TIMEOUT_MS = 10000;
-function _withAttemptTimeout(promise) {
-    return Promise.race([
-        promise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error('yfClient: attempt timed out after 10s')), YF_ATTEMPT_TIMEOUT_MS))
-    ]);
-}
-
+// A Promise.race-based per-attempt timeout was tried here (2026-08-31) and reverted
+// same day: Promise.race doesn't cancel the losing side, so a genuinely-hung (not
+// actively-rejecting) Yahoo request kept running in the background after the race
+// "gave up" on it — and withRetry immediately fired the NEXT attempt on top of the
+// still-pending one. Under today's sustained outage that meant MORE concurrent
+// orphaned Yahoo connections piling up per symbol, not fewer: confirmed live, the
+// first candidate's dataGatherMs got WORSE after this timeout was added (191.7s vs
+// 66-78s before it existed). The network-error-triggers-shared-cooldown fix directly
+// above this comment (which has no such downside — it only reads existing error
+// state, never leaves extra work running) stays; this file has no true timeout
+// protection again until a cancellable approach (AbortController, if yahoo-finance2's
+// transport supports it) is verified not to cause the same pile-up.
 async function withRetry(fn, args = [], opts = {}) {
     const maxAttempts = opts.maxAttempts || 4;
     const baseDelay = opts.baseDelay || 300; // ms
@@ -164,7 +163,7 @@ async function withRetry(fn, args = [], opts = {}) {
     let attempt = 0;
     while (attempt < maxAttempts) {
         try {
-            return await _withAttemptTimeout(fn(...args));
+            return await fn(...args);
         } catch (err) {
             attempt++;
             const status = _extractStatus(err);

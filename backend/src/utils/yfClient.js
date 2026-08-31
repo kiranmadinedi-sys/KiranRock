@@ -118,6 +118,37 @@ function _extractStatus(err) {
     return null;
 }
 
+// A genuine network-level Yahoo outage (not a normal per-minute rate limit) doesn't
+// only show up as 429 — dataProvider.js's separate Yahoo circuit breaker (protecting
+// the quote/chart path) already had to learn this the hard way (2026-08-18/20: "hard
+// IP block ... persists for hours"). This file's own retry loop only ever tripped its
+// shared cooldown on 429, so a sustained network-type outage (ETIMEDOUT/ECONNRESET/
+// ECONNREFUSED/ENOTFOUND/generic timeout) left every symbol's quoteSummary() call
+// (getDaysToEarnings, used every live cycle for every symbol) independently retrying
+// into the same dead wall with no shared memory of it — confirmed 2026-08-31: the
+// quote/chart path's circuit breaker was open (44 trips today, one streak of 165
+// consecutive failures) while this path kept retrying blind, ballooning per-symbol
+// dataGather time to 60-80s+ and directly causing live trading-cycle timeouts.
+const NETWORK_ERROR_RE = /ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|timeout/i;
+function _isNetworkOrRateLimitError(status, err) {
+    if (status === 429) return true;
+    if (typeof status === 'string' && NETWORK_ERROR_RE.test(status)) return true;
+    return NETWORK_ERROR_RE.test(String(err?.message || ''));
+}
+
+// Hard per-attempt timeout — without this, a hung (not actively-rejecting) Yahoo
+// connection has no bound at all beyond whatever Node's default socket timeout is,
+// and withRetry's 4 attempts could each hang that long before ever reaching the
+// error-handling/backoff logic below. Mirrors the 10s convention already used for
+// the quote/bars path in enhancedAITradingBot.js (_withQuoteTimeout).
+const YF_ATTEMPT_TIMEOUT_MS = 10000;
+function _withAttemptTimeout(promise) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('yfClient: attempt timed out after 10s')), YF_ATTEMPT_TIMEOUT_MS))
+    ]);
+}
+
 async function withRetry(fn, args = [], opts = {}) {
     const maxAttempts = opts.maxAttempts || 4;
     const baseDelay = opts.baseDelay || 300; // ms
@@ -133,15 +164,18 @@ async function withRetry(fn, args = [], opts = {}) {
     let attempt = 0;
     while (attempt < maxAttempts) {
         try {
-            return await fn(...args);
+            return await _withAttemptTimeout(fn(...args));
         } catch (err) {
             attempt++;
             const status = _extractStatus(err);
-            if (status === 429) {
+            if (_isNetworkOrRateLimitError(status, err)) {
                 // Trip the shared breaker immediately so every OTHER in-flight or
                 // future call backs off too, not just this one's own retry loop.
+                // Covers both 429 (normal rate limit) and a genuine network-level
+                // outage (ETIMEDOUT/ECONNRESET/ECONNREFUSED/ENOTFOUND/timeout) —
+                // see _isNetworkOrRateLimitError's comment.
                 _yahooRateLimitedUntil = Date.now() + YAHOO_COOLDOWN_MS;
-                console.warn(`yfClient: 429 rate-limited — tripping shared cooldown for ${Math.round(YAHOO_COOLDOWN_MS / 1000)}s`);
+                console.warn(`yfClient: ${status || 'network error'} — tripping shared cooldown for ${Math.round(YAHOO_COOLDOWN_MS / 1000)}s`);
             }
             // On 429 or network errors, retry with exponential backoff
             if (attempt >= maxAttempts || (status && status !== 429 && status !== 'ECONNRESET')) {

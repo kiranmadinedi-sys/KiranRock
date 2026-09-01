@@ -47,7 +47,18 @@ async function _getClientForUser(userId) {
 async function _getBars(client, symbol) {
     try {
         const map = await client.getCryptoBars([symbol], { timeframe: '5Min', limit: BAR_WINDOW });
-        return map.get(symbol) || null;
+        const bars = map.get(symbol) || null;
+        // Persist every fetch — this is the only place bars are pulled (both the
+        // position-monitor loop and the new-entry scan route through here), so this
+        // single call site is enough to build a complete history of the curated
+        // universe over time. Fire-and-forget: a history-write failure must never
+        // block the actual scoring/trading decision that already has the bars in hand.
+        if (bars && bars.length > 0) {
+            cryptoDb.savePriceBars(symbol, bars).catch(err =>
+                logger.debug('[CryptoBot] savePriceBars failed', { symbol, error: err.message })
+            );
+        }
+        return bars;
     } catch (err) {
         logger.debug('[CryptoBot] Bars fetch failed', { symbol, error: err.message });
         return null;

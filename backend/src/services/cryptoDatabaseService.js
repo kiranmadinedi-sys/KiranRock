@@ -98,12 +98,38 @@ async function ensureCryptoSchema() {
         )
     `);
 
+    // Price/volume history for the curated universe — mirrors ohlcv_cache's shape
+    // (symbol + time key, not user-specific, since the market data is the same for
+    // everyone) but at 5-min bar granularity to match the bot's own cadence instead
+    // of ohlcv_cache's daily bars. Added 2026-09-01: until now every cycle fetched a
+    // fresh 20-bar (~100min) window from Alpaca purely to compute scoreFromBars() and
+    // then discarded it — no persisted record of what price/volume conditions existed
+    // when a trade did or didn't fire, so there was no way to audit a past decision or
+    // build a richer/longer-window signal later. ON CONFLICT DO UPDATE (not DO
+    // NOTHING) because the most-recent bar in each fetch is often still in progress
+    // and its close/high/low/volume can still change until the 5-min window closes.
+    await query(`
+        CREATE TABLE IF NOT EXISTS crypto_price_history (
+            id BIGSERIAL PRIMARY KEY,
+            symbol VARCHAR(20) NOT NULL,
+            bar_time TIMESTAMPTZ NOT NULL,
+            open DECIMAL(20,8),
+            high DECIMAL(20,8),
+            low DECIMAL(20,8),
+            close DECIMAL(20,8),
+            volume DECIMAL(24,8),
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(symbol, bar_time)
+        )
+    `);
+
     await query(`CREATE INDEX IF NOT EXISTS idx_crypto_positions_user ON crypto_positions(user_id)`);
     await query(`CREATE INDEX IF NOT EXISTS idx_crypto_trades_user ON crypto_trades(user_id, created_at DESC)`);
     await query(`CREATE INDEX IF NOT EXISTS idx_crypto_logs_user ON crypto_trading_logs(user_id, created_at DESC)`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_crypto_price_history_symbol_time ON crypto_price_history(symbol, bar_time DESC)`);
 
     _schemaEnsured = true;
-    logger.info('[CryptoBot] Schema ensured (crypto_config, crypto_positions, crypto_trades, crypto_trading_logs)');
+    logger.info('[CryptoBot] Schema ensured (crypto_config, crypto_positions, crypto_trades, crypto_trading_logs, crypto_price_history)');
 }
 
 async function getConfig(userId) {
@@ -299,6 +325,44 @@ async function logCycle(userId, { success, tradesExecuted, capitalDeployed, oppo
     );
 }
 
+/**
+ * Persist a batch of 5-min bars for one symbol — not user-specific, the market
+ * data is the same for every account. Upserts rather than skips duplicates: the
+ * most recent bar in any fetch is typically still in progress (the current 5-min
+ * window hasn't closed yet), so its close/high/low/volume legitimately change on
+ * the next cycle's fetch of the same bar_time.
+ */
+async function savePriceBars(symbol, bars) {
+    if (!bars || bars.length === 0) return;
+    await ensureCryptoSchema();
+    for (const bar of bars) {
+        const barTime = bar.Timestamp || bar.timestamp || bar.t;
+        if (!barTime) continue;
+        try {
+            await query(
+                `INSERT INTO crypto_price_history (symbol, bar_time, open, high, low, close, volume)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (symbol, bar_time) DO UPDATE SET
+                    close = EXCLUDED.close, high = EXCLUDED.high, low = EXCLUDED.low, volume = EXCLUDED.volume`,
+                [symbol, new Date(barTime), bar.Open ?? bar.open, bar.High ?? bar.high, bar.Low ?? bar.low, bar.Close ?? bar.close, bar.Volume ?? bar.volume]
+            );
+        } catch (err) {
+            logger.debug('[CryptoBot] savePriceBars failed for one bar', { symbol, error: err.message });
+        }
+    }
+}
+
+/** Recent persisted price history for one symbol — for review/audit, not live scoring. */
+async function getPriceHistory(symbol, limit = 200) {
+    await ensureCryptoSchema();
+    const result = await query(
+        `SELECT bar_time, open, high, low, close, volume FROM crypto_price_history
+         WHERE symbol = $1 ORDER BY bar_time DESC LIMIT $2`,
+        [symbol, limit]
+    );
+    return result.rows;
+}
+
 module.exports = {
     ensureCryptoSchema,
     getConfig,
@@ -314,5 +378,7 @@ module.exports = {
     getTodayTradeCount,
     getTodayPnl,
     getTodaySummaryStats,
-    logCycle
+    logCycle,
+    savePriceBars,
+    getPriceHistory
 };

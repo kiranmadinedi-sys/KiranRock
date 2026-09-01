@@ -1080,12 +1080,27 @@ async function runScanHealthCheck() {
         try {
             const { rows } = await query(
                 `SELECT MAX(created_at) AS last_write,
+                        COUNT(*) AS total,
                         COUNT(*) FILTER (WHERE ai_score IS NOT NULL) AS scored
                  FROM daily_universe_analysis WHERE analysis_date = CURRENT_DATE`
             );
             const lastWrite     = rows[0]?.last_write ? new Date(rows[0].last_write) : null;
             const scored        = parseInt(rows[0]?.scored ?? 0, 10);
+            const totalToday    = parseInt(rows[0]?.total ?? 0, 10);
             const cooldownOk    = Date.now() - _lastStallAlertAt > 60 * 60 * 1000;
+
+            // A scan that already reached completion threshold naturally goes quiet —
+            // nothing left to write — and isScanRunning() can still read true for a
+            // while after (in-memory flag, only cleared in the scan's own finally
+            // block; a resume/rescan on the same date, or a restart mid-transition,
+            // can leave a window where the flag hasn't caught up with reality). Found
+            // 2026-09-01: last night's scan genuinely completed (438 symbols, 3
+            // separate "✅ Complete" confirmations logged) and this fired a false
+            // "stalled — no new symbol scored in 59 min, still marked running" alert
+            // anyway, because it only ever checked isScanRunning() + time-since-write,
+            // never whether the day's work was actually done. Same false-positive
+            // class as the earlier "Infinity min" fix, different trigger condition.
+            if (totalToday >= SCAN_COMPLETE_THRESHOLD) return;
 
             // Was `lastWrite ? ... : Infinity` — zero rows written yet is the NORMAL
             // state for the first 1-2+ hours of a run (the HERMES universe-build pass
@@ -1118,7 +1133,7 @@ async function runScanHealthCheck() {
                     ? `Scan appears stalled — no new symbol scored in ${Math.round(staleMinutes)} min, still marked running`
                     : `Scan has been running ${Math.round(staleMinutes)} min without writing its first row — universe build may be stuck`;
                 await alertService.alertNightlyScanFailure({
-                    analyzed: scored, universe: 0, failed: 0, reason
+                    analyzed: scored, universe: SCAN_COMPLETE_THRESHOLD, failed: 0, reason
                 });
             }
         } catch (e) {

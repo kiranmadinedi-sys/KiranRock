@@ -311,6 +311,31 @@ function startAssetUniverseScheduler() {
             });
         }
     }).catch(() => {});
+
+    // Resume-on-restart for the dynamic (Blitz) universe build — mirrors the nightly
+    // scan's existing "resume if incomplete" pattern, which this builder never had.
+    // Found 2026-09-01: the 8:45 AM build hung mid-run (separately fixed — a raw
+    // Yahoo call with no timeout, see dynamicUniverseService.js) and never completed;
+    // because this job is cron-only with no startup check, isCacheReady() stayed
+    // false for the REST OF THE DAY — a restart at any point after 8:45 AM would not
+    // have helped, since the 8:45 AM window had already passed and nothing else would
+    // ever re-trigger it before tomorrow. Weekday + before 3:30 PM ET (intraday movers'
+    // own cron stops at 3 PM; building after that serves no remaining purpose today).
+    try {
+        const et = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false, weekday: 'short', hour: '2-digit', minute: '2-digit' });
+        const [weekday, time] = et.split(' ');
+        const [etHour, etMin] = time.split(':').map(Number);
+        const isWeekday = !['Sat', 'Sun'].includes(weekday);
+        const beforeCutoff = etHour < 15 || (etHour === 15 && etMin <= 30);
+        if (isWeekday && beforeCutoff && !dynamicUniverseService.isCacheReady()) {
+            logger.info('[AssetUniverseScheduler] Dynamic universe cache not ready on startup — resuming build now', { etHour, etMin });
+            runDynamicUniverseBuild().catch(err =>
+                logger.error('[AssetUniverseScheduler] Resume build failed', { error: err.message })
+            );
+        }
+    } catch (err) {
+        logger.debug('[AssetUniverseScheduler] Dynamic universe resume check failed', { error: err.message });
+    }
 }
 
 function stopAssetUniverseScheduler() {

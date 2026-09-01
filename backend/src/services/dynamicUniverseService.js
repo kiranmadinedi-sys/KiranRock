@@ -34,6 +34,25 @@ const TIER1_ETFS = new Set([
     'GLD','TLT','HYG','LQD','TQQQ','SOXL',
 ]);
 
+// A single hard-hung Yahoo call (no timeout at all) inside the ~13,031-symbol
+// quote-resolution loop below can freeze the ENTIRE pre-market build forever —
+// confirmed live 2026-09-01: the build started, assembled its symbol pool, then
+// never logged "Quote resolution complete" or "Pre-market cache ready" again,
+// leaving _universeCache permanently null all day. isCacheReady() stayed false,
+// so every scheduled refreshIntradayMovers() call (hourly, 10 AM-3 PM ET) silently
+// no-op'd on `skipped: 'no_cache'` (logged at debug level, invisible) — Blitz never
+// saw a single one of today's real movers. Unlike the yfClient.js retry-loop
+// timeout reverted the same night (which risked piling up MORE concurrent orphaned
+// requests on repeated retries), this is a single pass through the batch loop —
+// timing out here just lets the loop move to the next batch, no retry amplification.
+const YAHOO_QUOTE_TIMEOUT_MS = 10000;
+function _withYahooTimeout(promise) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Yahoo quote timed out after 10s')), YAHOO_QUOTE_TIMEOUT_MS))
+    ]);
+}
+
 // ── Cache ─────────────────────────────────────────────────────────────────────
 let _universeCache   = null;
 let _cacheDate       = null;   // YYYY-MM-DD string — one build per calendar day
@@ -183,10 +202,17 @@ async function _getVelocityAndGapSymbols() {
         const yf           = new YahooFinance();
         const rateLimiter  = require('../utils/yahooFinanceRateLimiter');
 
+        // 'pre_market_gainers' is NOT a valid yahoo-finance2 scrIds value (confirmed via
+        // its own schema validation error, 2026-09-01) — this call has never once
+        // succeeded, always silently swallowed by the .catch() below into an empty
+        // result. yahoo-finance2's supported screener list has no direct pre-market
+        // equivalent; small_cap_gainers is the closest useful substitute for catching
+        // the kind of thinly-traded, big-percentage movers (e.g. GPRO, DUOL, FRVO, LIDR
+        // on 2026-09-01) that day_gainers' larger-cap-weighted ranking tends to miss.
         const screeners = [
             { id: 'day_gainers',          count: 40 },
             { id: 'most_actives',         count: 40 },
-            { id: 'pre_market_gainers',   count: 30 },
+            { id: 'small_cap_gainers',    count: 30 },
         ];
 
         const trendingP = rateLimiter.execute(() =>
@@ -332,7 +358,7 @@ async function buildPreMarketCache() {
                     try {
                         yahooFetches++;
                         batchYahooCalls++;
-                        const quote      = await rateLimiter.execute(() => yf.quote(symbol));
+                        const quote      = await _withYahooTimeout(rateLimiter.execute(() => yf.quote(symbol)));
                         const marketCap  = quote.marketCap || 0;
                         const avgVol     = quote.averageDailyVolume3Month || quote.regularMarketVolume || 0;
                         const price      = quote.regularMarketPrice || null;
@@ -511,7 +537,7 @@ async function refreshIntradayMovers() {
 
         for (const symbol of [...new Set(candidates)].slice(0, INTRADAY_MAX_ADDS)) {
             try {
-                const quote   = await rateLimiter.execute(() => yf.quote(symbol));
+                const quote   = await _withYahooTimeout(rateLimiter.execute(() => yf.quote(symbol)));
                 const cap     = quote.marketCap || 0;
                 const avgVol  = quote.averageDailyVolume3Month || quote.regularMarketVolume || 0;
 

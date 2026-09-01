@@ -304,6 +304,7 @@ async function _buildStockUniverse() {
         const velocitySymbols = await getVelocitySymbols();
         const allSymbols = [...new Set([...staticSymbols, ...velocitySymbols])];
         console.log(`[HERMES] Symbol pool: ${staticSymbols.length} static + ${velocitySymbols.size} velocity = ${allSymbols.length} unique`);
+        const staticSymbolSet = new Set(staticSymbols); // O(1) lookup below, not O(n) per symbol over ~13k
 
         // HERMES filters
         const qualified  = [];
@@ -333,7 +334,21 @@ async function _buildStockUniverse() {
                     try {
                         const quote = await _withTimeout(rateLimiter.execute(() => yahooFinance.quote(symbol)), 15000);
                         const rawCap   = quote.marketCap || quote?.price?.marketCap || 0;
-                        const marketCap = rawCap > 0 ? rawCap : (isVelocity ? 0 : fallbackCap);
+                        // A symbol that's ALSO in the vetted static pool (~13k Alpaca-tradable
+                        // universe) isn't "unknown" just because it showed up in today's
+                        // gainers/most-actives feed too — it's a known, already-tracked name
+                        // whose quote fetch happened to not return marketCap this cycle, and
+                        // deserves the same safe fallbackCap treatment as any other static-list
+                        // symbol. Only a symbol found EXCLUSIVELY via velocity (never in the
+                        // static pool at all — the genuinely-unvetted case this strict branch
+                        // was written for) should be assumed small/unknown on a missing quote.
+                        // Found 2026-09-01: NVDA and AMZN — both trivially mega-cap, both
+                        // members of the static pool — got marketCap forced to 0 and wrongly
+                        // excluded (fail_reason: "cap") purely because they also appeared as
+                        // today's movers and their quote.marketCap came back empty. 27 symbols
+                        // excluded on "cap" today, all with market_cap=0 in hermes_symbol_log.
+                        const isVelocityOnly = isVelocity && !staticSymbolSet.has(symbol);
+                        const marketCap = rawCap > 0 ? rawCap : (isVelocityOnly ? 0 : fallbackCap);
                         const avgVol = quote.averageDailyVolume3Month || quote.regularMarketVolume || 0;
                         let week52High = quote.fiftyTwoWeekHigh || null;
                         let week52Low = quote.fiftyTwoWeekLow || null;

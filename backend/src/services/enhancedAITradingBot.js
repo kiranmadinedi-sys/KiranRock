@@ -3924,18 +3924,31 @@ async function executeAutonomousTrading(userId) {
             // Apply regime and streak multipliers to the fraction.
             const expectancySizeMultiplier = opportunity.expectancyStats?.sizeMultiplier || 1;
 
-            // Score-tier multiplier — scales position size with conviction level.
-            // Target allocations (approximate, subject to Kelly/ATR/regime caps):
-            //   85-89 → ~3% of portfolio (probe size — quality but not exceptional)
-            //   90-94 → ~5% of portfolio (standard size — strong conviction)
-            //   95+   → ~7-9% of portfolio (overweight — rare, highest quality)
-            // Scores below 85 are blocked by the 85 min_buy_score gate — multiplier
-            // for 80-84 kept for edge cases (live cache may boost a borderline score).
+            // Score-tier multiplier — scales position size with conviction level, relative
+            // to THIS account's own effective min_buy_score gate rather than a hardcoded 85.
+            // Originally hardcoded (85/90/95, with <85 dismissed in a comment as "blocked
+            // upstream, kept for edge cases") on the assumption every account gates at 85.
+            // Found 2026-09-02 on kmadined (min_buy_score lowered 88→75 on 2026-08-27,
+            // specifically to raise chronically low capital utilization): every trade that
+            // ONLY qualifies because of that lower gate (score 75-84) was landing in the
+            // "edge case" 0.5-0.7x tier by construction, not because the trade was weak
+            // *for this account* — confirmed live, real trades: AGI score=92 -> $252.77,
+            // AG score=90 -> $264.75, vs CMCSA score=76 -> $106.78, MDT score=84 -> $90.89,
+            // roughly half-to-a-third the size for trades that are perfectly normal, at-gate
+            // quality for THIS account. The min_buy_score fix let more trades through but
+            // this then quietly undersized every one of them, capping utilization right
+            // back down — measured utilization barely moved (14-17%) after that fix.
+            // Tier boundaries now expressed as an offset above the account's own gate
+            // (sessionRiskConfig.minBuyScore, the live regime-adjusted effective value —
+            // the actual bar a trade had to clear to exist at all), reproducing the exact
+            // original multipliers for any account still gated at 85 (offset 0 = right at
+            // gate = 0.9, +5 = 1.3, +10 = 1.8) while scaling correctly for a lower gate.
             const _oppScore = opportunity.aiScore || opportunity.confidence || 50;
-            const scoreTierMultiplier = _oppScore >= 95 ? 1.8 :
-                                        _oppScore >= 90 ? 1.3 :
-                                        _oppScore >= 85 ? 0.9 :
-                                        _oppScore >= 80 ? 0.7 : 0.5;
+            const _scoreOffset = _oppScore - (sessionRiskConfig.minBuyScore ?? 85);
+            const scoreTierMultiplier = _scoreOffset >= 10 ? 1.8 :
+                                        _scoreOffset >= 5  ? 1.3 :
+                                        _scoreOffset >= 0  ? 0.9 :
+                                        _scoreOffset >= -5 ? 0.7 : 0.5;
 
             // Signal-clarity multiplier: adjusts size based on bull/bear attribution ratio.
             // A score of 90 with a 4:1 bull/bear ratio is a much cleaner setup than a 90 with

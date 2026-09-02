@@ -141,6 +141,19 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
     const alpacaMap = new Map(
         alpacaPositions
             .filter(p => parseFloat(p.qty) > 0.0001)   // exclude shorts and dust (< 0.0001 shares)
+            // Crypto positions are deliberately tracked in their own crypto_positions table
+            // (same isolation reasoning as Blitz — see cryptoDatabaseService.js), never in
+            // this shared `holdings` table. Without this filter, this reconciler's "shadow"
+            // detection (Alpaca has a position, `holdings` doesn't) can't tell the difference
+            // between a genuinely-untracked stock buy and a crypto position that's correctly
+            // tracked elsewhere — it "helpfully" auto-imports the crypto position into
+            // `holdings` as if it were a missed stock trade. Confirmed live 2026-09-02:
+            // DOTUSD/LTCUSD (real, correctly-managed crypto_positions rows) got imported
+            // into `holdings` this way, then the swing position-management loop tried to
+            // price them as stocks every cycle and failed 50+ times ("Unable to get current
+            // price for DOTUSD") — noisy, though not a real safety gap since the crypto bot
+            // was still separately managing the real position correctly throughout.
+            .filter(p => (p.asset_class || 'us_equity') === 'us_equity')
             .map(p => [p.symbol.toUpperCase(), parseFloat(p.qty)])
     );
 

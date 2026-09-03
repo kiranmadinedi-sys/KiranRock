@@ -106,7 +106,7 @@ async function checkLiveReadiness(userId = null, {
                           )
                           AND NOT EXISTS (
                               SELECT 1 FROM order_audit_log t
-                              WHERE t.idempotency_key = o.idempotency_key
+                              WHERE t.idempotency_key LIKE o.idempotency_key || '%'
                                 AND t.state IN ('STOPPED','CLOSED','CLOSED_MANUAL','CANCELED','REJECTED')
                           )
                           AND NOT EXISTS (
@@ -142,10 +142,24 @@ async function checkLiveReadiness(userId = null, {
                       AND acknowledged IS NOT TRUE
                 `, [userId]),
 
-                // BLOCKER: orders still open after 24h (should never happen with day orders)
+                // BLOCKER: orders still open after 24h (should never happen with day orders).
+                // Traced precisely 2026-09-03: IGV and MDLZ both sitting here were trailing-
+                // stop exits whose PARTIALLY_FILLED row's own metadata already says
+                // `"exitState":"CLOSED"` — the position closed successfully same-day. What
+                // actually resolves the leftover unfilled remainder is an end-of-day cleanup
+                // pass (ARROW EOD / IST-ARROW EOD) that cancels it — but that cleanup writes
+                // its CANCELED row under a CHILD idempotency_key with a suffix appended
+                // (base key + ":arrow_eod" or ":eod_cleanup"), never the exact original key.
+                // An exact-match check (`t2.idempotency_key = o.idempotency_key`) can NEVER
+                // see that as resolving the original order, no matter how long it waits — the
+                // keys are related but literally different strings. Switched to a prefix
+                // match so a resolving child key is correctly recognized. Also added the
+                // symbol+user cross-check and live holdings check already used by
+                // stopLossFailures just above, as defense-in-depth for the case a resolution
+                // arrives under a completely unrelated key shape.
                 query(`
                     SELECT COUNT(*) AS cnt FROM (
-                        SELECT DISTINCT idempotency_key FROM order_audit_log
+                        SELECT DISTINCT idempotency_key FROM order_audit_log o
                         WHERE state IN ('SUBMITTED','PENDING_FILL','PARTIALLY_FILLED')
                           AND ($1::text IS NULL OR user_id = $1)
                           AND created_at < NOW() - INTERVAL '24 hours'
@@ -154,8 +168,29 @@ async function checkLiveReadiness(userId = null, {
                           )
                           AND NOT EXISTS (
                               SELECT 1 FROM order_audit_log t2
-                              WHERE t2.idempotency_key = order_audit_log.idempotency_key
-                                AND t2.state IN ('FILLED','CANCELED','REJECTED','STOPPED','CLOSED')
+                              WHERE t2.idempotency_key LIKE o.idempotency_key || '%'
+                                AND t2.state IN ('FILLED','CANCELED','REJECTED','STOPPED','CLOSED','CLOSED_MANUAL')
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM order_audit_log t
+                              WHERE t.symbol = o.symbol
+                                AND t.user_id = o.user_id
+                                AND t.state IN ('STOPPED','CLOSED','CLOSED_MANUAL')
+                                AND t.created_at > o.created_at
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM order_audit_log b
+                                    WHERE b.symbol = o.symbol
+                                      AND b.user_id = o.user_id
+                                      AND b.state = 'FILLED'
+                                      AND b.created_at > o.created_at
+                                      AND b.created_at < t.created_at
+                                )
+                          )
+                          AND NOT EXISTS (
+                              SELECT 1 FROM holdings h
+                              WHERE h.symbol = o.symbol
+                                AND ($1::text IS NULL OR h.user_id = $1)
+                                AND h.quantity > 0
                           )
                     ) t
                 `, [userId]),

@@ -350,13 +350,30 @@ const DEFAULT_RISK_CONFIG = {
 //              produce Weinstein Stage-2 / momentum signals. minScore of 78 means they
 //              almost never pass — eliminating wasted ORACLE budget — without hard-coding
 //              any symbol exclusion list that would need manual maintenance.
-// STANDARD   — everything else uses the default ATR×1.5/×3 geometry.
+// STANDARD   — everything else uses the default ATR×1.5/×4.5 geometry.
+//
+// targetMult values below were widened 2026-09-03 (were 4.0/2.0/3.0) after finding the
+// Jones R/R gate (~line 3819, requires >= 2.5) was structurally close to unpassable for
+// any stock at/above its 52-week high with a non-floor-capped ATR stop: for that case,
+// riskReward = (price + atr*targetMult - price) / (price - (price - atr*stopMult))
+//            = targetMult / stopMult  — the ATR and VIX scale both cancel out entirely,
+// collapsing to a fixed ratio determined purely by these two constants. The OLD values
+// gave exactly 2.0 for AGGRESSIVE (4.0/2.0) and STANDARD (3.0/1.5) — both BELOW the 2.5
+// gate — and ~1.67 for DEFENSIVE (2.0/1.2), even worse. Confirmed live 2026-09-03:
+// anilboddu1's cycle found 8 real candidates (score up to 100), 6 of 8 rejected for
+// "R/R below minimum" with riskReward logged as exactly 2.00 — the gate's own comment
+// says it was "raised from 2.0 -> 2.5 for tighter selectivity" without anyone
+// correspondingly widening the achievable ceiling, making it near-unpassable system-wide
+// (not account-specific) for exactly the new-high breakout setups this system's own
+// scoring is designed to prefer. stopMult (real risk/stop distance) is untouched —
+// only targetMult (profit-target distance) widened, giving each profile a genuine ~3.0
+// ceiling with real margin above the 2.5 gate instead of sitting at or under it.
 const SECTOR_TRADE_PROFILES = {
     AGGRESSIVE: {
         name: 'AGGRESSIVE',
         sectors: new Set(['Technology', 'Information Technology', 'Consumer Discretionary', 'Communication Services']),
         stopMult:   2.0,    // ATR × 2.0 — high-beta stocks need breathing room
-        targetMult: 4.0,    // ATR × 4.0 — big momentum moves justify wider targets
+        targetMult: 6.0,    // ATR × 6.0 — big momentum moves justify wider targets (ceiling 3.0, was 4.0 -> 2.0)
         minScore:   65,
         minVolume:  500000, // liquid names only (high-beta micro-caps are noise)
         maxStopPct: 0.075   // cap: 7.5% max stop — ATR×2.0 on a 3.5% ATR stock = 7%, must allow this room
@@ -365,7 +382,7 @@ const SECTOR_TRADE_PROFILES = {
         name: 'DEFENSIVE',
         sectors: new Set(['Utilities', 'Consumer Staples', 'Consumer Defensive', 'Real Estate']),
         stopMult:   1.2,    // ATR × 1.2 — tight, small ATR stocks
-        targetMult: 2.0,    // ATR × 2.0 — limited momentum upside
+        targetMult: 3.6,    // ATR × 3.6 — limited momentum upside (ceiling 3.0, was 2.0 -> ~1.67)
         minScore:   78,     // high bar → effectively opt-out of momentum scanner
         minVolume:  150000, // utilities naturally trade lower volume
         maxStopPct: 0.04    // 4% max — low-vol defensive; more than enough for ATR×1.2
@@ -374,7 +391,7 @@ const SECTOR_TRADE_PROFILES = {
         name: 'STANDARD',
         sectors: null,      // fallback for all other sectors
         stopMult:   1.5,
-        targetMult: 3.0,
+        targetMult: 4.5,    // ceiling 3.0, was 3.0 -> 2.0
         minScore:   65,
         minVolume:  200000,
         maxStopPct: 0.06    // 6% max — ATR×1.5 on a 3.5% ATR stock = 5.25%, need some headroom

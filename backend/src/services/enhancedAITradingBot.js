@@ -2573,7 +2573,19 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
     // than any account could ever act on. Live-cycle scan only (scanMarketForOpportunities
     // is exclusively called with a userId, never from the nightly batch scan) — nightly
     // scoring of the full universe is unaffected.
-    const CANDIDATE_CAP = Math.max(15, (riskConfig.maxOpenPositions || 1) * 10);
+    //
+    // Single-position accounts get a tighter cap still (8, not the 15 floor). Found
+    // 2026-09-02: even with the 15-candidate cap and every other fix in place, anilboddu1
+    // was still completing only ~50% of cycles inside the global 2:30 PM ET no-new-entries
+    // cutoff (enhancedAITradingBot.js ~line 3586) -- every completed cycle found real,
+    // qualifying opportunities (score up to 100) but by the time the scan finished, the
+    // cutoff had often already passed. For an account that can only ever act on ONE
+    // candidate, spending time evaluating 15 when 8 already gives a real shot at finding
+    // a qualifying one is pure latency with no offsetting benefit -- the constraint for
+    // this account class isn't candidate quality, it's finishing before the clock runs out.
+    const CANDIDATE_CAP = (riskConfig.maxOpenPositions || 1) <= 1
+        ? 8
+        : Math.max(15, (riskConfig.maxOpenPositions || 1) * 10);
     const scanList = qualified.length > CANDIDATE_CAP ? qualified.slice(0, CANDIDATE_CAP) : qualified;
     if (scanList.length < qualified.length) {
         logger.info('[LiveCandidateCap] Trimmed live-scan candidates to fit cycle budget', {

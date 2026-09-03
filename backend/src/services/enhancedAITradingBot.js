@@ -4012,7 +4012,20 @@ async function executeAutonomousTrading(userId) {
             const slippageMultiplier = slippageInfo.multiplier;
 
             const combinedMultiplier = effectiveSizeMultiplier * streakBreaker.multiplier * expectancySizeMultiplier * scoreTierMultiplier * signalClarityMultiplier * slippageMultiplier;
-            let positionFraction = kellyFraction * combinedMultiplier;
+            // Concentration scale — same factor the confidence cap further below already
+            // applies (added 2026-08-06), moved up to where the size is actually computed.
+            // That earlier fix raised the CEILING for concentrated accounts (maxOpenPositions=1)
+            // but never touched this base calculation, so the ceiling got generously raised
+            // while nothing ever grew large enough to reach it. Confirmed live 2026-09-03,
+            // right after the R/R gate fix let real candidates through for the first time:
+            // anilboddu1 (maxOpenPositions=1, ~$974 account) computed positionSize $69.81-
+            // $78.52 for score-100 candidates — all landing under the $100 MinNotional floor
+            // a few lines below, on an account whose own maxOrderNotional (300) and the
+            // confidence cap (already scaled to allow up to ~$584) had plenty of headroom
+            // above that floor the whole time. A single-slot account is SUPPOSED to size up
+            // to fill its one slot, not size down as if it were splitting risk across four.
+            const _baseConcentrationScale = Math.max(1, 4 / Math.max(1, sessionRiskConfig.maxOpenPositions || 4));
+            let positionFraction = kellyFraction * combinedMultiplier * _baseConcentrationScale;
 
             // VIX-level size reduction — EXTREME/PANIC already blocks entries upstream.
             // ELEVATED (VIX ~20–25): trade at 75% size — fear is rising, reduce exposure.

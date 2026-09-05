@@ -2733,17 +2733,28 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
     const SETUP_PRIORITY = { breakout_leader: 4, oversold_reversal: 3, quality_continuation: 2, mean_reversion_bounce: 1 };
 
     filteredOpportunities.sort((a, b) => {
-        // Primary: tier (1 = mega/large cap quality, lower = better)
+        // Primary: AI score, wide band — a genuinely dominant score always wins outright,
+        // tier only breaks a close tie. Was tier-first with score as the tiebreaker (so
+        // ANY tier-1/2 candidate outranked EVERY tier-3 one regardless of score gap) until
+        // 2026-09-05: DELL scored STRONG BUY 83-99 for 5 straight trading days (Aug 31-
+        // Sep 4) during a real +20%+ breakout, passed prescreen every one of those days,
+        // and was never bought by any live account — tagged tier 3 (velocity/mover pool,
+        // not "static quality"), it sorted behind every tier-1/2 candidate that cycle no
+        // matter how much lower their scores were, and lost out once CANDIDATE_CAP/limit
+        // truncated the list. Tier still matters (a mega-cap at 82 is generally the safer
+        // pick over a speculative mover at 83), it just can no longer bury a clear winner.
+        if (Math.abs(b.aiScore - a.aiScore) >= 5) return b.aiScore - a.aiScore;
+        // Within a close (<5 pt) score band: prefer the higher-quality tier.
         if ((a.tier || 3) !== (b.tier || 3)) return (a.tier || 3) - (b.tier || 3);
-        // Secondary: AI score (higher = better) — 2-pt band before setup breaks tie
-        if (Math.abs(b.aiScore - a.aiScore) >= 2) return b.aiScore - a.aiScore;
         // Tiebreaker: setup family — breakout_leader > oversold_reversal > quality_continuation > mean_reversion_bounce
         const spDiff = (SETUP_PRIORITY[b.setupFamily] || 0) - (SETUP_PRIORITY[a.setupFamily] || 0);
         if (spDiff !== 0) return spDiff;
-        // Final tiebreaker: VCP confirmed stocks first
+        // Next tiebreaker: VCP confirmed stocks first
         const vcpA = a.vcpPattern === 'confirmed' ? 2 : a.vcpPattern === 'forming' ? 1 : 0;
         const vcpB = b.vcpPattern === 'confirmed' ? 2 : b.vcpPattern === 'forming' ? 1 : 0;
-        return vcpB - vcpA;
+        if (vcpB !== vcpA) return vcpB - vcpA;
+        // Final fallback: raw score
+        return b.aiScore - a.aiScore;
     });
 
     // Raise minimum score for speculative (tier 5)

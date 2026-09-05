@@ -7,7 +7,7 @@
  *
  * Set in .env:
  *   GEMINI_API_KEY=your_key_here
- *   GEMINI_MODEL=gemini-2.0-flash-lite   (optional, default shown)
+ *   GEMINI_MODEL=gemini-3.5-flash-lite   (optional, default shown)
  */
 
 const axios         = require('axios');
@@ -15,8 +15,15 @@ const cacheService  = require('./cacheService');
 const ollamaService = require('./ollamaService');
 const { logger }    = require('../utils/logger');
 
+// gemini-2.0-flash-lite was retired by Google and started 404ing on every call
+// (confirmed 2026-09-05 via the API's own error: "This model ... is no longer
+// available ... use models/gemini-3.5-flash-lite"). Every PULSE/Gemini call had
+// been silently falling through to the Ollama fallback for an unknown period
+// before this was caught. If this model is retired too, the fix is the same:
+// call the endpoint directly and read the 404 body — Google's error message
+// names the exact replacement model.
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-const GEMINI_MODEL   = process.env.GEMINI_MODEL   || 'gemini-2.0-flash-lite';
+const GEMINI_MODEL   = process.env.GEMINI_MODEL   || 'gemini-3.5-flash-lite';
 const GEMINI_URL     = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 const CACHE_TTL      = 2 * 60 * 60 * 1000; // 2 hours — reduces daily quota burn significantly
 

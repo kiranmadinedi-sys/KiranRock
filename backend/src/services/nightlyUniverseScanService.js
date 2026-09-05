@@ -137,14 +137,36 @@ async function _computeSmoothedScore(symbol, rawScore, today) {
 }
 
 /**
+ * Quality tier from market cap. Found 2026-09-05: daily_universe_analysis.tier
+ * defaults to 3 in the schema and NEITHER write path in this file (nor
+ * rescanSymbol's) ever set it explicitly — every single row in the table (2,894
+ * checked across 7 days) was tier 3, mega-caps and speculative movers alike.
+ * The live opportunity-ranking sort (enhancedAITradingBot.js) uses tier as its
+ * primary key expecting it to mean something; with every row tied at 3 that
+ * comparison was always a no-op, silently degrading to score-only ordering.
+ * Not the demonstrated root cause of DELL going unbought (that trail went
+ * cold — no rejection or buy-attempt log for DELL turned up at all, meaning it
+ * likely never reached a live account's candidate list that day, for a reason
+ * this investigation couldn't pin down further), but it's a real, separate gap:
+ * the sort fix has nothing to differentiate on without this.
+ */
+function _computeTier(marketCap) {
+    const cap = Number(marketCap) || 0;
+    if (cap >= 200_000_000_000) return 1; // mega-cap
+    if (cap >= 10_000_000_000)  return 2; // large-cap
+    return 3;                              // everything else (unchanged default)
+}
+
+/**
  * Upserts one analysis row into daily_universe_analysis.
  */
 async function _upsert(symbol, date, analysis, passedPrescreen, exclusionReason) {
+    const tier = _computeTier(analysis?.marketCap);
     await query(
         `INSERT INTO daily_universe_analysis
              (symbol, analysis_date, ai_score, recommendation, setup_family,
-              sector, market_cap, passed_prescreen, exclusion_reason, metadata)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+              sector, market_cap, passed_prescreen, exclusion_reason, metadata, tier)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
          ON CONFLICT (symbol, analysis_date) DO UPDATE SET
              ai_score         = COALESCE(EXCLUDED.ai_score, daily_universe_analysis.ai_score),
              recommendation   = COALESCE(EXCLUDED.recommendation, daily_universe_analysis.recommendation),
@@ -154,6 +176,7 @@ async function _upsert(symbol, date, analysis, passedPrescreen, exclusionReason)
              passed_prescreen = CASE WHEN EXCLUDED.ai_score IS NOT NULL THEN EXCLUDED.passed_prescreen ELSE daily_universe_analysis.passed_prescreen END,
              exclusion_reason = CASE WHEN EXCLUDED.ai_score IS NOT NULL THEN EXCLUDED.exclusion_reason ELSE daily_universe_analysis.exclusion_reason END,
              metadata         = CASE WHEN EXCLUDED.ai_score IS NOT NULL THEN EXCLUDED.metadata ELSE daily_universe_analysis.metadata END,
+             tier             = CASE WHEN EXCLUDED.ai_score IS NOT NULL THEN EXCLUDED.tier ELSE daily_universe_analysis.tier END,
              updated_at       = NOW()`,
         [
             symbol,
@@ -165,7 +188,8 @@ async function _upsert(symbol, date, analysis, passedPrescreen, exclusionReason)
             analysis?.marketCap   ?? null,
             passedPrescreen,
             exclusionReason,
-            analysis ? JSON.stringify(analysis) : '{}'
+            analysis ? JSON.stringify(analysis) : '{}',
+            tier
         ]
     );
 }
@@ -575,8 +599,8 @@ async function rescanSymbol(symbol, reason = 'news') {
         await query(
             `INSERT INTO daily_universe_analysis
                  (symbol, analysis_date, ai_score, recommendation, setup_family,
-                  sector, market_cap, passed_prescreen, metadata)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,true,$8::jsonb)
+                  sector, market_cap, passed_prescreen, metadata, tier)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,true,$8::jsonb,$9)
              ON CONFLICT (symbol, analysis_date) DO UPDATE SET
                  ai_score       = EXCLUDED.ai_score,
                  recommendation = EXCLUDED.recommendation,
@@ -585,6 +609,7 @@ async function rescanSymbol(symbol, reason = 'news') {
                  market_cap     = EXCLUDED.market_cap,
                  passed_prescreen = true,
                  metadata       = COALESCE(daily_universe_analysis.metadata, '{}') || EXCLUDED.metadata,
+                 tier           = EXCLUDED.tier,
                  updated_at     = NOW()`,
             [
                 symbol, today,
@@ -593,7 +618,8 @@ async function rescanSymbol(symbol, reason = 'news') {
                 analysis.setupFamily   ?? null,
                 analysis.sector        ?? null,
                 analysis.marketCap     ?? null,
-                JSON.stringify(rescanMeta)
+                JSON.stringify(rescanMeta),
+                _computeTier(analysis.marketCap)
             ]
         );
 

@@ -1,16 +1,24 @@
 /**
  * LOCAL BRAIN — Historical Pattern Intelligence
  *
- * Reads your own closed trade history from PostgreSQL and builds a
- * win-rate lookup table by (sector × pattern × marketRegime).
- * Provides a score boost/penalty based on what has actually worked
- * for THIS account, updated every 4 hours.
+ * Reads closed trade history from PostgreSQL and builds a single, shared
+ * win-rate lookup table by (sector × pattern × marketRegime), applied to
+ * every account's scoring. Despite the name, this is NOT scoped to "this"
+ * account — one global cache, blended across every account, updated every
+ * 4 hours (corrected 2026-09-05; the comment used to claim per-account
+ * scoping the code never actually did).
+ *
+ * As of 2026-09-05 the underlying query excludes paper/test accounts
+ * (users.alpaca_paper = true) so a high-volume paper account can't dilute
+ * the pattern stats that then boost/penalize real-money live scoring —
+ * the same contamination found in SAGE's Kelly metrics. It is still one
+ * blended brain across every LIVE account, not per-account.
  *
  * Score contribution: −6 to +6 (added into ORACLE scoring pipeline)
  * Minimum trades threshold before any adjustment fires: 5 per cell.
  *
  * This is the "EVOLVE lite" — a statistical learning layer that
- * doesn't need a GPU or an ML library. It's purely your trade data.
+ * doesn't need a GPU or an ML library. It's purely trade data.
  */
 
 const { query } = require('../config/database');
@@ -41,19 +49,23 @@ async function _buildBrain() {
         //   total, commission, trade_date, executed_by, notes, ai_score, sector
         const res = await query(`
             WITH buys AS (
-                SELECT id, user_id, symbol, price AS buy_price, quantity,
-                       trade_date AS buy_date,
-                       EXTRACT(HOUR FROM trade_date AT TIME ZONE 'America/New_York') AS entry_hour,
-                       executed_by, sector, ai_score, notes
-                FROM trades
-                WHERE action = 'BUY'
-                  AND executed_by LIKE 'ALPACA%'
+                SELECT t.id, t.user_id, t.symbol, t.price AS buy_price, t.quantity,
+                       t.trade_date AS buy_date,
+                       EXTRACT(HOUR FROM t.trade_date AT TIME ZONE 'America/New_York') AS entry_hour,
+                       t.executed_by, t.sector, t.ai_score, t.notes
+                FROM trades t
+                JOIN users u ON u.id = t.user_id
+                WHERE t.action = 'BUY'
+                  AND t.executed_by LIKE 'ALPACA%'
+                  AND u.alpaca_paper = false
             ),
             sells AS (
-                SELECT user_id, symbol, price AS sell_price, quantity,
-                       trade_date AS sell_date
-                FROM trades
-                WHERE action = 'SELL'
+                SELECT t.user_id, t.symbol, t.price AS sell_price, t.quantity,
+                       t.trade_date AS sell_date
+                FROM trades t
+                JOIN users u ON u.id = t.user_id
+                WHERE t.action = 'SELL'
+                  AND u.alpaca_paper = false
             ),
             matched AS (
                 SELECT DISTINCT ON (b.id)

@@ -103,11 +103,24 @@ const MAX_CONCURRENT_OLLAMA = 1;
 // Real priority-based scheduling (let live-trading calls jump the nightly
 // scan's queue rather than just capping it) is the more correct fix but a
 // bigger change — this is the safe stopgap for tonight.
+//
+// UPGRADE 2026-09-05: implemented that priority scheduling. The queue now
+// holds {resolve, priority, queuedAt} entries instead of bare resolvers.
+// _releaseOllamaSlot() dequeues the oldest 'live' entry ahead of any 'batch'
+// entry, FIFO within each tier — a live per-user trading cycle's call (data.fast
+// / options.fast = true, see generate()/getVerdict() below) now jumps every
+// nightly-scan call already waiting instead of taking a FIFO position behind
+// however many hundred are queued. Confirmed live in application-2026-09-04.log:
+// 10 of 102 ORACLE calls that day failed with "queue full" purely from FIFO
+// contention with the batch scan — this is the fix for that class of loss.
+// Batch requests are never starved outright: they still run whenever no live
+// request is waiting, and MAX_OLLAMA_QUEUE_DEPTH still fails fast rather than
+// growing unboundedly.
 const MAX_OLLAMA_QUEUE_DEPTH = 5;
 let _activeOllamaRequests = 0;
 const _ollamaQueue = [];
 
-async function _acquireOllamaSlot() {
+async function _acquireOllamaSlot(priority = 'batch') {
     if (_activeOllamaRequests < MAX_CONCURRENT_OLLAMA) {
         _activeOllamaRequests++;
         return;
@@ -116,23 +129,26 @@ async function _acquireOllamaSlot() {
         throw new Error(`Ollama queue full (${_ollamaQueue.length} already waiting) — failing fast instead of piling on`);
     }
     const queuedAt = Date.now();
-    await new Promise(resolve => _ollamaQueue.push(resolve));
+    await new Promise(resolve => _ollamaQueue.push({ resolve, priority, queuedAt }));
     _activeOllamaRequests++;
     const waitedMs = Date.now() - queuedAt;
     if (waitedMs > 2000) {
-        logger.info(`[Ollama] Request waited ${(waitedMs / 1000).toFixed(1)}s in queue (${_ollamaQueue.length} still behind it)`);
+        logger.info(`[Ollama] ${priority} request waited ${(waitedMs / 1000).toFixed(1)}s in queue (${_ollamaQueue.length} still behind it)`);
     }
 }
 
 function _releaseOllamaSlot() {
     _activeOllamaRequests--;
-    const next = _ollamaQueue.shift();
-    if (next) next();
+    if (_ollamaQueue.length === 0) return;
+    let idx = _ollamaQueue.findIndex(entry => entry.priority === 'live');
+    if (idx === -1) idx = 0; // no live entry waiting — serve the oldest batch entry
+    const [next] = _ollamaQueue.splice(idx, 1);
+    next.resolve();
 }
 
 // ─── HTTP helper (native — no extra npm packages) ────────────────────────────
-async function _post(path, body) {
-    await _acquireOllamaSlot();
+async function _post(path, body, priority = 'batch') {
+    await _acquireOllamaSlot(priority);
     try {
         return await _rawPost(path, body);
     } finally {
@@ -216,7 +232,7 @@ async function generate(userPrompt, systemPrompt = '', options = {}) {
                 temperature: options.temperature ?? 0.4,
                 num_predict: options.maxTokens   ?? 2000,
             },
-        });
+        }, options.fast ? 'live' : 'batch');
         return res?.message?.content || '';
     } catch (err) {
         logger.warn(`[Ollama] generate() failed: ${err.message}`);
@@ -298,7 +314,7 @@ async function getVerdict(data) {
                 { role: 'user',   content: userPrompt },
             ],
             options: { temperature: 0.1, num_predict: 450 },
-        });
+        }, data.fast ? 'live' : 'batch');
 
         const raw    = res?.message?.content || '';
         const parsed = _extractJSON(raw);

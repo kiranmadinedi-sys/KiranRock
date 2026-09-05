@@ -20,10 +20,14 @@ class PositionSizingService {
    * @param {number} confidenceScore - A score from 0 to 1 representing the AI's
    *                                   confidence in this specific trade. This can
    *                                   be used to moderate the Kelly fraction.
+   * @param {string|null} userId - Scopes the Kelly win-rate/win-loss-ratio inputs to this
+   *                                account's own trade history (falling back to a live-only
+   *                                blended pool, then defaults — see sageService). Omit only
+   *                                for the legacy global-blend behavior.
    * @returns {Promise<number>} The calculated fraction of capital to allocate (e.g., 0.05 for 5%).
    */
-  async getKellyFraction(confidenceScore = 1.0) {
-    const { winProbability, winLossRatio } = await sageService.getStrategyMetrics();
+  async getKellyFraction(confidenceScore = 1.0, userId = null) {
+    const { winProbability, winLossRatio } = await sageService.getStrategyMetrics(userId);
 
     if (winLossRatio <= 0) {
       logger.warn('[SCALE] Win/Loss ratio is zero or negative. Cannot calculate Kelly. Defaulting to minimum size.');

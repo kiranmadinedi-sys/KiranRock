@@ -3948,7 +3948,7 @@ async function executeAutonomousTrading(userId) {
             // Use the new PositionSizingService to get the Kelly Fraction.
             // The confidence score from the opportunity (0-100) is normalized to 0-1.
             const confidence = (opportunity.confidence || 50) / 100;
-            const kellyFraction = await positionSizingService.getKellyFraction(confidence);
+            const kellyFraction = await positionSizingService.getKellyFraction(confidence, userId);
 
             // Apply regime and streak multipliers to the fraction.
             const expectancySizeMultiplier = opportunity.expectancyStats?.sizeMultiplier || 1;

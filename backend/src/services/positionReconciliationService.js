@@ -448,6 +448,35 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
                  DO UPDATE SET quantity = $3, average_price = $4, current_price = $5, market_value = $6, gain_loss = $7, gain_loss_percent = $8, updated_at = NOW()`,
                 [userId, symbol, alpacaQty, avgPrice, currentPrice, marketValue, gainLoss, gainLossPct]
             );
+
+            // Also record the missing BUY in `trades` — a shadow means the entry order
+            // filled at the broker but the app never wrote it down, most commonly an
+            // extended-hours order (brokerService.buyLimitExtendedHours's 15s post-submit
+            // wait gives up before a slow extended-hours fill completes, and nothing
+            // re-checks it afterward). Without this, the position is real and protected
+            // but permanently invisible to SAGE/LocalBrain/attribution — confirmed live
+            // 2026-09-05: IOVA, 57 shares filled 2026-09-04 at the exact submitted limit
+            // price, holdings row present, zero rows in trades. recordTrade() only writes
+            // the audit row (no balance/holdings side effects — those are already handled
+            // above), so it can't double-count anything.
+            try {
+                const tradesDb = require('./tradesDatabaseService');
+                await tradesDb.recordTrade({
+                    userId, symbol, action: 'BUY',
+                    quantity: alpacaQty,
+                    price: avgPrice,
+                    total: avgPrice * alpacaQty,
+                    executedBy: 'reconciler',
+                    notes: 'Shadow position — broker fill never reached trades (see positionReconciliationService SHADOW fix)'
+                });
+            } catch (tradeErr) {
+                // Never let this block the holdings fix above — an unrecorded trade is a
+                // data-completeness gap, not a live-position-safety issue.
+                logger.warn('[Reconcile] SHADOW holding fixed but trades backfill failed', {
+                    userId, symbol, err: tradeErr.message
+                });
+            }
+
             await _auditLog(userId, 'SHADOW', symbol, 0, alpacaQty, 'INSERTED',
                 `Alpaca held ${alpacaQty} × ${symbol} @ $${avgPrice.toFixed(2)}; not in DB`, trigger);
             result.fixes.push(`SHADOW fixed: inserted ${symbol} × ${alpacaQty} @ $${avgPrice.toFixed(2)}`);

@@ -226,6 +226,16 @@ async function stageARROW(users) {
         // plain WHERE re-matched long-since-filled/closed orders forever, journaling a fresh
         // "canceled" entry for them every single day (found investigating repeated stale
         // cleanup entries for an order that had already filled and closed days earlier).
+        //
+        // That fix was incomplete: the child row this function inserts below carries its OWN
+        // idempotency_key (base + ':eod_cleanup'), a different string from the base key it was
+        // partitioning by. So the base key's "latest row" was always the original stale
+        // SUBMITTED/PENDING_FILL/PARTIALLY_FILLED entry forever -- the child never counted
+        // toward its own partition -- and this re-journaled the same stuck order as newly
+        // "canceled" on every run indefinitely. Confirmed live: some keys had been re-logged
+        // 100+ times since 2026-06-18 (6,787 duplicate rows across 312 keys before this fix).
+        // Excluding any base key that already has an ':eod_cleanup' child makes the whole
+        // operation idempotent regardless of how the base/child partitioning behaves.
         const res = await query(
             `SELECT idempotency_key, user_id, symbol, quantity
              FROM (
@@ -235,7 +245,11 @@ async function stageARROW(users) {
              ) latest
              WHERE rn = 1
                AND state IN ('SUBMITTED', 'PENDING_FILL', 'PARTIALLY_FILLED')
-               AND created_at < NOW() - INTERVAL '1 hour'`,
+               AND created_at < NOW() - INTERVAL '1 hour'
+               AND NOT EXISTS (
+                   SELECT 1 FROM order_audit_log c
+                   WHERE c.idempotency_key = latest.idempotency_key || ':eod_cleanup'
+               )`,
         );
 
         let cleaned = 0;

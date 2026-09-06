@@ -13,6 +13,9 @@ require('dotenv').config({ path: require('path').join(__dirname, '../../.env') }
 const axios     = require('axios');
 const { query } = require('../config/database');
 const { logger } = require('../utils/logger');
+// Was a local weekday+time-only reimplementation — never checked NYSE holidays.
+// See utils/marketCalendar.js (found 2026-09-06, the eve of Labor Day 2026-09-07).
+const { isMarketOpen } = require('../utils/marketCalendar');
 
 const CHECK_MS        = 5  * 60 * 1000;   // every 5 min
 const ALERT_COOLDOWN  = 15 * 60 * 1000;   // suppress duplicate alerts for 15 min
@@ -28,12 +31,6 @@ function etNow() {
     return new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
 }
 
-function isMarketOpen() {
-    const d    = etNow();
-    const day  = d.getDay();
-    const mins = d.getHours() * 60 + d.getMinutes();
-    return day >= 1 && day <= 5 && mins >= 9 * 60 + 30 && mins < 16 * 60;
-}
 
 function nowCDT() {
     return new Date().toLocaleString('en-US', {

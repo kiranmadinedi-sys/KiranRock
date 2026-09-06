@@ -4,6 +4,9 @@ const optionsService = require('./optionsService');
 const { logger } = require('../utils/logger');
 const telegramAlertService = require('./telegramAlertService');
 const { query } = require('../config/database');
+// Was a local weekday+time-only reimplementation — never checked NYSE holidays.
+// See utils/marketCalendar.js (found 2026-09-06, the eve of Labor Day 2026-09-07).
+const { isMarketOpen } = require('../utils/marketCalendar');
 
 // All symbols the options bot may trade — fetched pre-market to warm the DB cache
 const PREWARM_UNIVERSE = ['SPY', 'QQQ', 'AAPL', 'MSFT', 'NVDA', 'AMZN', 'AMD', 'META', 'TSLA', 'PANW'];
@@ -25,26 +28,6 @@ let scanJobs = [];
 let monitorJob = null;
 let summaryJob = null;
 
-/**
- * Check if market is open (Monday-Friday, 9:30 AM - 4:00 PM ET)
- */
-function isMarketOpen() {
-    const now = new Date();
-    const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const day = et.getDay(); // 0 = Sunday, 6 = Saturday
-    const hours = et.getHours();
-    const minutes = et.getMinutes();
-    
-    // Check if weekday (Monday = 1, Friday = 5)
-    if (day === 0 || day === 6) return false;
-    
-    // Check if within trading hours (9:30 AM - 4:00 PM ET)
-    const currentTime = hours * 60 + minutes;
-    const marketOpen = 9 * 60 + 30; // 9:30 AM
-    const marketClose = 16 * 60; // 4:00 PM
-    
-    return currentTime >= marketOpen && currentTime < marketClose;
-}
 
 /**
  * Get all users with options bot enabled

@@ -17,19 +17,14 @@ const intradayBot = require('./intradayTradingBot');
 const intradayDb = require('./intradayDatabaseService');
 const alertService = require('./telegramAlertService');
 const { logger } = require('../utils/logger');
+// Was a local weekday+time-only reimplementation — never checked NYSE holidays.
+// See utils/marketCalendar.js for why this changed (found 2026-09-06, the eve
+// of Labor Day 2026-09-07 — this would have believed the market was open).
+const { isMarketOpen } = require('../utils/marketCalendar');
 
 let schedulerActive = false;
 let tickJob = null;
 let flattenJob = null;
-
-function isMarketOpen() {
-    const now = new Date();
-    const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const day = et.getDay();
-    if (day === 0 || day === 6) return false;
-    const mins = et.getHours() * 60 + et.getMinutes();
-    return mins >= (9 * 60 + 30) && mins < (16 * 60);
-}
 
 async function runTick() {
     if (!isMarketOpen()) return;

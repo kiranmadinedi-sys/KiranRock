@@ -210,20 +210,12 @@ const NFP_RELEASE_DATES = new Set([
 ]);
 
 // ─── US MARKET HOLIDAY CALENDAR ───────────────────────────────────────────────
-// Days when NYSE is fully closed. First trading day AFTER a holiday has lower
-// liquidity, wider spreads, and gap-fill volatility — raise minBuyScore by +5.
-// Update each January. Source: https://www.nyse.com/markets/hours-calendars
-const NYSE_HOLIDAYS = new Set([
-    // 2025
-    '2025-01-01', '2025-01-20', '2025-02-17', '2025-04-18',
-    '2025-05-26', '2025-06-19', '2025-07-04', '2025-09-01',
-    '2025-11-27', '2025-12-25',
-    // 2026
-    '2026-01-01', '2026-01-19', '2026-02-16', '2026-04-03',
-    '2026-05-25', '2026-06-19',
-    '2026-07-03', '2026-07-04', // July 4 falls on Sat → NYSE observes on Fri July 3
-    '2026-09-07', '2026-11-26', '2026-12-25',
-]);
+// Moved to utils/marketCalendar.js 2026-09-06 — isMarketOpen() below (and 4 other
+// independent reimplementations across the codebase) never actually checked this
+// list, only weekday + time-of-day. Now the single source of truth every consumer
+// should import instead of re-deriving. First trading day AFTER a holiday has
+// lower liquidity, wider spreads, and gap-fill volatility — raise minBuyScore +5.
+const { NYSE_HOLIDAYS, isMarketOpen: _isMarketOpenCalendar } = require('../utils/marketCalendar');
 
 /**
  * Returns true if today is the first trading day back after a market holiday.
@@ -1152,34 +1144,13 @@ async function checkWeeklyLossLimit(userId, totalPortfolioValue, sessionRiskConf
 }
 
 /**
- * Check if market is open (NYSE hours: 9:30 AM - 4:00 PM ET, Mon-Fri)
- * Uses Intl.DateTimeFormat to handle DST (EDT=UTC-4, EST=UTC-5) automatically.
+ * Check if market is open (NYSE hours: 9:30 AM - 4:00 PM ET, Mon-Fri, and not a
+ * listed holiday). Thin wrapper — see utils/marketCalendar.js for the real
+ * implementation; kept as a named export here since every other file in the app
+ * already imports `isMarketOpen` from this module specifically.
  */
 function isMarketOpen() {
-    const now = new Date();
-
-    // Get day-of-week in ET to correctly detect weekends in ET
-    const etDayFormatter = new Intl.DateTimeFormat('en-US', {
-        timeZone: 'America/New_York',
-        weekday: 'short'
-    });
-    const dayStr = etDayFormatter.format(now);
-    if (dayStr === 'Sat' || dayStr === 'Sun') return false;
-
-    // Get hour + minute in ET (handles EDT and EST automatically)
-    const etTimeFormatter = new Intl.DateTimeFormat('en-US', {
-        timeZone: 'America/New_York',
-        hour: 'numeric',
-        minute: 'numeric',
-        hour12: false
-    });
-    const parts = etTimeFormatter.formatToParts(now);
-    const etHour = parseInt(parts.find(p => p.type === 'hour').value, 10);
-    const etMinute = parseInt(parts.find(p => p.type === 'minute').value, 10);
-    const etTime = etHour + etMinute / 60;
-
-    // NYSE regular session: 9:30 AM – 4:00 PM ET
-    return etTime >= 9.5 && etTime < 16;
+    return _isMarketOpenCalendar();
 }
 
 /**

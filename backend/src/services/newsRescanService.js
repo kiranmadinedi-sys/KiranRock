@@ -17,16 +17,12 @@ const cron                  = require('node-cron');
 const { query }             = require('../config/database');
 const { rescanSymbol }      = require('./nightlyUniverseScanService');
 const { logger }            = require('../utils/logger');
+// Was a local weekday+time-only reimplementation — never checked NYSE holidays.
+// See utils/marketCalendar.js (found 2026-09-06, the eve of Labor Day 2026-09-07).
+const { isMarketOpen }      = require('../utils/marketCalendar');
 
 const CRON_TZ = { timezone: 'America/New_York' };
 let job = null;
-
-function isMarketOpen() {
-    const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const d  = et.getDay();
-    const t  = et.getHours() * 60 + et.getMinutes();
-    return d >= 1 && d <= 5 && t >= 9 * 60 + 30 && t < 16 * 60;
-}
 
 function todayET() {
     return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });

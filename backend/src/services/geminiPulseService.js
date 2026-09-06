@@ -64,23 +64,45 @@ async function _callGemini(prompt) {
     return resp;
 }
 
+// Controlled vocabulary for risk flags — keeps the field machine-checkable
+// (scoring code branches on exact strings) instead of free-text the model could
+// phrase a dozen different ways. Adapted from swing-trading-agent's Research
+// Agent, which treats these as a distinct category from ordinary bearish
+// sentiment: a fraud allegation or SEC action is qualitatively different from
+// "bad quarter," and PULSE previously had no way to say so — everything just
+// blended into one 0-100 score. See geminiRiskFlags usage in
+// enhancedAITradingBot.js for how these gate scoring.
+const RISK_FLAG_TYPES = [
+    'fraud_allegation',   // accounting fraud, financial misrepresentation claims
+    'regulatory_action',  // SEC/DOJ/FTC/regulator investigation, enforcement, subpoena
+    'accounting_concern', // restatement, auditor resignation, material weakness
+    'executive_departure',// CEO/CFO sudden/unexplained exit
+    'litigation_material',// lawsuit large enough to threaten financials, not routine
+    'delisting_risk'      // exchange compliance failure, going-concern doubt
+];
+
 /**
  * Analyse recent news headlines for a stock symbol using Gemini.
  *
  * @param {string}   symbol    - Ticker symbol, e.g. 'NVDA'
  * @param {string[]} headlines - Array of recent headline strings (max 10 used)
- * @returns {Promise<{score:number, label:string, thesis:string}|null>}
- *   score 0-100 (50=neutral), label Bullish|Neutral|Bearish, thesis one-liner
+ * @returns {Promise<{score:number, label:string, thesis:string, riskFlags:string[]}|null>}
+ *   score 0-100 (50=neutral), label Bullish|Neutral|Bearish, thesis one-liner,
+ *   riskFlags a subset of RISK_FLAG_TYPES (empty array when none apply).
  *   Returns null when API key is absent or call fails — callers must handle null.
  */
 function _parsePulseJSON(raw) {
     const cleaned = raw.replace(/```json|```/g, '').trim();
     const match   = cleaned.match(/\{[\s\S]*\}/);
     const parsed  = JSON.parse(match ? match[0] : cleaned);
+    const riskFlags = Array.isArray(parsed.riskFlags)
+        ? parsed.riskFlags.filter(f => RISK_FLAG_TYPES.includes(f)).slice(0, 3)
+        : [];
     return {
         score:  Math.max(0, Math.min(100, Number(parsed.score) || 50)),
         label:  ['Bullish', 'Neutral', 'Bearish'].includes(parsed.label) ? parsed.label : 'Neutral',
-        thesis: String(parsed.thesis || '').slice(0, 200)
+        thesis: String(parsed.thesis || '').slice(0, 200),
+        riskFlags
     };
 }
 
@@ -89,8 +111,12 @@ function _buildPrompt(symbol, headlineBlock) {
         `Analyse these news items for ${symbol} stock.\n\n` +
         `HEADLINES:\n${headlineBlock}\n\n` +
         `Reply with ONLY a valid JSON object, no markdown fences:\n` +
-        `{"score":<0-100>,"label":"<Bullish|Neutral|Bearish>","thesis":"<1 sentence>"}\n\n` +
-        `Score guide: 70-100=Bullish, 40-69=Neutral, 0-39=Bearish`;
+        `{"score":<0-100>,"label":"<Bullish|Neutral|Bearish>","thesis":"<1 sentence>",` +
+        `"riskFlags":[<zero or more of: ${RISK_FLAG_TYPES.map(f => `"${f}"`).join(', ')}>]}\n\n` +
+        `Score guide: 70-100=Bullish, 40-69=Neutral, 0-39=Bearish\n` +
+        `riskFlags: ONLY include a flag when a headline states it as fact, not speculation or a` +
+        ` routine/resolved matter. Leave the array empty for ordinary bad news (missed earnings,` +
+        ` price target cuts, competitive pressure) — these belong in the score, not riskFlags.`;
 }
 
 // Free, local fallback when Gemini is unconfigured, quota-exhausted, or failing.
@@ -102,7 +128,7 @@ async function _analyzeWithOllama(symbol, headlineBlock, fast = false) {
         const raw    = await ollamaService.generate(_buildPrompt(symbol, headlineBlock), '', { maxTokens: 120, temperature: 0.1, fast });
         if (!raw) return null;
         const result = _parsePulseJSON(raw);
-        logger.info(`[PULSE/Ollama] ${symbol}: score=${result.score} ${result.label} (fallback${fast ? ', fast model' : ''})`);
+        logger.info(`[PULSE/Ollama] ${symbol}: score=${result.score} ${result.label} (fallback${fast ? ', fast model' : ''})${result.riskFlags.length ? ' RISK:' + result.riskFlags.join(',') : ''}`);
         return { ...result, source: 'ollama' };
     } catch (err) {
         logger.warn(`[PULSE/Ollama] ${symbol} fallback failed: ${err.message}`);
@@ -136,7 +162,7 @@ async function analyzeHeadlines(symbol, headlines = [], opts = {}) {
                 const result = { ..._parsePulseJSON(raw), source: 'gemini' };
 
                 cacheService.set(cacheKey, result, CACHE_TTL);
-                logger.info(`[PULSE/Gemini] ${symbol}: score=${result.score} ${result.label}`);
+                logger.info(`[PULSE/Gemini] ${symbol}: score=${result.score} ${result.label}${result.riskFlags.length ? ' RISK:' + result.riskFlags.join(',') : ''}`);
                 return result;
 
             } catch (err) {
@@ -169,5 +195,6 @@ async function analyzeHeadlines(symbol, headlines = [], opts = {}) {
 module.exports = {
     analyzeHeadlines,
     isEnabled: () => !!GEMINI_API_KEY || ollamaService.isEnabled(),
-    isGeminiQuotaExhausted
+    isGeminiQuotaExhausted,
+    RISK_FLAG_TYPES
 };

@@ -1964,6 +1964,30 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
                 aiScore += gemAdj;
                 scoringLog.push(`Gemini: ${gemAdj >= 0 ? '+' : ''}${gemAdj} (${geminiResult.label})`);
             }
+
+            // 15b. PULSE Risk Flags — hard skip / heavy penalty, distinct from ordinary
+            // sentiment. A fraud allegation or active regulator investigation is a
+            // different kind of bad news than a missed quarter — one blends into a
+            // ±5 score, the other shouldn't be buyable on a strong technical setup
+            // alone. Adopted from swing-trading-agent's Research Agent (2026-09-06).
+            // False positives cost a skipped candidate; false negatives here cost
+            // real capital into exactly the kind of setup that gaps down 40% on the
+            // next headline — asymmetry favors erring toward the hard skip.
+            const riskFlags = geminiResult.riskFlags || [];
+            if (riskFlags.length > 0) {
+                const HARD_SKIP_FLAGS = new Set([
+                    'fraud_allegation', 'regulatory_action', 'accounting_concern', 'delisting_risk'
+                ]);
+                if (riskFlags.some(f => HARD_SKIP_FLAGS.has(f))) {
+                    logger.info(`[PULSE/RiskFlag] ${symbol} — hard skip`, { riskFlags, source: geminiResult.source });
+                    return null;
+                }
+                // Softer flags (executive_departure, litigation_material) — heavy
+                // penalty, not an absolute veto; these sometimes resolve fine.
+                const penalty = Math.min(30, riskFlags.length * 15);
+                aiScore -= penalty;
+                scoringLog.push(`PULSE Risk Flag: -${penalty} (${riskFlags.join(', ')})`);
+            }
         }
 
         // 16. Wyckoff Volume Analysis (0 to +15) — PANTHEON STEP 5
@@ -3599,17 +3623,21 @@ async function executeAutonomousTrading(userId) {
         }, 0);
 
         // Batch-load all active stop-loss cooldowns for this user in ONE query (avoids N+1 per opportunity).
-        const cooldownSymbols = new Set();
+        // Map, not a Set — the reasoned re-entry check below needs each cooldown's own
+        // reason/exit-price/age, not just "is this symbol blocked yes/no".
+        const cooldownSymbols = new Map();
         try {
             const cooldownPrefix = `COOLDOWN_${userId}_`;
             const cooldownRes = await query(
-                `SELECT symbol FROM asset_blacklist
+                `SELECT symbol, reason, created_at FROM asset_blacklist
                  WHERE symbol LIKE $1 AND (expires_at IS NULL OR expires_at > NOW())`,
                 [`${cooldownPrefix}%`]
             );
             for (const row of cooldownRes.rows) {
                 // Strip prefix to get the raw ticker (e.g. "COOLDOWN_42_AAPL" → "AAPL")
-                cooldownSymbols.add(row.symbol.slice(cooldownPrefix.length).toUpperCase());
+                cooldownSymbols.set(row.symbol.slice(cooldownPrefix.length).toUpperCase(), {
+                    reason: row.reason, createdAt: row.created_at
+                });
             }
         } catch (_) {}
 
@@ -3718,11 +3746,44 @@ async function executeAutonomousTrading(userId) {
                 }
             }
 
-            // Stop-loss cooldown: block re-entry for 5 days (batch-loaded above — O(1) lookup)
-            if (cooldownSymbols.has(opportunity.symbol.toUpperCase())) {
-                logger.info('[StopCooldown] Re-entry blocked — symbol in cooldown period', { userId, symbol: opportunity.symbol });
-                _recordRejection(opportunity.symbol, 'stop_cooldown');
-                continue;
+            // Stop-loss cooldown: reasoned re-entry check, not a blanket 5-day block
+            // (batch-loaded above — O(1) lookup). Adopted from swing-trading-agent's
+            // re_entry.md: "recent exits in unchanged conditions are unlikely to
+            // succeed differently" — but a flat time-based block can't tell a real
+            // thesis failure apart from a shakeout in a trend that then ran without
+            // us (the DELL case, 2026-09-05: stopped 2026-08-18, would have been
+            // eligible to reconsider well before its +20% breakout under this rule).
+            // Deterministic, not an LLM call — every input here already exists in
+            // this scan cycle, so it can't add latency or a new external dependency.
+            const cooldownInfo = cooldownSymbols.get(opportunity.symbol.toUpperCase());
+            if (cooldownInfo) {
+                const daysSinceStop = (Date.now() - new Date(cooldownInfo.createdAt).getTime()) / 86400000;
+                const exitPriceMatch = (cooldownInfo.reason || '').match(/@ \$([\d.]+)/);
+                const exitPrice     = exitPriceMatch ? parseFloat(exitPriceMatch[1]) : null;
+                const currentPrice  = opportunity.entry || opportunity.price || null;
+
+                // "Materially changed" = at least 2 days have passed (never re-enter the
+                // same day or next day — that's re-litigating the same setup, not new
+                // evidence) AND the stock has since traded meaningfully (5%+) above where
+                // we got stopped out, i.e. real proof the move continued without us.
+                // Missing exit-price data (older cooldown rows written before this field
+                // existed) falls back to the original blanket block — safe default.
+                const materiallyImproved = daysSinceStop >= 2 &&
+                    exitPrice !== null && currentPrice !== null &&
+                    currentPrice >= exitPrice * 1.05;
+
+                if (!materiallyImproved) {
+                    logger.info('[StopCooldown] Re-entry blocked — no material change since stop', {
+                        userId, symbol: opportunity.symbol, daysSinceStop: daysSinceStop.toFixed(1), exitPrice, currentPrice
+                    });
+                    _recordRejection(opportunity.symbol, 'stop_cooldown',
+                        `${daysSinceStop.toFixed(1)}d since stop, exit $${exitPrice}, now $${currentPrice}`);
+                    continue;
+                }
+
+                logger.info('[StopCooldown] Re-entry allowed — price recovered materially since stop', {
+                    userId, symbol: opportunity.symbol, daysSinceStop: daysSinceStop.toFixed(1), exitPrice, currentPrice
+                });
             }
 
             // Abnormal gap filter: stocks that gapped >20% today are news-driven spikes
@@ -5285,7 +5346,11 @@ async function manageExistingPositions(userId) {
                             }
                         });
 
-                        // After a hard stop-loss, blacklist the symbol for 5 trading days to prevent re-entry
+                        // After a hard stop-loss, blacklist the symbol for up to 5 trading days —
+                        // shortened by the reasoned re-entry check above once price recovers
+                        // meaningfully. Exit price is encoded in `reason` (parsed back out by
+                        // that check) rather than a new column — keeps this a same-shape,
+                        // backward-compatible change to an existing generic table.
                         if (isHardStop) {
                             try {
                                 await query(
@@ -5294,9 +5359,9 @@ async function manageExistingPositions(userId) {
                                      ON CONFLICT (symbol) DO UPDATE
                                        SET reason = EXCLUDED.reason,
                                            expires_at = GREATEST(EXCLUDED.expires_at, asset_blacklist.expires_at)`,
-                                    [`COOLDOWN_${userId}_${holding.symbol}`, `Stop-loss cooldown for ${holding.symbol} (exit: ${(pnlPercent).toFixed(1)}%)`]
+                                    [`COOLDOWN_${userId}_${holding.symbol}`, `Stop-loss cooldown for ${holding.symbol} (exit: ${(pnlPercent).toFixed(1)}% @ $${exitPrice.toFixed(2)})`]
                                 );
-                                logger.info('[StopCooldown] 5-day re-entry cooldown set', { userId, symbol: holding.symbol });
+                                logger.info('[StopCooldown] Up-to-5-day re-entry cooldown set (reasoned early-exit possible)', { userId, symbol: holding.symbol, exitPrice });
                             } catch (cooldownErr) {
                                 logger.warn('[StopCooldown] Failed to insert cooldown', { error: cooldownErr.message });
                             }

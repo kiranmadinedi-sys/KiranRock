@@ -146,6 +146,72 @@ const calculateSimpleATR = (highs, lows, closes, period = 14) => {
 };
 
 /**
+ * ADX (Average Directional Index) — trend-strength indicator, 0-100. Not a
+ * direction signal (that's +DI/-DI) — just "is there a real trend here at all."
+ * Added 2026-09-06: adopted from sofus-nl/swing-trading-strategies, which uses
+ * ADX(14) > 20 as a confirmation filter (e.g. its Power Earnings Gap strategy)
+ * to avoid trading breakouts/gaps in a directionless, choppy tape.
+ *
+ * Uses proper Wilder's smoothing (not a plain moving average, unlike
+ * calculateSimpleATR above) — ADX is standardly defined with Wilder smoothing,
+ * and a borrowed threshold like ">20" only means what it's supposed to mean if
+ * computed the same way the source strategy computed it.
+ */
+const calculateSimpleADX = (highs, lows, closes, period = 14) => {
+    // Wilder's method needs `period` bars just to seed the smoothed DX average,
+    // on top of the `period` bars needed to seed the smoothed DM/TR themselves.
+    if (!closes || closes.length < period * 2 + 1) return 0;
+
+    const plusDM = [];
+    const minusDM = [];
+    const trueRanges = [];
+
+    for (let i = 1; i < closes.length; i++) {
+        const upMove   = highs[i] - highs[i - 1];
+        const downMove = lows[i - 1] - lows[i];
+
+        plusDM.push(upMove > downMove && upMove > 0 ? upMove : 0);
+        minusDM.push(downMove > upMove && downMove > 0 ? downMove : 0);
+
+        trueRanges.push(Math.max(
+            highs[i] - lows[i],
+            Math.abs(highs[i] - closes[i - 1]),
+            Math.abs(lows[i] - closes[i - 1])
+        ));
+    }
+
+    const wilderSmooth = (values) => {
+        const smoothed = [values.slice(0, period).reduce((s, v) => s + v, 0)];
+        for (let i = period; i < values.length; i++) {
+            smoothed.push(smoothed[smoothed.length - 1] - (smoothed[smoothed.length - 1] / period) + values[i]);
+        }
+        return smoothed;
+    };
+
+    const smoothedPlusDM  = wilderSmooth(plusDM);
+    const smoothedMinusDM = wilderSmooth(minusDM);
+    const smoothedTR      = wilderSmooth(trueRanges);
+
+    const dxValues = smoothedTR.map((tr, i) => {
+        if (tr === 0) return 0;
+        const plusDI  = 100 * (smoothedPlusDM[i] / tr);
+        const minusDI = 100 * (smoothedMinusDM[i] / tr);
+        const diSum   = plusDI + minusDI;
+        return diSum === 0 ? 0 : 100 * Math.abs(plusDI - minusDI) / diSum;
+    });
+
+    if (dxValues.length < period) return 0;
+
+    // ADX itself is a Wilder-smoothed average of the DX series, seeded by a
+    // plain average of the first `period` DX values.
+    let adx = dxValues.slice(0, period).reduce((s, v) => s + v, 0) / period;
+    for (let i = period; i < dxValues.length; i++) {
+        adx = (adx * (period - 1) + dxValues[i]) / period;
+    }
+    return adx;
+};
+
+/**
  * Calculate MACD (Moving Average Convergence Divergence)
  */
 const calculateMACD = (data, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) => {
@@ -690,6 +756,7 @@ module.exports = {
     calculateSimpleRSI,
     calculateSimpleMACD,
     calculateSimpleATR,
+    calculateSimpleADX,
 
     // Bollinger Bands
     calculateBollingerBands,

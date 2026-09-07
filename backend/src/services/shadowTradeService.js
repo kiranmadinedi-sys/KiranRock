@@ -165,6 +165,15 @@ async function updateShadowTrades() {
 /**
  * The actual payoff: is each gate protecting the account or costing it money?
  * Aggregates closed (fully-tracked) shadow trades by rejection reason.
+ *
+ * missed_upside_pct / avoided_downside_pct are the sum of positive / |negative|
+ * 20-day returns among that gate's shadow trades — "how much upside this gate
+ * kept us out of" vs. "how much loss this gate kept us out of." Deliberately
+ * kept in percentage points, not dollars: a shadow trade has no real position
+ * size behind it, so a dollar figure would be manufactured precision, not a
+ * real number. net_gate_value_pct = avoided − missed; positive means the gate
+ * is earning its keep so far, negative means it's more often blocking winners
+ * than losers.
  */
 async function getShadowTradeAttribution({ days = 90 } = {}) {
     await _ensureSchema();
@@ -174,14 +183,19 @@ async function getShadowTradeAttribution({ days = 90 } = {}) {
                ROUND(AVG(mfe_pct)::numeric, 2)        AS avg_mfe_pct,
                ROUND(AVG(mae_pct)::numeric, 2)        AS avg_mae_pct,
                ROUND(AVG(return_20d_pct)::numeric, 2) AS avg_return_20d_pct,
-               COUNT(*) FILTER (WHERE return_20d_pct > 0)::int AS would_have_won
+               COUNT(*) FILTER (WHERE return_20d_pct > 0)::int AS would_have_won,
+               ROUND(COALESCE(SUM(return_20d_pct) FILTER (WHERE return_20d_pct > 0), 0)::numeric, 1) AS missed_upside_pct,
+               ROUND(COALESCE(SUM(ABS(return_20d_pct)) FILTER (WHERE return_20d_pct < 0), 0)::numeric, 1) AS avoided_downside_pct
         FROM shadow_trades
         WHERE closed_at IS NOT NULL
           AND rejected_at >= NOW() - ($1 || ' days')::interval
         GROUP BY rejection_reason
         ORDER BY n DESC
     `, [days]);
-    return res.rows;
+    return res.rows.map(r => ({
+        ...r,
+        net_gate_value_pct: Number((parseFloat(r.avoided_downside_pct) - parseFloat(r.missed_upside_pct)).toFixed(1))
+    }));
 }
 
 function startShadowTradeScheduler() {
@@ -205,11 +219,15 @@ function startShadowTradeScheduler() {
                     const lines = attribution.map(a =>
                         `• *${a.rejection_reason}* — ${a.n} tracked, avg MFE +${a.avg_mfe_pct}%, ` +
                         `avg MAE ${a.avg_mae_pct}%, avg 20d return ${a.avg_return_20d_pct > 0 ? '+' : ''}${a.avg_return_20d_pct}% ` +
-                        `(${a.would_have_won}/${a.n} would have been profitable)`
+                        `(${a.would_have_won}/${a.n} would have been profitable)\n` +
+                        `   missed upside +${a.missed_upside_pct}pp · avoided downside ${a.avoided_downside_pct}pp · ` +
+                        `net ${a.net_gate_value_pct >= 0 ? '+' : ''}${a.net_gate_value_pct}pp`
                     );
                     const message =
                         `📊 *Shadow Trade Attribution* (last 90 days)\n\n` +
-                        `What happened to candidates each gate blocked:\n\n` +
+                        `What happened to candidates each gate blocked. Net > 0 means the gate is ` +
+                        `avoiding more loss than upside it's costing you so far — still an early read, ` +
+                        `not a verdict:\n\n` +
                         lines.join('\n');
                     try {
                         const alertService = require('./telegramAlertService');

@@ -344,6 +344,62 @@ async function prewarmPredictions() {
   return activePrewarmPromise;
 }
 
+// ── Frontend-matching prewarm (2026-09-07) ──────────────────────────────────
+// Found investigating "the /weekly page isn't fetching anything": the prewarm
+// above and the frontend page have ALWAYS used different query parameters —
+// prewarmPredictions() calls buildReportPredictionOptions() (limit=25,
+// minScore=60, tuned for a concise Telegram digest), but the actual
+// /weekly page requests limit=100&minScore=50 (see app/weekly/page.tsx).
+// Different parameters produce a different cache key (buildWeeklyPredictionCacheKey
+// includes both), so EVERY page load — for any of the three universe options —
+// has always been a cache miss, forcing a live scan: ~15-20s for MEGA_CAP,
+// ~60-90s for TOP_200, and 9-15 MINUTES for ALL (per getUniverseTimeoutMs's
+// own documented estimate) — which is what "not fetching" actually was:
+// a page load waiting on a scan far longer than any browser/proxy will wait.
+// The ALL option's snapshot cache also turned out to be a stale leftover from
+// May, under yet another parameter combination, doing nothing for anyone.
+//
+// This prewarms all three universes with the frontend's exact parameters, once
+// daily, well before the two Telegram-report prewarms so the heavy Yahoo calls
+// for ALL (the expensive one) don't overlap with them.
+let activeFrontendPrewarmPromise = null;
+const FRONTEND_UNIVERSES = ['MEGA_CAP', 'TOP_200', 'ALL'];
+
+async function prewarmFrontendPredictions() {
+  if (activeFrontendPrewarmPromise) {
+    console.log('[FrontendPrewarm] Existing prewarm already running, reusing it...');
+    return activeFrontendPrewarmPromise;
+  }
+
+  activeFrontendPrewarmPromise = (async () => {
+    try {
+      console.log(`[FrontendPrewarm] Starting warmup for ${FRONTEND_UNIVERSES.join(', ')} (limit=100, minScore=50, matching the /weekly page)...`);
+      for (const universe of FRONTEND_UNIVERSES) {
+        console.log(`[FrontendPrewarm] Warming ${universe} snapshot...`);
+        const result = await getWeeklyPredictions({ limit: 100, minScore: 50, universe });
+        console.log(`[FrontendPrewarm] ✓ ${universe} snapshot ready (${result.topPicks?.length || 0} top picks, ${result.totalAnalyzed || 0} analyzed)`);
+      }
+    } catch (error) {
+      console.error('[FrontendPrewarm] Error:', error.message);
+    } finally {
+      activeFrontendPrewarmPromise = null;
+    }
+  })();
+
+  return activeFrontendPrewarmPromise;
+}
+
+// 3:30 AM ET, Mon-Fri — before the 4:15/6:30 AM Telegram-report prewarms, so
+// ALL's 9-15 min scan has finished (or at least isn't competing for the same
+// Yahoo rate-limit budget) by the time those start.
+schedule.scheduleJob({
+  rule: '30 3 * * 1-5',
+  tz: 'America/New_York'
+}, async () => {
+  logger.info('[Telegram Reports Scheduler] 3:30 AM ET - Prewarming /weekly page snapshots (MEGA_CAP, TOP_200, ALL)');
+  await prewarmFrontendPredictions();
+});
+
 // Early full-universe warmup to persist the 820-name snapshot well before the send window.
 schedule.scheduleJob({
   rule: '15 4 * * 1-5',

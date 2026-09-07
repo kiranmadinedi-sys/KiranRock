@@ -216,18 +216,23 @@ function startShadowTradeScheduler() {
             if (etDay === 'Fri') {
                 const attribution = await getShadowTradeAttribution({ days: 90 });
                 if (attribution.length > 0) {
+                    // "Counterfactual," not P&L, in every user-facing label here — a shadow
+                    // trade was never actually taken, so none of this is real money gained
+                    // or lost. Kept explicit per feedback: easy to misread "+1.1pp" next to
+                    // a real Telegram P&L alert as if it were the same kind of number.
                     const lines = attribution.map(a =>
                         `• *${a.rejection_reason}* — ${a.n} tracked, avg MFE +${a.avg_mfe_pct}%, ` +
                         `avg MAE ${a.avg_mae_pct}%, avg 20d return ${a.avg_return_20d_pct > 0 ? '+' : ''}${a.avg_return_20d_pct}% ` +
                         `(${a.would_have_won}/${a.n} would have been profitable)\n` +
                         `   missed upside +${a.missed_upside_pct}pp · avoided downside ${a.avoided_downside_pct}pp · ` +
-                        `net ${a.net_gate_value_pct >= 0 ? '+' : ''}${a.net_gate_value_pct}pp`
+                        `counterfactual value ${a.net_gate_value_pct >= 0 ? '+' : ''}${a.net_gate_value_pct}pp`
                     );
                     const message =
                         `📊 *Shadow Trade Attribution* (last 90 days)\n\n` +
-                        `What happened to candidates each gate blocked. Net > 0 means the gate is ` +
-                        `avoiding more loss than upside it's costing you so far — still an early read, ` +
-                        `not a verdict:\n\n` +
+                        `Hypothetical outcomes only — none of this is real P&L. What happened to ` +
+                        `candidates each gate blocked, had they been taken. Counterfactual value > 0 ` +
+                        `means the gate is avoiding more loss than upside it's costing you so far — ` +
+                        `still an early read, not a verdict:\n\n` +
                         lines.join('\n');
                     try {
                         const alertService = require('./telegramAlertService');

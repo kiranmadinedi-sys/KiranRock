@@ -43,6 +43,7 @@ async function _ensureSchema() {
             target_price_ref  NUMERIC,
             sector            TEXT,
             setup_family      TEXT,
+            regime            TEXT,
             mfe_pct           NUMERIC,
             mae_pct           NUMERIC,
             return_5d_pct     NUMERIC,
@@ -58,6 +59,11 @@ async function _ensureSchema() {
         CREATE INDEX IF NOT EXISTS idx_shadow_trades_open
             ON shadow_trades (symbol) WHERE closed_at IS NULL
     `);
+    // Table may already exist from before `regime` was added (2026-09-07) — without
+    // this, every shadow trade recorded before today would be missing the one
+    // dimension needed for the eventual Gate x Score Bucket x Regime x 20D-Return
+    // analysis, and there'd be no way to backfill it after the fact.
+    await query(`ALTER TABLE shadow_trades ADD COLUMN IF NOT EXISTS regime TEXT`);
 }
 
 /**
@@ -76,17 +82,19 @@ async function recordShadowTrade(opportunity, userId, reason, detail) {
         INSERT INTO shadow_trades
             (symbol, user_id, rejection_date, rejection_reason, rejection_detail,
              ai_score, entry_price_ref, stop_price_ref, target_price_ref,
-             sector, setup_family)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+             sector, setup_family, regime)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
         ON CONFLICT (symbol, user_id, rejection_date) DO UPDATE SET
             rejection_reason = EXCLUDED.rejection_reason,
             rejection_detail = EXCLUDED.rejection_detail,
-            ai_score         = EXCLUDED.ai_score
+            ai_score         = EXCLUDED.ai_score,
+            regime           = EXCLUDED.regime
     `, [
         opportunity.symbol, String(userId), today, reason, detail || null,
         opportunity.aiScore || opportunity.confidence || null,
         entryPrice, opportunity.stop || null, opportunity.target || null,
-        opportunity.sector || null, opportunity.setupFamily || null
+        opportunity.sector || null, opportunity.setupFamily || null,
+        opportunity.regime || null
     ]);
 }
 

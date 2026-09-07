@@ -336,6 +336,37 @@ function startAssetUniverseScheduler() {
     } catch (err) {
         logger.debug('[AssetUniverseScheduler] Dynamic universe resume check failed', { error: err.message });
     }
+
+    // Resume-on-restart for the nightly universe scan itself (2026-09-07). Found live:
+    // a restart mid-scan left daily_universe_analysis at 17/484 symbols for the day —
+    // the ONLY things that ever re-check it are two fixed-time crons (8:00 AM catch-up,
+    // 4:30 PM main scan), neither of which fires again just because the process
+    // restarted. A restart at 2:35 AM sat there doing nothing until whichever of those
+    // two crons came next, hours later — visibly sparse/skewed results on the public
+    // Signals page in the meantime (same class of gap already fixed here for the
+    // dynamic/Blitz universe above, just never mirrored onto this one).
+    (async () => {
+        try {
+            const { query } = require('../config/database');
+            const nightlyScanSvc = require('./nightlyUniverseScanService');
+            const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+            const { rows } = await query(
+                `SELECT COUNT(*) AS cnt FROM daily_universe_analysis WHERE analysis_date = $1::date AND ai_score IS NOT NULL`,
+                [todayET]
+            );
+            const todayCount = parseInt(rows[0]?.cnt ?? 0);
+            if (todayCount < CATCHUP_THRESHOLD && !nightlyScanSvc.isScanRunning()) {
+                logger.info('[AssetUniverseScheduler] Nightly scan incomplete for today on startup — resuming now', {
+                    done: todayCount, remaining: CATCHUP_THRESHOLD - todayCount
+                });
+                nightlyScanSvc.runNightlyUniverseScan({ missingOnly: todayCount > 0 }).catch(err =>
+                    logger.error('[AssetUniverseScheduler] Nightly scan resume failed', { error: err.message })
+                );
+            }
+        } catch (err) {
+            logger.debug('[AssetUniverseScheduler] Nightly scan resume check failed', { error: err.message });
+        }
+    })();
 }
 
 function stopAssetUniverseScheduler() {

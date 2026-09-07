@@ -191,6 +191,8 @@ sector $ cap → correlation → portfolio heat
 
 **Order audit log** — Every order's full lifecycle (created → submitted → filled/canceled) is written under an idempotency key, with child keys for related sub-events like end-of-day cleanup — the same mechanism that once produced a false "blocked" reading in SENTINEL, and later a duplicate-journaling bug that re-logged the same stale order as canceled every day for months before being caught.
 
+**Shadow-trade tracking** *(new)* — `trade_rejection_log` already recorded which gate blocked a candidate; it never answered the more useful question — what happened to the price afterward. Any rejection with a genuinely tradeable score (≥85) now gets tracked forward as if the trade had been taken: max favorable/adverse excursion and 5/10/20-trading-day returns from the price at the moment of rejection, closed out after 20 trading days. A Friday summary reports, per gate, the missed upside vs. avoided downside — labeled explicitly as counterfactual, not P&L, since no capital was ever actually at risk. Captures market regime at the moment of rejection too, so the eventual analysis can ask "gate × score × regime × outcome," not just "gate × outcome."
+
 **Alerting** — Telegram delivers real-time alerts (stop-loss fired, large loss, daily-loss-limit reached, reconciliation issues) plus scheduled digests (market open/close, weekly performance recap, weekend prep, Friday's permanent weekly report).
 
 ---
@@ -210,10 +212,22 @@ What changed this session, roughly in the order it was found:
 9. **PULSE risk flags** — fraud, regulatory action, and accounting concerns now hard-skip a candidate — previously indistinguishable from ordinary bad news in the sentiment score.
 10. **Holiday-aware market hours** — five separate implementations of "is the market open," none checking the holiday calendar — unified into one.
 11. **ADX + two new chart patterns** — trend-strength confirmation, plus Frog-in-the-Pan and Power Earnings Gap detection — three ideas adopted from published strategy research.
+12. **Shadow-trade tracking** — built after cross-validating an external architecture review against the real database — most of its other recommendations (explainable scoring, rejection tracking, expectancy by setup) turned out to already exist. This was the one genuinely new piece: forward MFE/MAE/return tracking for high-score rejections.
+13. **Shadow-trade regime capture** — caught the same day, before real data accumulated without it: market regime wasn't being recorded on shadow trades at all, which would have blocked the eventual gate × regime analysis permanently for anything tracked before the fix.
 
 ---
 
-## 10. Known open items
+## 10. Current status
+
+As of this write-up, deliberately not business as usual:
+
+> **PANTHEON is in observation mode.** Trading logic, risk gates, and scoring are frozen. No new scoring factors, no threshold or gate tuning, no new AI layers, no exit-logic changes based on a handful of trades — even where a plausible-looking improvement comes up. The point: let `trade_rejection_log` and the new shadow-trade table accumulate a real sample before touching anything that would confound reading it. Three exceptions remain in scope: demonstrable bugs, safety/reliability issues (reconciliation, orphaned orders, missing stops, data corruption), and data-integrity gaps in what's being observed — exactly the regime-capture fix above.
+
+The next real analysis worth running — gate × score bucket × market regime × 20-day outcome — needs a meaningful number of closed shadow trades first. Building it earlier would just be reading noise. Until then, the highest-value thing to do with the system is leave it alone and let it generate evidence.
+
+---
+
+## 11. Known open items
 
 Deliberately unresolved, and why:
 

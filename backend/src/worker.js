@@ -18,6 +18,7 @@ const marketMonitorService         = require('./services/marketMonitorService');
 const systemHealthMonitor          = require('./services/systemHealthMonitorService');
 const intradayScheduler            = require('./services/intradayScheduler');
 const missedOpportunityService     = require('./services/missedOpportunityService');
+const shadowTradeService           = require('./services/shadowTradeService');
 // Crypto trading runs in its own dedicated PM2 process (cryptoWorker.js), not
 // here — see that file's docstring for why. Not required in this process.
 const {
@@ -78,6 +79,7 @@ async function shutdownWorker(signal, options = {}) {
         systemHealthMonitor.stopSystemHealthMonitor();
         intradayScheduler.stopScheduler();
         missedOpportunityService.stopMissedOpportunityScheduler();
+        shadowTradeService.stopShadowTradeScheduler();
     } catch (error) {
         console.error('[Worker] Error while stopping services:', error.message);
     }
@@ -180,6 +182,9 @@ async function startWorker(options = {}) {
 
     console.log('\n🔍 Starting Missed Opportunity Monitor (daily 5:00 PM ET check)...');
     missedOpportunityService.startMissedOpportunityScheduler();
+
+    console.log('\n👻 Starting Shadow Trade Tracker (daily 6:00 PM ET update)...');
+    shadowTradeService.startShadowTradeScheduler();
 
     // Load Telegram schedules only after leadership is acquired.
     loadTelegramSchedules();

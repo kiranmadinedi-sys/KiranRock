@@ -568,8 +568,20 @@ function getGateStats(userId) {
 // threshold (a real opportunity, not just noise). Global (not per-user) — last
 // gate to reject a symbol on a given day wins via upsert. Fire-and-forget: never
 // let logging a rejection reason block or slow down the buy loop itself.
-function _recordRejection(symbol, reason, detail) {
-    const today = new Date().toISOString().slice(0, 10);
+//
+// SHADOW-TRADE EXTENSION (2026-09-07): the log above answers "why was this
+// rejected" but never "what happened to the price afterward" — the actual
+// question that tells you whether a gate is protecting the account or costing
+// it real money. For any rejection with a genuinely tradeable score, also hand
+// off to shadowTradeService, which tracks forward MFE/MAE/N-day return as if
+// the trade had been taken. Gated by score so routine, low-conviction
+// rejections (most of them) don't get tracked — only ones worth asking
+// "should this gate have let it through?" about.
+const SHADOW_TRADE_MIN_SCORE = 85;
+
+function _recordRejection(opportunity, userId, reason, detail) {
+    const symbol = opportunity.symbol;
+    const today  = new Date().toISOString().slice(0, 10);
     query(`
         INSERT INTO trade_rejection_log (rejection_date, symbol, reason, detail)
         VALUES ($1, $2, $3, $4)
@@ -580,6 +592,14 @@ function _recordRejection(symbol, reason, detail) {
     `, [today, symbol, reason, detail || null]).catch(err => {
         logger.debug('[RejectionLog] Failed to record rejection', { symbol, reason, error: err.message });
     });
+
+    const score = opportunity.aiScore || opportunity.confidence || 0;
+    if (score >= SHADOW_TRADE_MIN_SCORE) {
+        try {
+            require('./shadowTradeService').recordShadowTrade(opportunity, userId, reason, detail)
+                .catch(err => logger.debug('[ShadowTrade] Failed to record', { symbol, reason, error: err.message }));
+        } catch (_) { /* never let this block the buy loop */ }
+    }
 }
 
 async function getBleedingSymbols(userId) {
@@ -3639,7 +3659,7 @@ async function executeAutonomousTrading(userId) {
                     userId, cap: regimeNewPosCap, regime: regime.regime
                 });
                 _bumpGateStat(userId, 'regimeCap');
-                _recordRejection(opportunity.symbol, 'regime_cap', `${regime.regime} cap=${regimeNewPosCap}`);
+                _recordRejection(opportunity, userId, 'regime_cap', `${regime.regime} cap=${regimeNewPosCap}`);
                 break;
             }
 
@@ -3648,7 +3668,7 @@ async function executeAutonomousTrading(userId) {
                 logger.info('[EarningsGuard] Skipping — earnings within 4 days, IV crush risk', {
                     userId, symbol: opportunity.symbol, daysToEarnings: opportunity.daysToEarnings
                 });
-                _recordRejection(opportunity.symbol, 'earnings_guard', `${opportunity.daysToEarnings}d to earnings`);
+                _recordRejection(opportunity, userId, 'earnings_guard', `${opportunity.daysToEarnings}d to earnings`);
                 continue;
             }
 
@@ -3747,7 +3767,7 @@ async function executeAutonomousTrading(userId) {
                     logger.info('[StopCooldown] Re-entry blocked — no material change since stop', {
                         userId, symbol: opportunity.symbol, daysSinceStop: daysSinceStop.toFixed(1), exitPrice, currentPrice
                     });
-                    _recordRejection(opportunity.symbol, 'stop_cooldown',
+                    _recordRejection(opportunity, userId, 'stop_cooldown',
                         `${daysSinceStop.toFixed(1)}d since stop, exit $${exitPrice}, now $${currentPrice}`);
                     continue;
                 }
@@ -3882,7 +3902,7 @@ async function executeAutonomousTrading(userId) {
                     riskReward: opportunity.riskReward,
                     required:   riskConfig.minRiskRewardRatio || 2.5
                 });
-                _recordRejection(opportunity.symbol, 'risk_reward', `R/R ${opportunity.riskReward} < ${riskConfig.minRiskRewardRatio || 2.5}`);
+                _recordRejection(opportunity, userId, 'risk_reward', `R/R ${opportunity.riskReward} < ${riskConfig.minRiskRewardRatio || 2.5}`);
                 continue;
             }
 
@@ -3900,7 +3920,7 @@ async function executeAutonomousTrading(userId) {
                         userId, symbol: opportunity.symbol,
                         scanEntry: _scanEntry.toFixed(2), livePrice: _livePrice.toFixed(2)
                     });
-                    _recordRejection(opportunity.symbol, 'gap_gate', `+${_gapPct}% above scan entry`);
+                    _recordRejection(opportunity, userId, 'gap_gate', `+${_gapPct}% above scan entry`);
                     continue;
                 }
             } catch (_gapErr) { /* quote unavailable — proceed without gate */ }
@@ -3914,7 +3934,7 @@ async function executeAutonomousTrading(userId) {
                     userId, symbol: opportunity.symbol,
                     distFromSma20Pct: _distSma20.toFixed(1) + '% (limit: 10%)'
                 });
-                _recordRejection(opportunity.symbol, 'extension_guard', `+${_distSma20.toFixed(1)}% above SMA20`);
+                _recordRejection(opportunity, userId, 'extension_guard', `+${_distSma20.toFixed(1)}% above SMA20`);
                 continue;
             }
 
@@ -3941,7 +3961,7 @@ async function executeAutonomousTrading(userId) {
                     userId, symbol: opportunity.symbol, sector,
                     count: sectorPositionCount, max: maxPositionsPerSector
                 });
-                _recordRejection(opportunity.symbol, 'sector_count_cap', `${sector}: ${sectorPositionCount}/${maxPositionsPerSector}`);
+                _recordRejection(opportunity, userId, 'sector_count_cap', `${sector}: ${sectorPositionCount}/${maxPositionsPerSector}`);
                 continue;
             }
 
@@ -3970,7 +3990,7 @@ async function executeAutonomousTrading(userId) {
                     sectorLimit: sectorLimit.toFixed(2),
                     sectorCapPct: `${(sectorAllocPct * 100).toFixed(0)}%`
                 });
-                _recordRejection(opportunity.symbol, 'sector_dollar_cap', `${sector}: $${sectorCurrent.toFixed(0)}/$${sectorLimit.toFixed(0)}`);
+                _recordRejection(opportunity, userId, 'sector_dollar_cap', `${sector}: $${sectorCurrent.toFixed(0)}/$${sectorLimit.toFixed(0)}`);
                 continue;
             }
 
@@ -3981,7 +4001,7 @@ async function executeAutonomousTrading(userId) {
                 logger.info('Skipping stock — too correlated with existing holdings', {
                     userId, symbol: opportunity.symbol
                 });
-                _recordRejection(opportunity.symbol, 'correlation');
+                _recordRejection(opportunity, userId, 'correlation');
                 continue;
             }
 
@@ -4232,7 +4252,7 @@ async function executeAutonomousTrading(userId) {
                         userId, maxHeatUsd: _maxHeatUsd.toFixed(2), runningHeatUsd: runningHeatUsd.toFixed(2)
                     });
                     _bumpGateStat(userId, 'heatGate');
-                    _recordRejection(opportunity.symbol, 'heat_gate', `budget exhausted at $${_maxHeatUsd.toFixed(0)}`);
+                    _recordRejection(opportunity, userId, 'heat_gate', `budget exhausted at $${_maxHeatUsd.toFixed(0)}`);
                     break;
                 }
                 // Dollar risk = position notional × stop distance fraction — shares × price cancels out.

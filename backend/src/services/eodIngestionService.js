@@ -525,4 +525,9 @@ module.exports = {
     backfillNewSymbols,
     startEodScheduler,
     stopEodScheduler,
+    // Exposed 2026-09-07 for a one-off full-market technical screen (see
+    // scripts/fullMarketScreen.js) — the existing bulk fetch, unchanged, just
+    // no longer private. runEodIngestion's own filter-to-our-universe behavior
+    // is untouched; this just lets another caller see the unfiltered response.
+    fetchGroupedDailyBars,
 };

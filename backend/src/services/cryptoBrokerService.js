@@ -65,15 +65,25 @@ async function _getAuth(userId) {
  * below the stop as a slippage buffer — tight enough to fill promptly once
  * triggered on a liquid pair, loose enough not to miss the fill entirely
  * during a fast move.
+ *
+ * precision: found 2026-09-08 — stopPrice/limitPrice were previously
+ * stringified straight from chained float math (fillPrice * (1-pct/100),
+ * then that result * 0.995), which routinely produces 15+ decimal IEEE754
+ * noise (e.g. 6.873719999999999). Alpaca crypto enforces a max decimal
+ * precision per pair and rejected every retry identically since the 3
+ * attempts never changed the price. toFixed() up front avoids the noise for
+ * the common case; the caller still adapts `precision` down further if a
+ * pair's real ceiling is stricter than the default.
  */
-async function _placeCryptoStopOrder(userId, symbol, qty, stopPrice) {
+async function _placeCryptoStopOrder(userId, symbol, qty, stopPrice, precision = 8) {
     const { base, headers } = await _getAuth(userId);
-    const limitPrice = parseFloat(stopPrice) * 0.995;
+    const roundedStop = Number(stopPrice).toFixed(precision);
+    const limitPrice  = (parseFloat(roundedStop) * 0.995).toFixed(precision);
     return axios.post(`${base}/orders`, {
         symbol, qty: String(qty), side: 'sell',
         type: 'stop_limit', time_in_force: 'gtc',
-        stop_price: String(parseFloat(stopPrice)),
-        limit_price: String(limitPrice)
+        stop_price: roundedStop,
+        limit_price: limitPrice
     }, { headers });
 }
 
@@ -124,28 +134,48 @@ async function buyCrypto(userId, symbol, quantity, { stopLossPercent, takeProfit
     // Retry + loud alert on failure — see file docstring. 3 attempts, 1.5s backoff,
     // matching the fix just applied to Blitz's equity path the same night.
     let stopPlaced = false;
+    let precision = 8; // typical Alpaca crypto price-precision ceiling; narrowed below
+                        // if a pair's real limit turns out to be stricter than that.
+    // Alpaca crypto buys silently short the received base-asset qty vs.
+    // filled_qty (found 2026-09-08: order said 71.382173 UNI filled, real
+    // position was 71.203717567 — a clean 0.25% fee taken out of the asset,
+    // not billed separately). sellCrypto already guards this with
+    // Math.min(dbQty, realQty); buyCrypto didn't, so the stop order requested
+    // more than the account actually held and failed every retry identically.
+    // Adapt down to whatever Alpaca reports as actually available.
+    let stopQty = filledQty;
     const STOP_RETRY_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= STOP_RETRY_ATTEMPTS && !stopPlaced; attempt++) {
         try {
-            await _placeCryptoStopOrder(userId, symbol, filledQty, stopLossPrice);
+            await _placeCryptoStopOrder(userId, symbol, stopQty, stopLossPrice, precision);
             stopPlaced = true;
-            if (attempt > 1) logger.info('[CryptoBot] Protective stop placed on retry', { userId, symbol, attempt });
+            if (attempt > 1) logger.info('[CryptoBot] Protective stop placed on retry', { userId, symbol, attempt, precision, stopQty });
         } catch (stopErr) {
+            const msg = stopErr.response?.data?.message || stopErr.message;
+            // Same deterministic failure would otherwise repeat identically across
+            // every retry (found 2026-09-08, all 3 attempts failed on the exact
+            // same over-precise price / over-stated qty) — narrow to whatever
+            // Alpaca reports as the real ceiling.
+            const precisionMatch = /maximum precision of (\d+) decimal places/i.exec(msg);
+            if (precisionMatch) precision = Math.min(precision, parseInt(precisionMatch[1], 10));
+            const balanceMatch = /insufficient balance for \S+ \(requested: [\d.]+, available: ([\d.]+)\)/i.exec(msg);
+            if (balanceMatch) stopQty = Math.min(stopQty, parseFloat(balanceMatch[1]));
+
             if (attempt < STOP_RETRY_ATTEMPTS) {
                 logger.warn(`[CryptoBot] Stop placement attempt ${attempt}/${STOP_RETRY_ATTEMPTS} failed, retrying`, {
-                    userId, symbol, err: stopErr.response?.data?.message || stopErr.message
+                    userId, symbol, err: msg, nextPrecision: precision, nextStopQty: stopQty
                 });
                 await new Promise(r => setTimeout(r, 1500));
             } else {
                 logger.error('[CryptoBot] Failed to place protective stop after entry, all retries exhausted — position relies on software backstop only', {
-                    userId, symbol, err: stopErr.response?.data?.message || stopErr.message
+                    userId, symbol, err: msg
                 });
                 try {
                     const tg = require('./telegramAlertService');
                     await tg.sendMessage(userId,
                         `⚠️ *Crypto Stop-Loss Warning*\n\n` +
                         `Bought ${filledQty} ${symbol} @ $${fillPrice.toFixed(2)}, but the protective stop order failed ` +
-                        `${STOP_RETRY_ATTEMPTS}x in a row: ${stopErr.response?.data?.message || stopErr.message}\n\n` +
+                        `${STOP_RETRY_ATTEMPTS}x in a row: ${msg}\n\n` +
                         `This position is running on the software-only backstop (checked every ~5min) instead of a ` +
                         `real broker-side stop until the next scan cycle. Consider checking it manually — crypto trades ` +
                         `24/7, this can't wait for market open.`
@@ -155,11 +185,15 @@ async function buyCrypto(userId, symbol, quantity, { stopLossPercent, takeProfit
         }
     }
 
+    // Record whatever quantity Alpaca actually confirmed as available (stopQty
+    // only ever moves down from filledQty, and only on real broker feedback),
+    // not the pre-fee filled_qty, so a later sellCrypto isn't sizing off a
+    // number the account never really held.
     const position = await cryptoDb.openPosition(userId, symbol, {
-        quantity: filledQty, price: fillPrice, stopLossPrice, takeProfitPrice, brokerOrderId: order.data.id
+        quantity: stopQty, price: fillPrice, stopLossPrice, takeProfitPrice, brokerOrderId: order.data.id
     });
 
-    logger.info('[CryptoBot] Entry filled', { userId, symbol, qty: filledQty, fillPrice, stopLossPrice, takeProfitPrice });
+    logger.info('[CryptoBot] Entry filled', { userId, symbol, qty: stopQty, fillPrice, stopLossPrice, takeProfitPrice });
     return position;
 }
 

@@ -271,11 +271,36 @@ async function runNightlyUniverseScan(opts = {}) {
         // live: '+0 analyzed ... 0.0min' followed by the same 'Resuming (43 done...)'
         // checkpoint, over and over). 3h is comfortably above the realistic worst case and
         // this now only exists as a true last-resort backstop, not a normal-operation bound.
-        const [fullUniverse, vixLevel, regime] = await Promise.all([
-            _timeout(marketScreenerService.getStockUniverse(), 3 * 60 * 60 * 1000, []),
-            _timeout(getVixLevel(), 15000, 15),                          // fallback VIX=15 if Yahoo hangs
-            _timeout(marketRegimeService.getMarketRegime(), 15000, null) // fallback regime=null → NEUTRAL
-        ]);
+        // Same-day resume shortcut — added 2026-09-08. A restart mid-scan wipes
+        // getStockUniverse()'s in-memory cache (cachedStockUniverse/lastScreenTime
+        // live in marketScreenerService's module scope), so every resume was forcing
+        // the FULL ~13,000-symbol pool back through HERMES's quote-fetch/filter loop
+        // just to get back the same candidate list it already had. A large chunk of
+        // Alpaca's "active" pool is functionally dead (delisted-in-practice legacy
+        // tickers, SPAC units/warrants Alpaca still marks tradable), and every one of
+        // those cascades through Alpaca→Polygon→Yahoo before failing — confirmed live
+        // this same night: that flood kept tripping the shared Yahoo circuit breaker,
+        // which blocks every OTHER Yahoo-dependent call process-wide for 60s at a
+        // time, stalling this scan's own next symbol for a full hour across two
+        // restarts with zero progress. If HERMES already finished building today's
+        // pool (marked via hermes_build_status), skip straight to that list instead.
+        let fullUniverse;
+        const completedSymbols = await marketScreenerService.getCompletedHermesSymbols(today).catch(() => null);
+        let vixLevel, regime;
+        if (completedSymbols && completedSymbols.length > 0) {
+            console.log(`[NightlyScan] HERMES build already completed today (${completedSymbols.length} qualified symbols) — resuming from hermes_symbol_log, skipping a full rebuild`);
+            fullUniverse = completedSymbols.filter(s => s.tier !== 1).map(s => ({ symbol: s.symbol, isETF: false }));
+            [vixLevel, regime] = await Promise.all([
+                _timeout(getVixLevel(), 15000, 15),
+                _timeout(marketRegimeService.getMarketRegime(), 15000, null)
+            ]);
+        } else {
+            [fullUniverse, vixLevel, regime] = await Promise.all([
+                _timeout(marketScreenerService.getStockUniverse(), 3 * 60 * 60 * 1000, []),
+                _timeout(getVixLevel(), 15000, 15),                          // fallback VIX=15 if Yahoo hangs
+                _timeout(marketRegimeService.getMarketRegime(), 15000, null) // fallback regime=null → NEUTRAL
+            ]);
+        }
         if (fullUniverse.length === 0) {
             const elapsedMin = ((Date.now() - startTime) / 60000).toFixed(1);
             console.error(`[NightlyScan] getStockUniverse() timed out after 3h — aborting this run rather than scanning an empty universe (elapsed ${elapsedMin}min)`);

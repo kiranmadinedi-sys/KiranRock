@@ -71,6 +71,72 @@ function _withTimeout(promise, ms) {
 // what HERMES actually saw that night). This persists the real cap/volume/pass-fail HERMES
 // used for every symbol, so that question is a lookup instead of a re-investigation.
 // Fire-and-forget: never blocks or fails the actual HERMES computation.
+// Marks a HERMES build fully complete for a given ET date, once every candidate
+// has been through the quote-fetch/filter loop below — added 2026-09-08 after a
+// restart mid-scan was found forcing the ENTIRE ~13,000-symbol pool back through
+// that same loop just to resume, since cachedStockUniverse/lastScreenTime above
+// are in-memory only and a restart wipes them. Real cost of that rebuild: a large
+// fraction of Alpaca's "active" pool is functionally dead (delisted-in-practice
+// legacy tickers, SPAC units/warrants Alpaca still lists as tradable) and every
+// quote lookup for one of those cascades through Alpaca→Polygon→Yahoo before
+// failing, repeatedly tripping the shared Yahoo circuit breaker and blocking every
+// OTHER Yahoo-dependent call process-wide for 60s at a time — including whatever
+// the nightly scan needed next. nightlyUniverseScanService checks this marker
+// before calling getStockUniverse() again same-day and, if a build already
+// completed, rebuilds its candidate list straight from hermes_symbol_log instead
+// (see its own comment) — skipping the expensive loop entirely on a resume.
+async function _markHermesBuildComplete(universeDate, symbolCount) {
+    try {
+        const { query } = require('../config/database');
+        await query(
+            `CREATE TABLE IF NOT EXISTS hermes_build_status (
+                 universe_date DATE PRIMARY KEY,
+                 completed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                 symbol_count  INTEGER NOT NULL
+             )`
+        );
+        await query(
+            `INSERT INTO hermes_build_status (universe_date, completed_at, symbol_count)
+             VALUES ($1, NOW(), $2)
+             ON CONFLICT (universe_date) DO UPDATE SET
+                 completed_at = NOW(), symbol_count = EXCLUDED.symbol_count`,
+            [universeDate, symbolCount]
+        );
+    } catch (err) {
+        console.warn('[HERMES] Could not persist build-complete marker (non-fatal):', err.message);
+    }
+}
+
+/**
+ * Same-day resume support for nightlyUniverseScanService — see
+ * _markHermesBuildComplete's comment for why this exists. Returns the symbol
+ * list straight from hermes_symbol_log's passed=true rows (already tier-sorted)
+ * when a build for this ET date completed, without touching Alpaca/Polygon/
+ * Yahoo again. Returns null when no completed build is on record for this
+ * date, so the caller falls back to a normal getStockUniverse() build.
+ */
+async function getCompletedHermesSymbols(universeDate) {
+    try {
+        const { query } = require('../config/database');
+        const marker = await query(
+            `SELECT 1 FROM hermes_build_status WHERE universe_date = $1`,
+            [universeDate]
+        );
+        if (marker.rows.length === 0) return null;
+
+        const rows = await query(
+            `SELECT symbol, tier FROM hermes_symbol_log
+             WHERE universe_date = $1 AND passed = true
+             ORDER BY tier ASC NULLS LAST, symbol ASC`,
+            [universeDate]
+        );
+        return rows.rows.map(r => ({ symbol: r.symbol, tier: r.tier }));
+    } catch (err) {
+        console.warn('[HERMES] getCompletedHermesSymbols lookup failed, falling back to a fresh build:', err.message);
+        return null;
+    }
+}
+
 async function _logHermesSymbol(universeDate, symbol, marketCap, avgVol, capFloor, minVolume, passed, failReason, isVelocity, tier) {
     try {
         const { query } = require('../config/database');
@@ -490,6 +556,7 @@ async function _buildStockUniverse() {
             })
             .join(' ');
         console.log(`[HERMES] Volume-floor gain curve (lowering from current ${minVolume.toLocaleString()}): ${gainCurve}`);
+        _markHermesBuildComplete(universeDate, allSymbols.length).catch(() => {});
         return selected;
     } catch (error) {
         console.error('[Market Screener] Error:', error);
@@ -828,4 +895,5 @@ module.exports = {
     refreshCache,
     formatMarketCap,
     computeRS,
+    getCompletedHermesSymbols,
 };

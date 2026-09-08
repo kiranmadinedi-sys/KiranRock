@@ -1969,11 +1969,25 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
                 const HARD_SKIP_FLAGS = new Set([
                     'fraud_allegation', 'regulatory_action', 'accounting_concern', 'delisting_risk'
                 ]);
-                if (riskFlags.some(f => HARD_SKIP_FLAGS.has(f))) {
+                const hasHardSkipFlag = riskFlags.some(f => HARD_SKIP_FLAGS.has(f));
+                // Hard-skip only on Gemini's own read. Found 2026-09-07: the Ollama
+                // fallback (especially the small "fast" live model under queue
+                // backpressure when Gemini is quota-exhausted) fabricates these often
+                // enough to be net-harmful — it hard-skipped 41 symbols in one
+                // afternoon, including MU on a legitimate earnings-driven breakout
+                // (score 100, zero real fraud/regulatory story) plus HPQ and CVE with
+                // the identical flag combo seconds apart. An Ollama-sourced hard-skip
+                // tier flag now falls through to the same heavy-penalty treatment as
+                // the soft flags instead of an absolute veto.
+                if (hasHardSkipFlag && geminiResult.source === 'gemini') {
                     logger.info(`[PULSE/RiskFlag] ${symbol} — hard skip`, { riskFlags, source: geminiResult.source });
                     return null;
                 }
-                // Softer flags (executive_departure, litigation_material) — heavy
+                if (hasHardSkipFlag) {
+                    logger.info(`[PULSE/RiskFlag] ${symbol} — downgraded to penalty, untrusted source`, { riskFlags, source: geminiResult.source });
+                }
+                // Softer flags (executive_departure, litigation_material), and
+                // hard-skip-tier flags from an unverified (Ollama) source — heavy
                 // penalty, not an absolute veto; these sometimes resolve fine.
                 const penalty = Math.min(30, riskFlags.length * 15);
                 aiScore -= penalty;

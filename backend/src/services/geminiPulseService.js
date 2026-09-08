@@ -42,11 +42,18 @@ if (!GEMINI_API_KEY) {
     logger.warn('[PULSE/Gemini] GEMINI_API_KEY not configured — falling back to local Ollama if available');
 }
 
-// Global rate limiter: max 1 request per 1.5 seconds to stay well within 30 RPM free tier
+// Global rate limiter. Was hardcoded to 1 request/1.5s (~40 RPM) to stay under
+// the free tier's 30 RPM ceiling — left in place even after billing was linked
+// 2026-09-08 (paid Tier 1), silently capping calls at roughly free-tier speed
+// regardless of the higher limit now available. Configurable so it can be
+// tuned up further without a code change; the existing 429 retry+cooldown in
+// analyzeHeadlines() is the safety net if this guess is still too aggressive
+// for the account's real ceiling.
+const GEMINI_MIN_CALL_GAP_MS = parseInt(process.env.GEMINI_MIN_CALL_GAP_MS || '400', 10); // ~150 RPM
 let _lastCallTime = 0;
 async function _throttle() {
     const now = Date.now();
-    const gap = 1500 - (now - _lastCallTime);
+    const gap = GEMINI_MIN_CALL_GAP_MS - (now - _lastCallTime);
     if (gap > 0) await new Promise(r => setTimeout(r, gap));
     _lastCallTime = Date.now();
 }

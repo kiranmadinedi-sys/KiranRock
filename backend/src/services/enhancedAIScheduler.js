@@ -7,6 +7,8 @@ const alertService = require('./telegramAlertService');
 const vixMonitor = require('./vixSpikeMonitorService');
 const premarketGapService = require('./premarketGapAlertService');
 const extendedHoursTradingService = require('./extendedHoursTradingService');
+const { getMarketRegime } = require('./marketRegimeService');
+const { getGlobalSentiment } = require('./globalSentimentService');
 
 /**
  * Enhanced AI Trading Scheduler - PostgreSQL Version
@@ -895,12 +897,45 @@ async function runMorningBriefing() {
         const reversals  = tickers.filter(t => t.setup_family === 'oversold_reversal');
         const other      = tickers.filter(t => !['breakout_leader','quality_continuation','oversold_reversal'].includes(t.setup_family));
 
+        // Real regime + VIX read, replacing what used to be a hardcoded "Regime: BULL"
+        // string here regardless of actual conditions (found 2026-09-08, in response to
+        // a request for routine VIX/situation updates — real spikes already get their
+        // own immediate alert from vixSpikeMonitorService; this is the calm-state daily
+        // context companion to that, reusing the same 20/25/30/40 thresholds so the two
+        // never disagree on what counts as "elevated").
+        let regimeLine = '🐂 Market opens in ~1.5h';
+        let vixLine = null;
+        try {
+            const regime = await getMarketRegime();
+            const vix = regime.vixLevel;
+            const vixTag = vix >= 40 ? '🚨 Panic' : vix >= 30 ? '🔴 Extreme' : vix >= 25 ? '🟠 High' : vix >= 20 ? '🟡 Elevated' : '🟢 Calm';
+            regimeLine = `${regime.regime === 'BULL' ? '🐂' : regime.regime === 'BEAR' ? '🐻' : '⚖️'} Market opens in ~1.5h | Regime: ${regime.regime} (${regime.regimeType})`;
+            vixLine = `📉 VIX: ${vix.toFixed(1)} — ${vixTag}`;
+        } catch (err) {
+            console.warn('[MorningBriefing] Regime/VIX lookup failed, using generic line:', err.message);
+        }
+
+        let overnightLine = null;
+        try {
+            const sentiment = await getGlobalSentiment();
+            const d = sentiment?.rawData || {};
+            const parts = [];
+            if (d.nikkeiPct !== null && d.nikkeiPct !== undefined) parts.push(`Nikkei ${d.nikkeiPct >= 0 ? '+' : ''}${d.nikkeiPct.toFixed(1)}%`);
+            if (d.hsiPct    !== null && d.hsiPct    !== undefined) parts.push(`HSI ${d.hsiPct >= 0 ? '+' : ''}${d.hsiPct.toFixed(1)}%`);
+            if (d.sensexPct !== null && d.sensexPct !== undefined) parts.push(`Sensex ${d.sensexPct >= 0 ? '+' : ''}${d.sensexPct.toFixed(1)}%`);
+            if (parts.length) overnightLine = `🌏 Overnight: ${parts.join(' | ')}`;
+        } catch (err) {
+            console.warn('[MorningBriefing] Overnight sentiment lookup failed, omitting:', err.message);
+        }
+
         const lines = [
             `📊 *Morning Briefing — ${etDate}*`,
-            `🐂 Market opens in ~1.5h | Regime: BULL`,
-            '',
-            `🌟 *STRONG BUY: ${tickers.length} tickers* from PANTHEON overnight scan`,
+            regimeLine,
         ];
+        if (vixLine) lines.push(vixLine);
+        if (overnightLine) lines.push(overnightLine);
+        lines.push('');
+        lines.push(`🌟 *STRONG BUY: ${tickers.length} tickers* from PANTHEON overnight scan`);
 
         const fmt = t => `  ${t.symbol} — Score ${t.ai_score} | ${t.sector || 'Unknown'}`;
 

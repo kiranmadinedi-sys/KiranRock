@@ -577,7 +577,14 @@ function getGateStats(userId) {
 // the trade had been taken. Gated by score so routine, low-conviction
 // rejections (most of them) don't get tracked — only ones worth asking
 // "should this gate have let it through?" about.
-const SHADOW_TRADE_MIN_SCORE = 85;
+//
+// LOWERED 85 -> 65 (2026-09-08) building Gate Alpha Attribution: the report
+// compares actual BUYs against rejected STRONG BUY/BUY candidates, but BUY
+// itself starts at score 65 (STRONG BUY at 75) — the old 85 floor silently
+// excluded the entire 65-84 range from ever being tracked, which is most of
+// the population the report needs. Logging-threshold only; does not change
+// any actual gate/scoring/execution decision.
+const SHADOW_TRADE_MIN_SCORE = 65;
 
 function _recordRejection(opportunity, userId, reason, detail) {
     const symbol = opportunity.symbol;

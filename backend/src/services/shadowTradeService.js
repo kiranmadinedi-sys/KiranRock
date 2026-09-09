@@ -21,10 +21,9 @@
 const cron       = require('node-cron');
 const { query }  = require('../config/database');
 const { logger } = require('../utils/logger');
+const { computeForwardMetrics, barsAfter, TRACK_TRADING_DAYS } = require('../utils/forwardReturnCalculator');
 
 const CRON_TZ           = { timezone: 'America/New_York' };
-const TRACK_TRADING_DAYS = 20;   // how long to keep watching before closing a shadow trade out
-const RETURN_CHECKPOINTS = [5, 10, 20];
 
 let job = null;
 
@@ -124,24 +123,12 @@ async function updateShadowTrades() {
 
             // Only bars strictly after the rejection matter for MFE/MAE/returns.
             const rejectedAtMs = new Date(row.rejected_at).getTime();
-            const barsSince = bars.filter(b => new Date(b.time || b.date).getTime() > rejectedAtMs);
+            const barsSince = barsAfter(bars, rejectedAtMs);
             if (barsSince.length === 0) continue; // no new bar yet (rejected today)
 
             const entry = parseFloat(row.entry_price_ref);
-            const highs = barsSince.map(b => b.high);
-            const lows  = barsSince.map(b => b.low);
-            const mfePct = ((Math.max(...highs) - entry) / entry) * 100;
-            const maePct = ((Math.min(...lows)  - entry) / entry) * 100;
-
-            const returns = {};
-            for (const n of RETURN_CHECKPOINTS) {
-                if (barsSince.length >= n) {
-                    returns[n] = ((barsSince[n - 1].close - entry) / entry) * 100;
-                }
-            }
-
-            const tradingDaysTracked = barsSince.length;
-            const shouldClose = tradingDaysTracked >= TRACK_TRADING_DAYS;
+            const metrics = computeForwardMetrics(barsSince, entry);
+            if (!metrics) continue;
 
             await query(`
                 UPDATE shadow_trades
@@ -153,13 +140,13 @@ async function updateShadowTrades() {
                     closed_at = CASE WHEN $6 THEN NOW() ELSE closed_at END
                 WHERE id = $7
             `, [
-                mfePct, maePct,
-                returns[5] ?? null, returns[10] ?? null, returns[20] ?? null,
-                shouldClose, row.id
+                metrics.mfePct, metrics.maePct,
+                metrics.return5dPct, metrics.return10dPct, metrics.return20dPct,
+                metrics.shouldClose, row.id
             ]);
 
             updated++;
-            if (shouldClose) closed++;
+            if (metrics.shouldClose) closed++;
         } catch (err) {
             failed++;
             logger.debug('[ShadowTrade] Update failed', { symbol: row.symbol, err: err.message });
@@ -190,6 +177,8 @@ async function getShadowTradeAttribution({ days = 90 } = {}) {
                COUNT(*)::int AS n,
                ROUND(AVG(mfe_pct)::numeric, 2)        AS avg_mfe_pct,
                ROUND(AVG(mae_pct)::numeric, 2)        AS avg_mae_pct,
+               ROUND(AVG(return_5d_pct)::numeric, 2)  AS avg_return_5d_pct,
+               ROUND(AVG(return_10d_pct)::numeric, 2) AS avg_return_10d_pct,
                ROUND(AVG(return_20d_pct)::numeric, 2) AS avg_return_20d_pct,
                COUNT(*) FILTER (WHERE return_20d_pct > 0)::int AS would_have_won,
                ROUND(COALESCE(SUM(return_20d_pct) FILTER (WHERE return_20d_pct > 0), 0)::numeric, 1) AS missed_upside_pct,
@@ -204,6 +193,65 @@ async function getShadowTradeAttribution({ days = 90 } = {}) {
         ...r,
         net_gate_value_pct: Number((parseFloat(r.avoided_downside_pct) - parseFloat(r.missed_upside_pct)).toFixed(1))
     }));
+}
+
+/**
+ * Gate Alpha Attribution — the actual payoff of both trackers combined. Answers
+ * "are the gates selecting the RIGHT candidates, not just fewer of them?" by
+ * comparing real executed BUYs' forward returns against each gate's rejected
+ * population's forward returns, same time windows, same underlying math
+ * (forwardReturnCalculator.js) on both sides. Added 2026-09-08 per a ChatGPT
+ * review's follow-up: knowing 10/163 STRONG BUY candidates became trades only
+ * tells you the gates are selective, not that they're selecting well — this
+ * is the actual test of that.
+ */
+async function getGateAlphaAttribution({ days = 90 } = {}) {
+    const tradeForwardTrackingService = require('./tradeForwardTrackingService');
+    const [actualBuy, rejectedByGate] = await Promise.all([
+        tradeForwardTrackingService.getActualBuyAttribution({ days }),
+        getShadowTradeAttribution({ days })
+    ]);
+    return { actualBuy, rejectedByGate };
+}
+
+/**
+ * Renders getGateAlphaAttribution()'s result into the Telegram-ready format
+ * requested alongside the feature: one line for Actual BUY, one per gate.
+ */
+function formatGateAlphaAttribution({ actualBuy, rejectedByGate }, days) {
+    const fmtPct = v => v === null || v === undefined ? 'n/a' : `${parseFloat(v) >= 0 ? '+' : ''}${v}%`;
+    const lines = [`📊 *Gate Alpha Attribution* (last ${days} days)`, ''];
+
+    if (actualBuy && actualBuy.n > 0) {
+        lines.push(
+            `*Actual BUY* — ${actualBuy.n} tracked, ${fmtPct(actualBuy.avg_return_5d_pct)} 5D / ` +
+            `${fmtPct(actualBuy.avg_return_10d_pct)} 10D / ${fmtPct(actualBuy.avg_return_20d_pct)} 20D ` +
+            `(${actualBuy.would_have_won}/${actualBuy.n} profitable at 20D)`
+        );
+    } else {
+        lines.push('*Actual BUY* — not enough fully-tracked trades yet');
+    }
+    lines.push('');
+
+    if (rejectedByGate.length === 0) {
+        lines.push('_No fully-tracked rejected candidates yet — check back after the 20-day tracking window fills in._');
+    } else {
+        for (const g of rejectedByGate) {
+            lines.push(
+                `*Rejected — ${g.rejection_reason}* — ${g.n} tracked, ${fmtPct(g.avg_return_5d_pct)} 5D / ` +
+                `${fmtPct(g.avg_return_10d_pct)} 10D / ${fmtPct(g.avg_return_20d_pct)} 20D ` +
+                `(${g.would_have_won}/${g.n} would have been profitable at 20D)`
+            );
+        }
+        lines.push('');
+        lines.push(
+            '_Reading this: a gate whose rejected candidates return LESS than Actual BUY is doing its job — ' +
+            'filtering out weaker setups. A gate whose rejected candidates return MORE is costing you upside ' +
+            'more often than it\'s protecting you, and is worth loosening._'
+        );
+    }
+
+    return lines.join('\n');
 }
 
 function startShadowTradeScheduler() {
@@ -249,6 +297,20 @@ function startShadowTradeScheduler() {
                         logger.warn('[ShadowTrade] Attribution alert failed', { err: err.message });
                     }
                 }
+
+                // Gate Alpha Attribution — separate message, separate question. The
+                // report above answers "was blocking this gate's picks worth it in
+                // isolation"; this one answers "are the gates selecting the RIGHT
+                // candidates compared to what actually got bought."
+                try {
+                    const gateAlpha = await getGateAlphaAttribution({ days: 90 });
+                    if ((gateAlpha.actualBuy?.n > 0) || gateAlpha.rejectedByGate.length > 0) {
+                        const alertService = require('./telegramAlertService');
+                        await alertService.sendAdminMessage(formatGateAlphaAttribution(gateAlpha, 90));
+                    }
+                } catch (err) {
+                    logger.warn('[ShadowTrade] Gate Alpha Attribution alert failed', { err: err.message });
+                }
             }
         } catch (err) {
             logger.error('[ShadowTrade] Cron job failed', { error: err.message });
@@ -270,6 +332,8 @@ module.exports = {
     recordShadowTrade,
     updateShadowTrades,
     getShadowTradeAttribution,
+    getGateAlphaAttribution,
+    formatGateAlphaAttribution,
     startShadowTradeScheduler,
     stopShadowTradeScheduler,
 };

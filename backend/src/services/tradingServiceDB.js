@@ -189,10 +189,30 @@ const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', 
                 price: currentPrice,
                 total: totalCost,
                 commission,
-                totalWithCommission
+                totalWithCommission,
+                entryRegime: _entryRegime
             };
+        }).then(result => {
+            // Forward-return tracking for the Gate Alpha Attribution report —
+            // added 2026-09-08. Deliberately AFTER the transaction has already
+            // committed and OUTSIDE it: this is instrumentation, not part of the
+            // real trade, and must never be able to affect (or be blocked by) the
+            // buy that already happened. Fire-and-forget, own try/catch.
+            try {
+                require('./tradeForwardTrackingService').recordTradeEntry({
+                    tradeId:    result.trade.id,
+                    symbol:     result.symbol,
+                    userId,
+                    entryDate:  new Date().toISOString().slice(0, 10),
+                    entryPrice: result.trade.price,
+                    aiScore:    result.trade.ai_score,
+                    sector:     result.trade.sector,
+                    regime:     result.entryRegime
+                }).catch(() => {});
+            } catch (_) { /* never let this affect a trade that already executed */ }
+            return result;
         });
-        
+
     } catch (error) {
         console.error(`Error executing buy order:`, error);
         throw error;

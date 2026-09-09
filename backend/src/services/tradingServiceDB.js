@@ -235,11 +235,22 @@ const executeSellOrder = async (userId, symbol, quantity, executedBy = 'MANUAL',
         if (!currentPrice) {
             throw new Error('Unable to fetch current price');
         }
-        
+
+        // Broker-confirmed (real Alpaca fill) trades pay whatever Alpaca actually
+        // charges, which is $0 commission on US equities -- mirrors buyBracket's
+        // own brokerConfirmed pattern above. Found 2026-09-09: this flat 0.1%
+        // assumption never touched realized P&L (profitLoss below is pure price
+        // math) but WAS unconditionally deducted from the internal virtual
+        // balance further down, silently drifting that number away from Alpaca's
+        // real cash on every live sell for a fee that was never actually charged.
+        // Only synthesize a commission for a genuine paper/manual sell with no
+        // real fill price -- same condition the buy side already uses to skip
+        // its own internal balance update entirely.
+        const brokerConfirmed = fillPrice != null;
         const totalProceeds = currentPrice * quantity;
-        const commission = totalProceeds * 0.001; // 0.1% commission
+        const commission = brokerConfirmed ? 0 : totalProceeds * 0.001;
         const netProceeds = totalProceeds - commission;
-        
+
         // Execute in transaction
         return await transaction(async (client) => {
             // Get holding
@@ -264,12 +275,18 @@ const executeSellOrder = async (userId, symbol, quantity, executedBy = 'MANUAL',
             const profitLoss = (currentPrice - holding.average_price) * quantity;
             const profitLossPercent = ((currentPrice - holding.average_price) / holding.average_price) * 100;
             
-            // Add proceeds to account
-            await client.query(
-                'UPDATE trading_accounts SET balance = balance + $1 WHERE user_id = $2',
-                [netProceeds, userId]
-            );
-            
+            // Add proceeds to account -- paper/manual sells only. A broker-confirmed
+            // (live) sell already settled its real proceeds at Alpaca; crediting them
+            // again into this internal virtual balance would double-count real cash
+            // this field was never meant to track for a live account (mirrors
+            // buyBracket's own brokerConfirmed skip on the buy side, above).
+            if (!brokerConfirmed) {
+                await client.query(
+                    'UPDATE trading_accounts SET balance = balance + $1 WHERE user_id = $2',
+                    [netProceeds, userId]
+                );
+            }
+
             // Update or delete holding
             const remainingQuantity = holding.quantity - quantity;
 

@@ -196,6 +196,38 @@ async function getShadowTradeAttribution({ days = 90 } = {}) {
 }
 
 /**
+ * Per-gate breakdown for Gate Alpha Attribution specifically — deliberately a
+ * SEPARATE query from getShadowTradeAttribution above, not a shared one. That
+ * function's closed_at-only gating is a real, intentional choice for the
+ * original counterfactual-value report (avoid noisy early reads); changing it
+ * would silently change an already-shipped report's meaning. This one is not
+ * gated on closed_at (2026-09-08 feedback round) so 5D/10D reads show up as
+ * soon as they exist rather than waiting on the slowest (20D) checkpoint —
+ * n_5d/n_10d/n_20d tell the caller how mature each number actually is.
+ */
+async function getRejectedAttributionProgressive({ days = 90 } = {}) {
+    await _ensureSchema();
+    const res = await query(`
+        SELECT rejection_reason,
+               COUNT(*)::int AS n,
+               COUNT(*) FILTER (WHERE return_5d_pct  IS NOT NULL)::int AS n_5d,
+               COUNT(*) FILTER (WHERE return_10d_pct IS NOT NULL)::int AS n_10d,
+               COUNT(*) FILTER (WHERE return_20d_pct IS NOT NULL)::int AS n_20d,
+               ROUND(AVG(mfe_pct)::numeric, 2)        AS avg_mfe_pct,
+               ROUND(AVG(mae_pct)::numeric, 2)        AS avg_mae_pct,
+               ROUND(AVG(return_5d_pct)::numeric, 2)  AS avg_return_5d_pct,
+               ROUND(AVG(return_10d_pct)::numeric, 2) AS avg_return_10d_pct,
+               ROUND(AVG(return_20d_pct)::numeric, 2) AS avg_return_20d_pct,
+               COUNT(*) FILTER (WHERE return_20d_pct > 0)::int AS would_have_won
+        FROM shadow_trades
+        WHERE rejected_at >= NOW() - ($1 || ' days')::interval
+        GROUP BY rejection_reason
+        ORDER BY n DESC
+    `, [days]);
+    return res.rows;
+}
+
+/**
  * Gate Alpha Attribution — the actual payoff of both trackers combined. Answers
  * "are the gates selecting the RIGHT candidates, not just fewer of them?" by
  * comparing real executed BUYs' forward returns against each gate's rejected
@@ -209,45 +241,94 @@ async function getGateAlphaAttribution({ days = 90 } = {}) {
     const tradeForwardTrackingService = require('./tradeForwardTrackingService');
     const [actualBuy, rejectedByGate] = await Promise.all([
         tradeForwardTrackingService.getActualBuyAttribution({ days }),
-        getShadowTradeAttribution({ days })
+        getRejectedAttributionProgressive({ days })
     ]);
     return { actualBuy, rejectedByGate };
 }
 
+// Maturity labels — 2026-09-08 feedback round: don't make the reader wait for
+// the slowest (20D) checkpoint to see ANY signal. Each checkpoint's own count
+// (n_5d/n_10d/n_20d) decides whether it's shown at all and how much weight to
+// put on it, independent of the other two.
+const MATURITY_LABEL = { 5: 'preliminary', 10: 'accumulating', 20: 'maturing' };
+
+/**
+ * One "N% (label, n=X)" fragment for a single checkpoint, or null if that
+ * checkpoint has no data yet — the caller omits it entirely rather than
+ * printing a misleading blank.
+ */
+function _fmtCheckpoint(avgPct, n, window) {
+    if (!n || n === 0 || avgPct === null || avgPct === undefined) return null;
+    const sign = parseFloat(avgPct) >= 0 ? '+' : '';
+    return `${sign}${avgPct}% ${window}D (${MATURITY_LABEL[window]}, n=${n})`;
+}
+
 /**
  * Renders getGateAlphaAttribution()'s result into the Telegram-ready format
- * requested alongside the feature: one line for Actual BUY, one per gate.
+ * requested alongside the feature: one line for Actual BUY, one per gate, plus
+ * a Gate Value delta (rejected − Actual BUY) per checkpoint so the reader
+ * doesn't have to do that subtraction themselves — that delta is the actual
+ * answer to "is this gate adding alpha or just reducing trade frequency."
  */
 function formatGateAlphaAttribution({ actualBuy, rejectedByGate }, days) {
-    const fmtPct = v => v === null || v === undefined ? 'n/a' : `${parseFloat(v) >= 0 ? '+' : ''}${v}%`;
     const lines = [`📊 *Gate Alpha Attribution* (last ${days} days)`, ''];
 
-    if (actualBuy && actualBuy.n > 0) {
-        lines.push(
-            `*Actual BUY* — ${actualBuy.n} tracked, ${fmtPct(actualBuy.avg_return_5d_pct)} 5D / ` +
-            `${fmtPct(actualBuy.avg_return_10d_pct)} 10D / ${fmtPct(actualBuy.avg_return_20d_pct)} 20D ` +
-            `(${actualBuy.would_have_won}/${actualBuy.n} profitable at 20D)`
-        );
+    const buyCheckpoints = actualBuy ? {
+        5:  _fmtCheckpoint(actualBuy.avg_return_5d_pct,  actualBuy.n_5d,  5),
+        10: _fmtCheckpoint(actualBuy.avg_return_10d_pct, actualBuy.n_10d, 10),
+        20: _fmtCheckpoint(actualBuy.avg_return_20d_pct, actualBuy.n_20d, 20),
+    } : { 5: null, 10: null, 20: null };
+    const buyHasAny = buyCheckpoints[5] || buyCheckpoints[10] || buyCheckpoints[20];
+
+    if (buyHasAny) {
+        const parts = [buyCheckpoints[5], buyCheckpoints[10], buyCheckpoints[20]].filter(Boolean);
+        lines.push(`*Actual BUY* — ${actualBuy.n} tracked, ${parts.join(' / ')}`);
     } else {
-        lines.push('*Actual BUY* — not enough fully-tracked trades yet');
+        lines.push('*Actual BUY* — insufficient sample, nothing tracked long enough yet');
     }
     lines.push('');
 
     if (rejectedByGate.length === 0) {
-        lines.push('_No fully-tracked rejected candidates yet — check back after the 20-day tracking window fills in._');
+        lines.push('_No rejected candidates tracked yet in this window._');
     } else {
         for (const g of rejectedByGate) {
-            lines.push(
-                `*Rejected — ${g.rejection_reason}* — ${g.n} tracked, ${fmtPct(g.avg_return_5d_pct)} 5D / ` +
-                `${fmtPct(g.avg_return_10d_pct)} 10D / ${fmtPct(g.avg_return_20d_pct)} 20D ` +
-                `(${g.would_have_won}/${g.n} would have been profitable at 20D)`
-            );
+            const gateCheckpoints = {
+                5:  _fmtCheckpoint(g.avg_return_5d_pct,  g.n_5d,  5),
+                10: _fmtCheckpoint(g.avg_return_10d_pct, g.n_10d, 10),
+                20: _fmtCheckpoint(g.avg_return_20d_pct, g.n_20d, 20),
+            };
+            const parts = [gateCheckpoints[5], gateCheckpoints[10], gateCheckpoints[20]].filter(Boolean);
+            if (parts.length === 0) {
+                lines.push(`*Rejected — ${g.rejection_reason}* — ${g.n} tracked, insufficient sample yet`);
+                continue;
+            }
+            lines.push(`*Rejected — ${g.rejection_reason}* — ${g.n} tracked, ${parts.join(' / ')}`);
+
+            // Gate Value: this gate's rejected population minus Actual BUY, per
+            // checkpoint where BOTH sides have data. Positive means the gate is
+            // rejecting candidates that would have UNDERPERFORMED what actually
+            // got bought (working as intended); negative means it's rejecting
+            // candidates that would have OUTPERFORMED (costing real upside).
+            const deltaParts = [];
+            for (const w of [5, 10, 20]) {
+                const gateAvg = g[`avg_return_${w}d_pct`];
+                const buyAvg  = actualBuy?.[`avg_return_${w}d_pct`];
+                const gateN   = g[`n_${w}d`];
+                const buyN    = actualBuy?.[`n_${w}d`];
+                if (!gateN || !buyN || gateAvg === null || buyAvg === null) continue;
+                const delta = Number((parseFloat(gateAvg) - parseFloat(buyAvg)).toFixed(2));
+                deltaParts.push(`${delta >= 0 ? '+' : ''}${delta}pp ${w}D`);
+            }
+            if (deltaParts.length > 0) {
+                lines.push(`   Gate Value vs Actual BUY: ${deltaParts.join(' / ')}`);
+            }
         }
         lines.push('');
         lines.push(
-            '_Reading this: a gate whose rejected candidates return LESS than Actual BUY is doing its job — ' +
-            'filtering out weaker setups. A gate whose rejected candidates return MORE is costing you upside ' +
-            'more often than it\'s protecting you, and is worth loosening._'
+            '_Gate Value = this gate\'s rejected candidates\' return minus Actual BUY\'s. Positive means the ' +
+            'gate is correctly filtering out weaker setups; negative means it\'s blocking candidates that would ' +
+            'have outperformed what was actually bought — worth a closer look, not an immediate change. Early ' +
+            'checkpoints (5D/10D) are preliminary; treat 20D as the more reliable read once it has a real sample._'
         );
     }
 
@@ -332,6 +413,7 @@ module.exports = {
     recordShadowTrade,
     updateShadowTrades,
     getShadowTradeAttribution,
+    getRejectedAttributionProgressive,
     getGateAlphaAttribution,
     formatGateAlphaAttribution,
     startShadowTradeScheduler,

@@ -106,10 +106,17 @@ describe('tradeForwardTrackingService', () => {
     });
 
     describe('getActualBuyAttribution', () => {
-        test('returns the single aggregate row for the given day window', async () => {
-            const mockRow = { n: 12, avg_return_5d_pct: '1.20', avg_return_10d_pct: '2.10', avg_return_20d_pct: '3.40', would_have_won: 8 };
+        test('returns the single aggregate row for the given day window, not gated on closed_at', async () => {
+            const mockRow = {
+                n: 12, n_5d: 12, n_10d: 8, n_20d: 2,
+                avg_return_5d_pct: '1.20', avg_return_10d_pct: '2.10', avg_return_20d_pct: '3.40', would_have_won: 8,
+            };
             query.mockImplementation((sql) => {
-                if (sql.includes('FROM trade_forward_tracking')) return Promise.resolve({ rows: [mockRow] });
+                if (sql.includes('FROM trade_forward_tracking')) {
+                    // 2026-09-08 revision: no full 20-day close-out required to see a 5D/10D read.
+                    expect(sql).not.toMatch(/closed_at IS NOT NULL/);
+                    return Promise.resolve({ rows: [mockRow] });
+                }
                 return Promise.resolve({ rows: [] });
             });
 

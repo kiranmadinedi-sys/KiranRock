@@ -25,18 +25,22 @@ describe('shadowTradeService — Gate Alpha Attribution', () => {
     });
 
     describe('getGateAlphaAttribution', () => {
-        test('combines actual-BUY and per-gate rejected data into one object', async () => {
+        test('combines actual-BUY and per-gate rejected data into one object, not gated on closed_at', async () => {
             tradeForwardTrackingService.getActualBuyAttribution.mockResolvedValue({
-                n: 10, avg_return_5d_pct: '1.5', avg_return_10d_pct: '2.5', avg_return_20d_pct: '3.5', would_have_won: 7,
+                n: 10, n_5d: 10, n_10d: 6, n_20d: 2,
+                avg_return_5d_pct: '1.5', avg_return_10d_pct: '2.5', avg_return_20d_pct: '3.5', would_have_won: 7,
             });
             query.mockImplementation((sql) => {
                 if (sql.includes('FROM shadow_trades')) {
+                    // getRejectedAttributionProgressive's query must NOT filter on closed_at —
+                    // that's the whole point of the 2026-09-08 revision.
+                    expect(sql).not.toMatch(/closed_at IS NOT NULL/);
                     return Promise.resolve({
                         rows: [{
-                            rejection_reason: 'sector_count_cap', n: 20,
+                            rejection_reason: 'sector_count_cap', n: 20, n_5d: 20, n_10d: 15, n_20d: 3,
                             avg_mfe_pct: '5', avg_mae_pct: '-3',
                             avg_return_5d_pct: '0.5', avg_return_10d_pct: '1.0', avg_return_20d_pct: '1.5',
-                            would_have_won: 12, missed_upside_pct: '10.0', avoided_downside_pct: '4.0',
+                            would_have_won: 12,
                         }],
                     });
                 }
@@ -48,18 +52,16 @@ describe('shadowTradeService — Gate Alpha Attribution', () => {
             expect(result.actualBuy.n).toBe(10);
             expect(result.rejectedByGate).toHaveLength(1);
             expect(result.rejectedByGate[0].rejection_reason).toBe('sector_count_cap');
-            // net_gate_value_pct still computed correctly on the merged path
-            expect(result.rejectedByGate[0].net_gate_value_pct).toBeCloseTo(-6.0, 5);
         });
     });
 
     describe('formatGateAlphaAttribution', () => {
-        test('renders Actual BUY and each gate on its own line in the requested format', () => {
+        test('renders Actual BUY and each gate with maturity-labeled checkpoints', () => {
             const data = {
-                actualBuy: { n: 10, avg_return_5d_pct: '1.50', avg_return_10d_pct: '2.50', avg_return_20d_pct: '3.50', would_have_won: 7 },
+                actualBuy: { n: 10, n_5d: 10, n_10d: 10, n_20d: 10, avg_return_5d_pct: '1.50', avg_return_10d_pct: '2.50', avg_return_20d_pct: '3.50', would_have_won: 7 },
                 rejectedByGate: [
-                    { rejection_reason: 'correlation', n: 5, avg_return_5d_pct: '-0.5', avg_return_10d_pct: '-1.0', avg_return_20d_pct: '-2.0', would_have_won: 1 },
-                    { rejection_reason: 'sector_count_cap', n: 20, avg_return_5d_pct: '0.5', avg_return_10d_pct: '1.0', avg_return_20d_pct: '1.5', would_have_won: 12 },
+                    { rejection_reason: 'correlation', n: 5, n_5d: 5, n_10d: 5, n_20d: 5, avg_return_5d_pct: '-0.5', avg_return_10d_pct: '-1.0', avg_return_20d_pct: '-2.0', would_have_won: 1 },
+                    { rejection_reason: 'sector_count_cap', n: 20, n_5d: 20, n_10d: 20, n_20d: 20, avg_return_5d_pct: '0.5', avg_return_10d_pct: '1.0', avg_return_20d_pct: '1.5', would_have_won: 12 },
                 ],
             };
 
@@ -67,28 +69,53 @@ describe('shadowTradeService — Gate Alpha Attribution', () => {
 
             expect(message).toContain('Gate Alpha Attribution');
             expect(message).toContain('Actual BUY');
-            expect(message).toContain('+1.50% 5D');
-            expect(message).toContain('+2.50% 10D');
-            expect(message).toContain('+3.50% 20D');
+            expect(message).toContain('+1.50% 5D (preliminary, n=10)');
+            expect(message).toContain('+2.50% 10D (accumulating, n=10)');
+            expect(message).toContain('+3.50% 20D (maturing, n=10)');
             expect(message).toContain('Rejected — correlation');
             expect(message).toContain('Rejected — sector_count_cap');
             expect(message).toContain('-0.5% 5D'); // negative sign preserved, not double-prefixed
         });
 
-        test('handles an empty actual-BUY population without throwing', () => {
-            const data = { actualBuy: { n: 0 }, rejectedByGate: [] };
+        test('computes Gate Value as rejected-minus-ActualBUY per checkpoint', () => {
+            const data = {
+                actualBuy: { n: 10, n_5d: 10, n_10d: 0, n_20d: 0, avg_return_5d_pct: '2.0', avg_return_10d_pct: null, avg_return_20d_pct: null },
+                rejectedByGate: [
+                    { rejection_reason: 'sector_count_cap', n: 8, n_5d: 8, n_10d: 0, n_20d: 0, avg_return_5d_pct: '3.1', avg_return_10d_pct: null, avg_return_20d_pct: null, would_have_won: 5 },
+                ],
+            };
             const message = shadowTradeService.formatGateAlphaAttribution(data, 90);
-            expect(message).toContain('not enough fully-tracked trades yet');
-            expect(message).toContain('No fully-tracked rejected candidates yet');
+            // 3.1 - 2.0 = +1.1pp -- sector cap's rejects outperformed what was bought
+            expect(message).toContain('Gate Value vs Actual BUY: +1.1pp 5D');
         });
 
-        test('formats a null return checkpoint as n/a rather than crashing', () => {
+        test('omits the Gate Value line when the two sides do not share a matured checkpoint', () => {
             const data = {
-                actualBuy: { n: 3, avg_return_5d_pct: null, avg_return_10d_pct: '1.0', avg_return_20d_pct: '2.0', would_have_won: 2 },
+                actualBuy: { n: 10, n_5d: 0, n_10d: 0, n_20d: 10, avg_return_5d_pct: null, avg_return_10d_pct: null, avg_return_20d_pct: '2.0' },
+                rejectedByGate: [
+                    { rejection_reason: 'correlation', n: 8, n_5d: 8, n_10d: 0, n_20d: 0, avg_return_5d_pct: '1.0', avg_return_10d_pct: null, avg_return_20d_pct: null, would_have_won: 3 },
+                ],
+            };
+            const message = shadowTradeService.formatGateAlphaAttribution(data, 90);
+            expect(message).not.toContain('Gate Value vs Actual BUY');
+        });
+
+        test('handles an empty actual-BUY population without throwing', () => {
+            const data = { actualBuy: { n: 0, n_5d: 0, n_10d: 0, n_20d: 0 }, rejectedByGate: [] };
+            const message = shadowTradeService.formatGateAlphaAttribution(data, 90);
+            expect(message).toContain('insufficient sample');
+            expect(message).toContain('No rejected candidates tracked yet');
+        });
+
+        test('omits a checkpoint entirely (rather than showing null/n-a) when it has zero observations', () => {
+            const data = {
+                actualBuy: { n: 3, n_5d: 0, n_10d: 3, n_20d: 0, avg_return_5d_pct: null, avg_return_10d_pct: '1.0', avg_return_20d_pct: null, would_have_won: 2 },
                 rejectedByGate: [],
             };
             const message = shadowTradeService.formatGateAlphaAttribution(data, 90);
-            expect(message).toContain('n/a 5D');
+            expect(message).toContain('+1.0% 10D (accumulating, n=3)');
+            expect(message).not.toContain('5D');
+            expect(message).not.toContain('20D');
         });
     });
 

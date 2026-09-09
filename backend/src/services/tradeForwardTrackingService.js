@@ -153,9 +153,17 @@ async function updateTradeForwardTracking() {
  */
 async function getActualBuyAttribution({ days = 90 } = {}) {
     await _ensureSchema();
+    // Not gated on closed_at (2026-09-08 feedback round): a full 20-day close-out
+    // shouldn't be the price of seeing ANY signal. Each checkpoint's average and
+    // count are independent — n_5d/n_10d/n_20d tell the caller how mature each
+    // number actually is, rather than showing nothing until the slowest checkpoint
+    // (20D) is ready.
     const res = await query(`
         SELECT
             COUNT(*)::int AS n,
+            COUNT(*) FILTER (WHERE return_5d_pct  IS NOT NULL)::int AS n_5d,
+            COUNT(*) FILTER (WHERE return_10d_pct IS NOT NULL)::int AS n_10d,
+            COUNT(*) FILTER (WHERE return_20d_pct IS NOT NULL)::int AS n_20d,
             ROUND(AVG(mfe_pct)::numeric, 2)        AS avg_mfe_pct,
             ROUND(AVG(mae_pct)::numeric, 2)        AS avg_mae_pct,
             ROUND(AVG(return_5d_pct)::numeric, 2)  AS avg_return_5d_pct,
@@ -163,8 +171,7 @@ async function getActualBuyAttribution({ days = 90 } = {}) {
             ROUND(AVG(return_20d_pct)::numeric, 2) AS avg_return_20d_pct,
             COUNT(*) FILTER (WHERE return_20d_pct > 0)::int AS would_have_won
         FROM trade_forward_tracking
-        WHERE closed_at IS NOT NULL
-          AND recorded_at >= NOW() - ($1 || ' days')::interval
+        WHERE recorded_at >= NOW() - ($1 || ' days')::interval
     `, [days]);
     return res.rows[0];
 }

@@ -355,6 +355,29 @@ function startAssetUniverseScheduler() {
                 [todayET]
             );
             const todayCount = parseInt(rows[0]?.cnt ?? 0);
+
+            // Dead-zone guard (2026-09-10) — found live: a restart between midnight and
+            // market open on a NEW calendar day sees todayCount === 0 (correctly, today's
+            // real scan genuinely hasn't run yet) and this block couldn't tell that apart
+            // from "a scan started and got interrupted" — the exact case it exists to fix.
+            // It fired a full missingOnly:false scan hours before today's session even
+            // opens, scoring 373 symbols off yesterday's stale closing data between
+            // 12:04-1:51 AM ET, work the real post-close run tonight will mostly redo
+            // anyway once today's actual EOD data exists. todayCount > 0 is always safe to
+            // resume regardless of time — that can only mean a real run already started
+            // today and got cut off. Only a zero-progress restart needs the time check,
+            // and only in the 00:00-09:30 ET dead zone; the scan's own isMarketHours()
+            // defer already covers 09:30-16:00, so nothing else needs gating here.
+            const etParts = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' });
+            const [etHour, etMin] = etParts.split(':').map(Number);
+            const inDeadZone = etHour < 9 || (etHour === 9 && etMin < 30);
+            if (todayCount === 0 && inDeadZone) {
+                logger.debug('[AssetUniverseScheduler] Nightly scan resume skipped — too early for a fresh start today, letting the 8 AM catch-up or 4:30 PM main run handle it', {
+                    etHour, etMin
+                });
+                return;
+            }
+
             if (todayCount < CATCHUP_THRESHOLD && !nightlyScanSvc.isScanRunning()) {
                 logger.info('[AssetUniverseScheduler] Nightly scan incomplete for today on startup — resuming now', {
                     done: todayCount, remaining: CATCHUP_THRESHOLD - todayCount

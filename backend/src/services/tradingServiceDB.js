@@ -41,13 +41,18 @@ const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', 
             throw new Error('Unable to fetch current price');
         }
         
-        const totalCost = currentPrice * quantity;
-        const commission = totalCost * 0.001; // 0.1% commission
-        const totalWithCommission = totalCost + commission;
-
         // When fillPrice is supplied the broker already executed the trade — skip the internal
         // balance check (Alpaca enforced funds at submission) and just record the fill.
         const brokerConfirmed = fillPrice != null;
+
+        // Broker-confirmed (real Alpaca fill) trades pay Alpaca's real $0 commission on
+        // US equities -- see executeSellOrder's identical fix (2026-09-09) for the full
+        // reasoning; this was the other half of the same bug, found the same night but
+        // only fixed on the sell side at the time. Only synthesize a commission for a
+        // genuine paper/manual buy with no real fill price.
+        const totalCost = currentPrice * quantity;
+        const commission = brokerConfirmed ? 0 : totalCost * 0.001;
+        const totalWithCommission = totalCost + commission;
 
         // Execute in transaction
         return await transaction(async (client) => {

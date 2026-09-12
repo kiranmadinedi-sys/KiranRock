@@ -213,9 +213,34 @@ async function sellCrypto(userId, symbol, { exitReason, scoreAtEntry }) {
         logger.warn('[CryptoBot] Skipping sell — no real position on Alpaca (already closed by a prior call)', {
             userId, symbol, exitReason
         });
+
+        // The position already really closed at Alpaca (almost always the real
+        // resting stop order triggering) — look up that actual fill instead of
+        // guessing from position.current_price, which can have drifted well away
+        // from where the real order filled. Found 2026-09-12: two of these
+        // stale_skip closures were off by $0.11-$0.11/unit (~$8-$26 of recorded
+        // P&L) purely from using a stale cached price as a stand-in for a real
+        // number that was one API call away the whole time.
+        let exitPrice = parseFloat(position.current_price || position.average_price) || 0;
+        let exitTime = null;
+        try {
+            const { base, headers } = await _getAuth(userId);
+            const closedOrders = await axios.get(`${base}/orders`, {
+                headers, params: { status: 'closed', symbols: symbol, direction: 'desc', limit: 5 }
+            });
+            const realFill = closedOrders.data.find(o => o.side === 'sell' && o.status === 'filled' && o.filled_avg_price);
+            if (realFill) {
+                exitPrice = parseFloat(realFill.filled_avg_price);
+                exitTime = realFill.filled_at;
+            }
+        } catch (lookupErr) {
+            logger.debug('[CryptoBot] Could not fetch real closing fill, using cached price estimate', {
+                userId, symbol, error: lookupErr.message
+            });
+        }
+
         await cryptoDb.closePosition(userId, symbol, {
-            exitPrice: parseFloat(position.current_price || position.average_price) || 0,
-            exitReason: `${exitReason}_stale_skip`, scoreAtEntry
+            exitPrice, exitTime, exitReason: `${exitReason}_stale_skip`, scoreAtEntry
         }).catch(() => {});
         return null;
     }

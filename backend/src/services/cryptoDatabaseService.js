@@ -238,7 +238,7 @@ async function updatePositionPrice(userId, symbol, currentPrice) {
     );
 }
 
-async function closePosition(userId, symbol, { exitPrice, exitReason, scoreAtEntry }) {
+async function closePosition(userId, symbol, { exitPrice, exitTime, exitReason, scoreAtEntry }) {
     await ensureCryptoSchema();
     const pos = await getPosition(userId, symbol);
     if (!pos) return null;
@@ -250,12 +250,19 @@ async function closePosition(userId, symbol, { exitPrice, exitReason, scoreAtEnt
 
     await query('DELETE FROM crypto_positions WHERE user_id = $1 AND symbol = $2', [userId, symbol.toUpperCase()]);
 
+    // exitTime defaults to NOW() when not supplied (the normal take-profit/
+    // stop-loss-backstop paths close a position the moment they detect it, so
+    // "now" already IS the real exit time there). The stale_skip path in
+    // cryptoBrokerService.js passes the real fill timestamp explicitly, since
+    // that position closed at Alpaca earlier than whenever this check happened
+    // to run — found 2026-09-12 recording a next-day timestamp for a fill that
+    // actually happened the prior morning.
     const trade = await query(
         `INSERT INTO crypto_trades
             (user_id, symbol, side, quantity, entry_price, exit_price, entry_time, exit_time, pnl, pnl_percent, exit_reason, score_at_entry)
-         VALUES ($1, $2, 'sell', $3, $4, $5, $6, NOW(), $7, $8, $9, $10)
+         VALUES ($1, $2, 'sell', $3, $4, $5, $6, COALESCE($11, NOW()), $7, $8, $9, $10)
          RETURNING *`,
-        [userId, symbol.toUpperCase(), pos.quantity, pos.average_price, exitPrice, pos.opened_at, pnl, pnlPercent, exitReason || 'manual', scoreAtEntry || null]
+        [userId, symbol.toUpperCase(), pos.quantity, pos.average_price, exitPrice, pos.opened_at, pnl, pnlPercent, exitReason || 'manual', scoreAtEntry || null, exitTime || null]
     );
     return trade.rows[0];
 }

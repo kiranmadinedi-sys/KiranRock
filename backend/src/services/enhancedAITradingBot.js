@@ -3671,16 +3671,38 @@ async function executeAutonomousTrading(userId) {
             });
         }
 
-        for (const opportunity of (_lateDayBlock ? [] : newOpportunities)) {
-            if (trades.length >= sessionRiskConfig.maxDailyTrades) break;
-            if (remainingCapital < 100) break;
-            if (currentHoldings.length + trades.length >= regimeMaxPositions) break;
+        // A `break` here (as opposed to `continue`) drops every REMAINING opportunity in
+        // newOpportunities silently, not just the current one — the loop never even reaches
+        // them. This was the real gap behind the MRNA/DELL "high score, no rejection logged"
+        // mysteries (2026-09-05, 2026-09-12): a lower-sorted high-score candidate could be
+        // sitting further down newOpportunities than whatever filled the day's cap, and would
+        // vanish with zero record. _recordRejectionForRemaining logs one row per skipped
+        // candidate (cheap, fire-and-forget) before the loop actually exits.
+        const _oppList = _lateDayBlock ? [] : newOpportunities;
+        const _recordRejectionForRemaining = (fromIdx, reason, detail) => {
+            for (const remaining of _oppList.slice(fromIdx)) {
+                _recordRejection(remaining, userId, reason, detail);
+            }
+        };
+        for (const [_oppIdx, opportunity] of _oppList.entries()) {
+            if (trades.length >= sessionRiskConfig.maxDailyTrades) {
+                _recordRejectionForRemaining(_oppIdx, 'daily_trade_cap', `cap=${sessionRiskConfig.maxDailyTrades}`);
+                break;
+            }
+            if (remainingCapital < 100) {
+                _recordRejectionForRemaining(_oppIdx, 'capital_exhausted', `remaining $${remainingCapital.toFixed(2)}`);
+                break;
+            }
+            if (currentHoldings.length + trades.length >= regimeMaxPositions) {
+                _recordRejectionForRemaining(_oppIdx, 'position_cap', `${currentHoldings.length + trades.length}/${regimeMaxPositions}`);
+                break;
+            }
             if (trades.length >= regimeNewPosCap) { // regime cap: BEAR=1, NEUTRAL/CHOPPY=2, BULL=breadth
                 logger.info('[RegimeCap] New-position cap reached for this cycle', {
                     userId, cap: regimeNewPosCap, regime: regime.regime
                 });
                 _bumpGateStat(userId, 'regimeCap');
-                _recordRejection(opportunity, userId, 'regime_cap', `${regime.regime} cap=${regimeNewPosCap}`);
+                _recordRejectionForRemaining(_oppIdx, 'regime_cap', `${regime.regime} cap=${regimeNewPosCap}`);
                 break;
             }
 
@@ -3700,6 +3722,8 @@ async function executeAutonomousTrading(userId) {
                     userId, symbol: opportunity.symbol,
                     score: opportunity.aiScore, daysToEarnings: opportunity.daysToEarnings
                 });
+                _recordRejection(opportunity, userId, 'earnings_setup_low_score',
+                    `score ${opportunity.aiScore} < 88, ${opportunity.daysToEarnings}d to earnings`);
                 continue;
             }
 
@@ -3708,12 +3732,14 @@ async function executeAutonomousTrading(userId) {
                 logger.warn('[BleedingGate] Skipping chronically losing symbol', {
                     userId, symbol: opportunity.symbol
                 });
+                _recordRejection(opportunity, userId, 'bleeding_symbol', '≥60% loss rate, ≥3 trades in 30d');
                 continue;
             }
 
             // Enforce max 1 active position per symbol (including in-session buys this cycle)
             if (trades.some(t => t.symbol === opportunity.symbol)) {
                 logger.info('[DupSymbol] Skipping — already bought this session', { userId, symbol: opportunity.symbol });
+                _recordRejection(opportunity, userId, 'dup_symbol_session', 'already bought earlier this cycle');
                 continue;
             }
 
@@ -3726,6 +3752,7 @@ async function executeAutonomousTrading(userId) {
                     logger.info('[OpenOrderGuard] Skipping — open order already pending on broker', {
                         userId, symbol: opportunity.symbol, orderId: openOrders[0].id
                     });
+                    _recordRejection(opportunity, userId, 'open_order_pending', `orderId ${openOrders[0].id}`);
                     continue;
                 }
             }
@@ -3740,6 +3767,7 @@ async function executeAutonomousTrading(userId) {
                     logger.warn('[RateLimit] Skipping buy — daily order limit reached', {
                         userId, symbol: opportunity.symbol, reason: rateCheck.reason, count: rateCheck.count
                     });
+                    _recordRejection(opportunity, userId, 'rate_limit', `${rateCheck.reason} (count ${rateCheck.count})`);
                     continue;
                 }
             }
@@ -3754,6 +3782,7 @@ async function executeAutonomousTrading(userId) {
                     logger.info('[PositionGuard] Skipping — Alpaca already shows open position', {
                         userId, symbol: opportunity.symbol, qty: existingPos.qty
                     });
+                    _recordRejection(opportunity, userId, 'existing_broker_position', `qty ${existingPos.qty}`);
                     continue;
                 }
             }
@@ -3807,6 +3836,7 @@ async function executeAutonomousTrading(userId) {
                     logger.info('[GapFilter] Skipping — abnormal gap-up >20% today', {
                         userId, symbol: opportunity.symbol, changePct: todayChangePct.toFixed(1)
                     });
+                    _recordRejection(opportunity, userId, 'gap_abnormal', `+${todayChangePct.toFixed(1)}% today`);
                     continue;
                 }
                 if (todayChangePct > 12 && (opportunity.aiScore || 0) < 86) {
@@ -3814,6 +3844,8 @@ async function executeAutonomousTrading(userId) {
                         userId, symbol: opportunity.symbol,
                         changePct: todayChangePct.toFixed(1), score: opportunity.aiScore
                     });
+                    _recordRejection(opportunity, userId, 'gap_elevated_low_score',
+                        `+${todayChangePct.toFixed(1)}% gap, score ${opportunity.aiScore} < 86`);
                     continue;
                 }
 
@@ -3831,6 +3863,8 @@ async function executeAutonomousTrading(userId) {
                             originalScore: opportunity.aiScore,
                             gapPenalty, effectiveScore, minBuyScore: _gapMinScore
                         });
+                        _recordRejection(opportunity, userId, 'gap_moderate_low_score',
+                            `+${todayChangePct.toFixed(1)}% gap, effective score ${effectiveScore} < ${_gapMinScore}`);
                         continue;
                     }
                     logger.info('[GapFilter] Moderate gap — applying score haircut but proceeding', {
@@ -3852,6 +3886,8 @@ async function executeAutonomousTrading(userId) {
                         logger.info('[RegimeGate] Skipping breakout_leader — regime not bullish', {
                             userId, symbol: opportunity.symbol, regime: oppRegime, score: opportunity.aiScore
                         });
+                        _recordRejection(opportunity, userId, 'regime_setup_mismatch',
+                            `breakout_leader in ${oppRegime}, score ${opportunity.aiScore} < 88`);
                         continue;
                     }
                 }
@@ -3868,6 +3904,7 @@ async function executeAutonomousTrading(userId) {
                             userId, symbol: opportunity.symbol, volumeRatio: volRatio, regime: _vgRegime
                         });
                         _bumpGateStat(userId, 'volumeGate');
+                        _recordRejection(opportunity, userId, 'volume_gate', `ratio ${volRatio} < 1.5 in ${_vgRegime}`);
                         continue;
                     }
                 }
@@ -3884,6 +3921,7 @@ async function executeAutonomousTrading(userId) {
                         userId, symbol: opportunity.symbol,
                         daysToEarnings: _dte, score: opportunity.aiScore
                     });
+                    _recordRejection(opportunity, userId, 'earnings_guard_7d', `${_dte}d to earnings`);
                     continue;
                 }
             }
@@ -3903,6 +3941,7 @@ async function executeAutonomousTrading(userId) {
                         price: opportunity.price,
                         ma50: opportunity.ma50, ma200: opportunity.ma200, score: _score
                     });
+                    _recordRejection(opportunity, userId, 'rs_filter_below_mas', `score ${_score} < 92, below both MAs`);
                     continue;
                 }
                 if (_above50 === false && _score < 88) {
@@ -3910,6 +3949,7 @@ async function executeAutonomousTrading(userId) {
                         userId, symbol: opportunity.symbol,
                         price: opportunity.price, ma50: opportunity.ma50, score: _score
                     });
+                    _recordRejection(opportunity, userId, 'rs_filter_below_50ma', `score ${_score} < 88, below 50MA`);
                     continue;
                 }
             }
@@ -3969,6 +4009,7 @@ async function executeAutonomousTrading(userId) {
                 logger.info('Skipping stock — sector unknown, requiring score ≥88 for unknown-sector entries', {
                     userId, symbol: opportunity.symbol, score: opportunity.aiScore
                 });
+                _recordRejection(opportunity, userId, 'unknown_sector', `score ${opportunity.aiScore} < 88`);
                 continue;
             }
             const sectorCurrent      = sectorAllocations[sector] || 0;
@@ -3997,6 +4038,7 @@ async function executeAutonomousTrading(userId) {
                         userId, symbol: opportunity.symbol, industry,
                         count: industryCount, max: sectorMetadata.MAX_POSITIONS_PER_INDUSTRY
                     });
+                    _recordRejection(opportunity, userId, 'industry_cap', `${industry}: ${industryCount}/${sectorMetadata.MAX_POSITIONS_PER_INDUSTRY}`);
                     continue;
                 }
             }
@@ -4273,7 +4315,7 @@ async function executeAutonomousTrading(userId) {
                         userId, maxHeatUsd: _maxHeatUsd.toFixed(2), runningHeatUsd: runningHeatUsd.toFixed(2)
                     });
                     _bumpGateStat(userId, 'heatGate');
-                    _recordRejection(opportunity, userId, 'heat_gate', `budget exhausted at $${_maxHeatUsd.toFixed(0)}`);
+                    _recordRejectionForRemaining(_oppIdx, 'heat_gate', `budget exhausted at $${_maxHeatUsd.toFixed(0)}`);
                     break;
                 }
                 // Dollar risk = position notional × stop distance fraction — shares × price cancels out.
@@ -4298,6 +4340,7 @@ async function executeAutonomousTrading(userId) {
                     userId, symbol: opportunity.symbol,
                     positionSize: positionSize.toFixed(2), price: opportunity.price
                 });
+                _recordRejection(opportunity, userId, 'min_notional', `sized to $${positionSize.toFixed(2)}, price $${opportunity.price}`);
                 continue;
             }
 

@@ -20,6 +20,22 @@
  * positions directly and backfills any missing stop; the regular-hours StopRepair
  * pass inside manageExistingPositions() does the same on every 5-min tick. Neither
  * cares what session a position was opened in (getOpenOrders has no session filter).
+ *
+ * ALSO owns position management during extended hours (added 2026-09-12) — not
+ * just new entries anymore. manageExistingPositions() (trailing stops, decay
+ * re-scoring, distress-mode tightening) only ever ran inside the regular 9:30-4:00
+ * cycle, leaving every account's open positions unmanaged during the two windows
+ * real equity trading (and therefore a real stop-loss fill) can still happen
+ * outside that window — 4-9:30 AM and 4-8 PM ET. A stop still protects the
+ * position either way (it's a real resting order at Alpaca, armed 24/7), but
+ * nothing was tightening it, reacting to it, or even noticing it fired until the
+ * next regular-hours tick or a reconciliation sweep — measured live at an average
+ * 89-hour delay, versus a net-positive result whenever the loop actually got to
+ * manage the exit itself. See manageOpenPositionsDuringExtendedHours below: unlike
+ * the entry-scanning opt-in above, this runs for every active-AI-trading account,
+ * since any open position is equally exposed regardless of how it was entered.
+ * The 8 PM-4 AM span outside both windows needs no equivalent — no US equity venue
+ * is open at all then, so no equity stop can fire in that stretch either way.
  */
 
 const { query } = require('../config/database');
@@ -61,6 +77,45 @@ async function getEligibleUsers() {
     return res.rows;
 }
 
+/**
+ * Position management (trailing stops, decay re-scoring, distress-mode
+ * tightening) — added 2026-09-12. Found live: extended-hours-touched
+ * positions were closing out an average of 89 hours after their real
+ * stop-loss actually fired at Alpaca, discovered only when a reconciliation
+ * sweep happened to run, versus +$69 net when the normal position-management
+ * loop caught the same class of exit live. Root cause: manageExistingPositions
+ * only ever ran inside the regular 9:30-4:00 ET cycle (gated behind the same
+ * isMarketOpen() check as new-trade scanning) — extended-hours entries create
+ * fresh, not-yet-trailing-stopped positions right at 4-9:30 AM / 4-8 PM,
+ * exactly the two windows nothing was watching them. Deliberately scoped to
+ * EVERY active-AI-trading user here, not just those opted into extended-hours
+ * ENTRIES (getEligibleUsers above) — any account can be holding a position
+ * that's still open when regular hours end, and that position is equally
+ * exposed to this gap regardless of how it was originally entered. No new
+ * scheduling needed: this rides the same 5-minute tick runExtendedHoursCycle
+ * already runs on, via enhancedAIScheduler.js's shared interval.
+ */
+async function manageOpenPositionsDuringExtendedHours() {
+    const userDb = require('./userDatabaseService');
+    let users;
+    try {
+        users = await userDb.getUsersWithAITradingEnabled();
+    } catch (err) {
+        logger.error('[ExtendedHours] Could not load users for position management', { error: err.message });
+        return;
+    }
+    if (!users?.length) return;
+
+    const enhancedAITradingBot = require('./enhancedAITradingBot');
+    for (const user of users) {
+        try {
+            await enhancedAITradingBot.manageExistingPositions(user.id);
+        } catch (err) {
+            logger.error('[ExtendedHours] Position management error for user', { userId: user.id, error: err.message });
+        }
+    }
+}
+
 async function countTodaysExtendedHoursPositions(userId) {
     const res = await query(`
         SELECT COUNT(DISTINCT symbol) AS cnt FROM order_audit_log
@@ -73,6 +128,12 @@ async function countTodaysExtendedHoursPositions(userId) {
 
 async function runExtendedHoursCycle() {
     if (!isExtendedHoursSession()) return;
+
+    // Protect capital before chasing new entries — same ordering principle as
+    // every other cycle in this codebase (crypto, regular-hours). Runs for
+    // every active-AI-trading user, independent of the entry-scanning opt-in
+    // below (see manageOpenPositionsDuringExtendedHours's own comment for why).
+    await manageOpenPositionsDuringExtendedHours();
 
     let users;
     try {
@@ -149,4 +210,4 @@ async function scanExtendedHoursForUser(user) {
     }
 }
 
-module.exports = { isExtendedHoursSession, runExtendedHoursCycle, getEligibleUsers };
+module.exports = { isExtendedHoursSession, runExtendedHoursCycle, getEligibleUsers, manageOpenPositionsDuringExtendedHours };

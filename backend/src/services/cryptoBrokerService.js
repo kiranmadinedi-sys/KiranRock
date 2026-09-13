@@ -276,4 +276,20 @@ async function sellCrypto(userId, symbol, { exitReason, scoreAtEntry }) {
     return trade;
 }
 
-module.exports = { buyCrypto, sellCrypto };
+/**
+ * True if Alpaca still shows a real (non-zero) position for this symbol.
+ * Used by the position-monitor loop to catch "ghost" positions — ones that
+ * already closed at Alpaca (almost always the real resting stop firing)
+ * without price ever again crossing either of OUR recorded stop/take-profit
+ * levels, so the normal price-threshold check in runCycleForUser never had a
+ * reason to call sellCrypto and notice. Found 2026-09-13: BCH/USD sat as a
+ * stale $500 "open position" in crypto_positions for 2+ days this way — it
+ * stopped out cleanly at Alpaca, price just never drifted back down to (or
+ * up past) either recorded threshold again.
+ */
+async function hasRealPosition(userId, symbol) {
+    const realPosition = await brokerService.getPosition(userId, _toPositionSymbol(symbol));
+    return !!realPosition && parseFloat(realPosition.qty) > 0;
+}
+
+module.exports = { buyCrypto, sellCrypto, hasRealPosition };

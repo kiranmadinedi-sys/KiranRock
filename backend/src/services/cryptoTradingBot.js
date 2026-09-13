@@ -126,6 +126,26 @@ async function runCycleForUser(user) {
                     exitReason: hitTakeProfit ? 'take-profit' : 'stop-loss-backstop'
                 })
             ).catch(err => logger.error('[CryptoBot] Exit failed', { userId: user.id, symbol: pos.symbol, err: err.message }));
+            continue;
+        }
+
+        // Ghost-position reconciliation — added 2026-09-13. A position can close
+        // at Alpaca (its real resting stop firing) without price ever again
+        // crossing OUR recorded threshold, so the check above never has a reason
+        // to fire and notice: found live, BCH/USD stopped out cleanly at Alpaca
+        // on 9/11 but sat as a stale $500 "open position" here for 2+ days
+        // because price drifted back up and never revisited either level. Only
+        // runs when neither threshold above already triggered a real exit call
+        // this cycle, so it adds one lightweight position lookup per held
+        // symbol, not per trade. Reuses sellCrypto's existing stale_skip path
+        // (2026-09-12) to record the real historical fill rather than guessing.
+        const stillReal = await cryptoBroker.hasRealPosition(user.id, pos.symbol).catch(() => true);
+        if (!stillReal) {
+            logger.warn('[CryptoBot] Position no longer exists at Alpaca — reconciling stale DB row', {
+                userId: user.id, symbol: pos.symbol
+            });
+            await cryptoBroker.sellCrypto(user.id, pos.symbol, { exitReason: 'reconciliation_ghost' })
+                .catch(err => logger.error('[CryptoBot] Ghost reconciliation failed', { userId: user.id, symbol: pos.symbol, err: err.message }));
         }
     }
 

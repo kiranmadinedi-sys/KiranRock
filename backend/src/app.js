@@ -47,6 +47,7 @@ const assetUniverseRoutes = require('./routes/assetUniverseRoutes');
 const dailySignalsRoutes  = require('./routes/dailySignalsRoutes');
 const localdataRoutes = require('./routes/localdataRoutes'); // Localdata tickers endpoint
 const enquiryRoutes = require('./routes/enquiryRoutes'); // AI Enquiry endpoint
+const macroBriefingRoutes = require('./routes/macroBriefingRoutes'); // Daily macro/news briefing ingest
 const { requestTracing } = require('./middleware/requestTracing');
 const { pool } = require('./config/database');
 const { getWorkerStatus } = require('./services/workerCoordinationService');
@@ -198,6 +199,7 @@ app.use('/api/stock-feed', stockFeedRoutes);
 app.use('/api/system', systemRoutes); // Use the new system routes
 app.use('/api/asset-universe', assetUniverseRoutes);
 app.use('/api/daily-signals', dailySignalsRoutes);
+app.use('/api/internal', macroBriefingRoutes); // Daily macro/news briefing ingest from the scheduled cloud agent
 app.use('/api', localdataRoutes); // Register /api/localdata/tickers
 app.use('/api', enquiryRoutes); // Register /api/enquiry
 

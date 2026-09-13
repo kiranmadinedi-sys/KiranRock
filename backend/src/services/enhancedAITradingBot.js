@@ -46,6 +46,7 @@ const compassService      = require('./compassService');
 const precomputedUniverseService = require('./precomputedUniverseService');
 const sonarService              = require('./sonarService');
 const positionSizingService     = require('./positionSizingService');
+const macroRiskService          = require('./macroRiskService');
 const geminiPulseService        = require('./geminiPulseService');
 const fredMacroService          = require('./fredMacroService');
 const redditAltDataService      = require('./redditAltDataService');
@@ -4166,6 +4167,20 @@ async function executeAutonomousTrading(userId) {
                     vixAtSpike: _spikeState.vixAtSpike, multiplier: _vixSizeMult
                 });
                 positionFraction *= _vixSizeMult;
+            }
+
+            // Macro/news risk dampener — added 2026-09-14. Derived from a daily
+            // LLM news digest (Fed calendar + geopolitical developments), NOT
+            // market-priced volatility like VIX above — deliberately optional
+            // and soft-fail: a missing/stale row or any read error always
+            // resolves to 1.0 (no adjustment), never blocks a trade. See
+            // macroRiskService.getRiskSizeMultiplier for the full reasoning.
+            const _macroSizeMult = await macroRiskService.getRiskSizeMultiplier().catch(() => 1.0);
+            if (_macroSizeMult < 1.0) {
+                logger.info('[MacroRisk] Reducing position size — elevated news-driven risk today', {
+                    userId, symbol: opportunity.symbol, multiplier: _macroSizeMult
+                });
+                positionFraction *= _macroSizeMult;
             }
 
             // Calculate the dollar amount for the position.

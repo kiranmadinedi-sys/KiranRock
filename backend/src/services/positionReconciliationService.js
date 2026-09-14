@@ -219,6 +219,7 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
         // Fall back to current_price, then stored stop price (least accurate — stop orders
         // may have been trailed up significantly since the original bracket was placed).
         let exitPrice = parseFloat(dbRow.current_price || 0);
+        let exitTime = null; // real fill time, when found below — added 2026-09-14, see recordTrade(tradeDate) below
         let priceSource = 'current_price';
         let exitOrderId = null;
         let axiosBase = null, axiosHeaders = null;
@@ -244,6 +245,7 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
             ).sort((a, b) => new Date(b.transaction_time) - new Date(a.transaction_time));
             if (fills.length > 0) {
                 exitPrice   = parseFloat(fills[0].price);
+                exitTime    = fills[0].transaction_time || null;
                 priceSource = `alpaca_fill@${fills[0].transaction_time?.slice(0,10)}`;
                 exitOrderId = fills[0].order_id || null;
             }
@@ -336,16 +338,24 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
                     }
                 } catch (_) {}
 
+                // trade_date: real fill time when the account/activities lookup above found
+                // one (exitTime), else NOW() — was unconditionally NOW() before 2026-09-14,
+                // which silently recorded reconciler-discovery time as if it were the actual
+                // exit time. Same bug shape, same fix, as the SHADOW buy-backfill a few dozen
+                // lines below in this file (and the crypto stale_skip fix from 2026-09-12) —
+                // cast+AT TIME ZONE for the same `timestamp without time zone` round-trip
+                // reason documented on tradesDatabaseService.recordTrade's tradeDate param.
                 await query(
                     `INSERT INTO trades
                          (user_id, symbol, action, quantity, price, total, trade_date,
                           executed_by, notes, pnl, pnl_percent, status,
                           ai_score, sector, entry_regime, hold_hours)
-                     VALUES ($1, $2, 'SELL', $3, $4, $5, NOW(),
+                     VALUES ($1, $2, 'SELL', $3, $4, $5,
+                             COALESCE($13::timestamptz AT TIME ZONE 'America/Chicago', NOW()),
                              'reconciler', $8, $6, $7, 'CLOSED', $9, $10, $11, $12)`,
                     [userId, symbol, dbQty, fillPrice, total, pnl, pnlPct,
                      `Alpaca stop/exit detected by position reconciler — price source: ${priceSource}, exit type: ${exitReasonTag}`,
-                     entryScore, entrySector, entryRegime, holdHours]
+                     entryScore, entrySector, entryRegime, holdHours, exitTime]
                 );
 
                 // Also close the matching trade_decision_journal row so this exit shows up in

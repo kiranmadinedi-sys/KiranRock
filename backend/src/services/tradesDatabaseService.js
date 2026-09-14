@@ -10,20 +10,26 @@ async function recordTrade(tradeData) {
     const {
         userId, symbol, action, quantity, price, total,
         commission = 0, executedBy = 'MANUAL', notes = null,
-        aiScore = null, sector = null
+        aiScore = null, sector = null,
+        // Optional real historical timestamp — added 2026-09-14 for reconciler
+        // backfills, where the trade actually happened at a real broker fill
+        // time in the past, not "now" (when the reconciler happened to catch
+        // up). Every other caller omits this and keeps getting the column's
+        // own NOW() default, so this is purely additive.
+        tradeDate = null
     } = tradeData;
-    
+
     const result = await query(`
         INSERT INTO trades (
             user_id, symbol, action, quantity, price, total,
-            commission, executed_by, notes, ai_score, sector
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            commission, executed_by, notes, ai_score, sector, trade_date
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, COALESCE($12, NOW()))
         RETURNING *
     `, [
         userId, symbol, action, quantity, price, total,
-        commission, executedBy, notes, aiScore, sector
+        commission, executedBy, notes, aiScore, sector, tradeDate
     ]);
-    
+
     return result.rows[0];
 }
 

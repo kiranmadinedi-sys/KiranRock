@@ -460,13 +460,52 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
             // the audit row (no balance/holdings side effects — those are already handled
             // above), so it can't double-count anything.
             try {
+                // Look up the REAL fill time/price via account activities (same
+                // approach already used a few lines up for exit reconciliation) —
+                // added 2026-09-14. Without this, trade_date defaulted to NOW()
+                // (whenever the reconciler happened to run), which can be days
+                // after the real fill. Confirmed live: ORCL (kmadined) and SOXL
+                // (paper) both showed up dated "today" when the real fills were
+                // 4 and 3 days old respectively — made two old positions look
+                // like reckless same-day re-entries right after a stop-loss,
+                // which they were not. Falls back to avgPrice/NOW() (the
+                // pre-existing behavior) if the activity lookup fails or finds
+                // nothing, exactly like the crypto stale_skip fix's fallback.
+                let fillPrice = avgPrice;
+                let fillTime  = null;
+                try {
+                    const axiosLib = require('axios');
+                    const userDbLib = require('./userDatabaseService');
+                    const creds = await userDbLib.getUserAlpacaCredentials(userId);
+                    const base = (creds?.isPaper !== false) ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets';
+                    const headers = {
+                        'APCA-API-KEY-ID':     creds?.keyId || process.env.ALPACA_KEY_ID,
+                        'APCA-API-SECRET-KEY': creds?.secretKey || process.env.ALPACA_SECRET_KEY
+                    };
+                    const actRes = await axiosLib.get(`${base}/v2/account/activities`, {
+                        headers, params: { activity_type: 'FILL' }, timeout: 8000
+                    });
+                    const fills = (actRes.data || []).filter(
+                        a => a.symbol === symbol && a.side === 'buy' && parseFloat(a.price) > 0
+                    ).sort((a, b) => new Date(b.transaction_time) - new Date(a.transaction_time));
+                    if (fills.length > 0) {
+                        fillPrice = parseFloat(fills[0].price);
+                        fillTime  = fills[0].transaction_time;
+                    }
+                } catch (lookupErr) {
+                    logger.debug('[Reconcile] SHADOW real-fill lookup failed, using cached avgPrice/NOW()', {
+                        userId, symbol, error: lookupErr.message
+                    });
+                }
+
                 const tradesDb = require('./tradesDatabaseService');
                 await tradesDb.recordTrade({
                     userId, symbol, action: 'BUY',
                     quantity: alpacaQty,
-                    price: avgPrice,
-                    total: avgPrice * alpacaQty,
+                    price: fillPrice,
+                    total: fillPrice * alpacaQty,
                     executedBy: 'reconciler',
+                    tradeDate: fillTime,
                     notes: 'Shadow position — broker fill never reached trades (see positionReconciliationService SHADOW fix)'
                 });
             } catch (tradeErr) {

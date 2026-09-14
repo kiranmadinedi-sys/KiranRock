@@ -73,6 +73,33 @@ async function scanForUser(user) {
     let tradesExecuted = 0;
     let capitalDeployed = 0;
 
+    // Cross-strategy cooldown check — added 2026-09-14. Blitz and the swing
+    // bot (enhancedAITradingBot.js) trade the same account's real capital but
+    // ran as fully independent pipelines: Blitz had no idea the swing bot had
+    // just hard-stopped out of a symbol as too risky. Found live: SOXL and
+    // ORCL both got bought back by Blitz within 30-60 min of a swing-bot
+    // stop-loss exit on the exact same symbol, immediately losing again.
+    // capitalCoordinator already does this same cross-strategy join for
+    // capital ("swingCommitted" below) — this is the equivalent for risk.
+    // Deliberately simple (no reasoned-recovery bypass like the swing bot's
+    // own 2-day/5% check) since Blitz operates on a completely different,
+    // much faster timescale — respect the cooldown while it's active, full
+    // stop, and let it naturally expire same as it does for swing re-entries.
+    const cooldownSymbols = new Set();
+    try {
+        const cooldownPrefix = `COOLDOWN_${user.id}_`;
+        const cooldownRes = await require('../config/database').query(
+            `SELECT symbol FROM asset_blacklist
+             WHERE symbol LIKE $1 AND (expires_at IS NULL OR expires_at > NOW())`,
+            [`${cooldownPrefix}%`]
+        );
+        for (const row of cooldownRes.rows) {
+            cooldownSymbols.add(row.symbol.slice(cooldownPrefix.length).toUpperCase());
+        }
+    } catch (err) {
+        logger.debug('[Blitz] Cooldown lookup failed — proceeding without it', { userId: user.id, error: err.message });
+    }
+
     const movers = dynamicUniverseService.getIntradayMovers()
         .map(s => s.symbol)
         .filter(s => !UNIVERSE.includes(s))
@@ -85,6 +112,12 @@ async function scanForUser(user) {
     for (const symbol of scanUniverse) {
         if (heldSymbols.has(symbol)) continue;
         if (openPositions.length + tradesExecuted >= config.max_open_positions) break;
+        if (cooldownSymbols.has(symbol.toUpperCase())) {
+            logger.info('[Blitz] Skipping — swing bot stop-loss cooldown active on this symbol', {
+                userId: user.id, symbol
+            });
+            continue;
+        }
 
         let quote;
         try {

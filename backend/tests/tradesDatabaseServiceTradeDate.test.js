@@ -24,7 +24,7 @@ describe('tradesDatabaseService.recordTrade — tradeDate override', () => {
         });
 
         const [sql, params] = query.mock.calls[0];
-        expect(sql).toContain('COALESCE($12, NOW())');
+        expect(sql).toContain("COALESCE($12::timestamptz AT TIME ZONE 'America/Chicago', NOW())");
         expect(params[11]).toBe('2026-09-10T14:00:23.467Z');
     });
 

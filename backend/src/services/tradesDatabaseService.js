@@ -16,6 +16,18 @@ async function recordTrade(tradeData) {
         // time in the past, not "now" (when the reconciler happened to catch
         // up). Every other caller omits this and keeps getting the column's
         // own NOW() default, so this is purely additive.
+        //
+        // trade_date is `timestamp without time zone` — a raw UTC ISO string
+        // (e.g. Alpaca's transaction_time) passed straight through gets its
+        // clock digits stored AS naive, silently discarding the "this was
+        // UTC" fact; reading it back later then reinterprets those same naive
+        // digits as this server's LOCAL time and shifts by the zone offset
+        // (5-6h, DST-dependent) AGAIN. Net effect: a value that round-trips
+        // wrong by a full UTC-offset every time. Cast to timestamptz (so
+        // Postgres parses the real UTC instant) then `AT TIME ZONE
+        // 'America/Chicago'` (this server's zone) converts it to the correct
+        // naive-local value for storage — DST-aware via Postgres's own tzdata,
+        // confirmed via a real insert-then-read round trip.
         tradeDate = null
     } = tradeData;
 
@@ -23,7 +35,8 @@ async function recordTrade(tradeData) {
         INSERT INTO trades (
             user_id, symbol, action, quantity, price, total,
             commission, executed_by, notes, ai_score, sector, trade_date
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, COALESCE($12, NOW()))
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+            COALESCE($12::timestamptz AT TIME ZONE 'America/Chicago', NOW()))
         RETURNING *
     `, [
         userId, symbol, action, quantity, price, total,

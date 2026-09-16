@@ -1,6 +1,7 @@
 const { getAggregatedNews } = require('./newsAggregationService');
 const { getTrackedSymbols } = require('./stockSignalAnalysisService');
 const { isXConfigured } = require('./xNewsService');
+const { analyzeSentiment } = require('./newsSentimentService');
 const { query } = require('../config/database');
 
 const CHECK_INTERVAL = 5 * 60 * 1000; // Check every 5 minutes
@@ -190,12 +191,19 @@ function analyzeNewsImpact(article, sentiment) {
         severity = 'Medium';
     }
     
-    // Adjust based on sentiment
+    // Adjust based on sentiment. Thresholds fixed 2026-09-16 — sentiment.score
+    // is on analyzeSentiment()'s -100..+100 scale (confirmed via its own
+    // internal label breakpoints, reused here), but this compared against
+    // 0.3/0.6 as if the scale were -1..+1. Any genuine signal (e.g. -24.5)
+    // always breached those tiny thresholds, so this only ever produced
+    // "Very Positive"/"Very Negative" for anything non-trivial — no middle
+    // ground — on top of the separate bug (now fixed) where the score was
+    // hardcoded to exactly 0 for every non-Alpha-Vantage source anyway.
     let sentimentImpact = 'Neutral';
-    if (sentiment.score > 0.3) {
-        sentimentImpact = sentiment.score > 0.6 ? 'Very Positive' : 'Positive';
-    } else if (sentiment.score < -0.3) {
-        sentimentImpact = sentiment.score < -0.6 ? 'Very Negative' : 'Negative';
+    if (sentiment.score > 20) {
+        sentimentImpact = sentiment.score > 50 ? 'Very Positive' : 'Positive';
+    } else if (sentiment.score < -20) {
+        sentimentImpact = sentiment.score < -50 ? 'Very Negative' : 'Negative';
     }
     
     return {
@@ -233,16 +241,43 @@ function normalizeTimestamp(value) {
 }
 
 function normalizeArticle(article) {
+    const title = article?.title || article?.headline || '';
+    const summary = article?.summary || article?.description || title;
+
+    // sentimentScore — fixed 2026-09-16. article?.sentiment only ever arrives
+    // from Alpha Vantage's native per-article field; every other source
+    // (Motley Fool, Yahoo, MarketBeat, 24/7 Wall St, ...) has no such field,
+    // so this unconditionally fell back to a hardcoded 0 — confirmed live,
+    // ALL 8,731 rows in news_alerts read sentiment_score: 0.0000 exactly,
+    // "Neutral", even for headlines that plainly weren't ("JPMorgan CEO
+    // sends strong warning...", "AMZN Stock Slips 2%..."). Made worse by
+    // Alpha Vantage's own news fetch itself failing (DNS: getaddrinfo
+    // ENOTFOUND www.alphavantage.co, found 2026-09-13) — so the one source
+    // this ever worked for wasn't even reachable. Live trading was never
+    // affected — enhancedAITradingBot.js's scoring reads a completely
+    // separate, already-working computation (newsSentimentService's own
+    // getNewsSentiment, which already calls this same analyzeSentiment
+    // function per-article) — this bug was confined to the news_alerts
+    // table / notification-feed display. Reuse that same real text-analysis
+    // function here as the fallback, so every source gets a genuine score
+    // instead of a silent 0, while a source that DOES provide its own
+    // native numeric sentiment (Alpha Vantage, if it ever recovers) still
+    // takes priority.
+    const nativeSentiment = Number(article?.sentiment);
+    const sentimentScore = Number.isFinite(nativeSentiment)
+        ? nativeSentiment
+        : parseFloat(analyzeSentiment(`${title} ${summary}`).score);
+
     return {
-        title: article?.title || article?.headline || '',
-        summary: article?.summary || article?.description || article?.title || article?.headline || '',
+        title,
+        summary,
         link: article?.link || article?.url || null,
         source: article?.source || article?.publisher || null,
         publishedAt: normalizeTimestamp(article?.publishedAt || article?.published_at || article?.pubDate),
         tickers: Array.isArray(article?.tickers)
             ? article.tickers.map((ticker) => String(ticker || '').toUpperCase()).filter(Boolean)
             : [],
-        sentimentScore: Number.isFinite(Number(article?.sentiment)) ? Number(article.sentiment) : 0,
+        sentimentScore,
         marketImpact: Number.isFinite(Number(article?.market_impact)) ? Number(article.market_impact) : 0
     };
 }
@@ -808,5 +843,9 @@ module.exports = {
     stopNewsMonitoring,
     addSymbolsToWatch,
     removeSymbolsFromWatch,
-    cleanupTestAlerts
+    cleanupTestAlerts,
+    // Pure helpers, exported for testing (2026-09-16 sentiment-score fix) —
+    // no side effects, safe to unit test directly.
+    normalizeArticle,
+    analyzeNewsImpact
 };

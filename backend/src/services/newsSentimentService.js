@@ -639,5 +639,6 @@ const getHistoricalSentiment = (articles) => {
 
 module.exports = {
     getNewsSentiment,
-    getHistoricalSentiment
+    getHistoricalSentiment,
+    analyzeSentiment
 };

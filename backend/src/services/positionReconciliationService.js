@@ -358,6 +358,33 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
                      entryScore, entrySector, entryRegime, holdHours, exitTime]
                 );
 
+                // Stop-loss cooldown — added 2026-09-15. enhancedAITradingBot.js's own
+                // live-detected hard-stop path (isHardStop) has always set a 5-day
+                // COOLDOWN_<userId>_<symbol> row in asset_blacklist; this reconciler path
+                // never did, even for the exact same kind of exit (a real stop order
+                // firing) — it just happened to be caught here instead of live. Found
+                // live: VEEA (paper account) got bought back by Blitz within 90 seconds
+                // of a reconciler-caught stop-loss, immediately losing again, because
+                // there was no cooldown row for Blitz's cross-strategy check (2026-09-14
+                // fix, 74b4eb2) to find. Only fires for a genuine stop-loss exit
+                // (exitReasonTag === 'stop_loss_reconciled') — not trailing stops, take
+                // profits, or generic market exits, matching isHardStop's own scope.
+                if (exitReasonTag === 'stop_loss_reconciled') {
+                    try {
+                        await query(
+                            `INSERT INTO asset_blacklist (symbol, reason, added_by, expires_at)
+                             VALUES ($1, $2, 'ai_bot_stop_loss', NOW() + INTERVAL '5 days')
+                             ON CONFLICT (symbol) DO UPDATE
+                               SET reason = EXCLUDED.reason,
+                                   expires_at = GREATEST(EXCLUDED.expires_at, asset_blacklist.expires_at)`,
+                            [`COOLDOWN_${userId}_${symbol}`, `Stop-loss cooldown for ${symbol} (exit: ${pnlPct.toFixed(1)}% @ $${fillPrice.toFixed(2)}, reconciler-caught)`]
+                        );
+                        logger.info('[Reconcile] Up-to-5-day re-entry cooldown set (reconciler-caught stop-loss)', { userId, symbol, fillPrice });
+                    } catch (cooldownErr) {
+                        logger.warn('[Reconcile] Failed to insert cooldown for reconciler-caught stop-loss', { userId, symbol, error: cooldownErr.message });
+                    }
+                }
+
                 // Also close the matching trade_decision_journal row so this exit shows up in
                 // trade_attribution — the view/analytics (win-rate-by-score-bucket, exit-reason
                 // breakdown, score calibration) all read from that journal, not from `trades`.

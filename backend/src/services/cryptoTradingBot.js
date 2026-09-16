@@ -47,7 +47,28 @@ async function _getClientForUser(userId) {
 async function _getBars(client, symbol) {
     try {
         const map = await client.getCryptoBars([symbol], { timeframe: '5Min', limit: BAR_WINDOW });
-        const bars = map.get(symbol) || null;
+        let bars = map.get(symbol) || null;
+
+        // Drop a still-forming last bar. This cycle runs at :X0:03 — a few
+        // seconds after every 5-min boundary — and at that instant Alpaca can
+        // hand back the brand-new, not-yet-closed candle as the newest element.
+        // For a thin pair (crypto universe includes several low-volume ones)
+        // that candle can be seeded from a single stale/synthetic tick nowhere
+        // near the real, settled price, since real historical re-queries of the
+        // same window later show a completely different, smooth value.
+        // Found 2026-09-15: UNI/USD whipsawed 7/7 times, each exit mislabeled
+        // "take-profit" despite price never actually reaching the real +4%
+        // target — root cause traced to exactly this partial bar. Both the
+        // position-monitor's exit check and the entry scan's scoring/sizing
+        // route through this one function, so trimming it here fixes both.
+        if (bars && bars.length > 0) {
+            const lastBar = bars[bars.length - 1];
+            const lastBarStart = new Date(lastBar.Timestamp || lastBar.timestamp || lastBar.t).getTime();
+            if (!Number.isNaN(lastBarStart) && lastBarStart + 5 * 60 * 1000 > Date.now()) {
+                bars = bars.slice(0, -1);
+            }
+        }
+
         // Persist every fetch — this is the only place bars are pulled (both the
         // position-monitor loop and the new-entry scan route through here), so this
         // single call site is enough to build a complete history of the curated

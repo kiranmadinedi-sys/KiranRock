@@ -28,19 +28,36 @@ async function recordTrade(tradeData) {
         // 'America/Chicago'` (this server's zone) converts it to the correct
         // naive-local value for storage — DST-aware via Postgres's own tzdata,
         // confirmed via a real insert-then-read round trip.
-        tradeDate = null
+        tradeDate = null,
+        // pnl/pnlPercent — added 2026-09-15. This function silently had no way
+        // to record a P&L at all (NULL always, unconditionally) — a backfill
+        // caller passing pnl in tradeData had it quietly dropped with no error,
+        // found only by noticing 3 freshly-backfilled VEEA rows all read back
+        // pnl: null despite being passed explicitly. status defaults to
+        // 'CLOSED' when a pnl is actually given (a SELL with a known P&L is by
+        // definition a closed round-trip); every other caller keeps getting
+        // NULL/the table's own default, unchanged from before this fix.
+        pnl = null, pnlPercent = null
     } = tradeData;
+
+    // 'OPEN' matches the column's own default — every pre-existing caller (no
+    // pnl passed) must keep getting exactly that, not NULL, now that status
+    // is explicitly in the column list below instead of omitted.
+    const status = pnl !== null ? 'CLOSED' : 'OPEN';
 
     const result = await query(`
         INSERT INTO trades (
             user_id, symbol, action, quantity, price, total,
-            commission, executed_by, notes, ai_score, sector, trade_date
+            commission, executed_by, notes, ai_score, sector, trade_date,
+            pnl, pnl_percent, status
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-            COALESCE($12::timestamptz AT TIME ZONE 'America/Chicago', NOW()))
+            COALESCE($12::timestamptz AT TIME ZONE 'America/Chicago', NOW()),
+            $13, $14, $15)
         RETURNING *
     `, [
         userId, symbol, action, quantity, price, total,
-        commission, executedBy, notes, aiScore, sector, tradeDate
+        commission, executedBy, notes, aiScore, sector, tradeDate,
+        pnl, pnlPercent, status
     ]);
 
     return result.rows[0];

@@ -37,3 +37,40 @@ describe('tradesDatabaseService.recordTrade — tradeDate override', () => {
         expect(params[11]).toBeNull();
     });
 });
+
+/**
+ * Added 2026-09-15: recordTrade had no way to record a pnl/pnlPercent at
+ * all — always silently NULL regardless of what a caller passed in
+ * tradeData, with no error. Found by backfilling 3 missing VEEA sell legs
+ * (see project_shadow_backfill_wrong_date_2026_09_14 / the VEEA whipsaw
+ * investigation) — all 3 read back pnl: null despite being passed
+ * explicitly, requiring a manual UPDATE to correct after the fact.
+ */
+describe('tradesDatabaseService.recordTrade — pnl/pnlPercent/status', () => {
+    beforeEach(() => {
+        query.mockResolvedValue({ rows: [{ id: 1 }] });
+    });
+
+    test('passes pnl and pnlPercent through, and sets status to CLOSED', async () => {
+        await recordTrade({
+            userId: 'u1', symbol: 'VEEA', action: 'SELL', quantity: 165, price: 7.00, total: 1155,
+            executedBy: 'reconciler', pnl: 37.48, pnlPercent: 3.35
+        });
+
+        const [, params] = query.mock.calls[0];
+        expect(params[12]).toBe(37.48);
+        expect(params[13]).toBe(3.35);
+        expect(params[14]).toBe('CLOSED');
+    });
+
+    test('omitting pnl keeps status at OPEN — the column\'s pre-existing default, not NULL', async () => {
+        await recordTrade({
+            userId: 'u1', symbol: 'AAPL', action: 'BUY', quantity: 1, price: 200, total: 200
+        });
+
+        const [, params] = query.mock.calls[0];
+        expect(params[12]).toBeNull();
+        expect(params[13]).toBeNull();
+        expect(params[14]).toBe('OPEN');
+    });
+});

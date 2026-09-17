@@ -95,14 +95,31 @@ function shouldSendCatchupReport() {
 /**
  * Wait for predictions to be ready before sending report
  * Polls the API with retries to ensure complete data
- * @param {boolean} isStartup - If true, waits indefinitely; if false, uses maxRetries limit
+ * @param {boolean} isStartup - If true, waits up to 30 min (long-startup case); if false, uses the 5-min maxRetries limit
  */
 async function waitForPredictionsReady(isStartup = false) {
-  console.log(`[Report Wait] Waiting for predictions to be ready... ${isStartup ? '(Startup - will wait indefinitely)' : '(Max 5 minutes)'}`);
-  
-  const maxRetries = isStartup ? Infinity : 30; // Infinite retries on startup, 30 for scheduled
+  // Was hardcoded to 10 here, completely independent of the ACTUAL requirement the
+  // send logic uses (REPORT_PREDICTION_CONFIG.minTopPicks, env-configurable, defaults
+  // to 3 — see fetchPredictionPayload in sendWeeklyReportToTelegram.js). Confirmed
+  // live 2026-09-17: the 6:30 AM TOP_200 prewarm completed in minutes with 7 picks —
+  // comfortably over the real minTopPicks=3 the send call would have happily used —
+  // but this gate's own unrelated ">= 10" check blocked it from ever recognizing that,
+  // polling the same already-finished, already-sufficient snapshot every 10s for 4+
+  // hours into market open. Using the same threshold as the real send logic means
+  // this now correctly succeeds the moment there's actually enough to send.
+  const minPicks = REPORT_PREDICTION_CONFIG.minTopPicks;
+  console.log(`[Report Wait] Waiting for predictions to be ready (need ${minPicks}+)... ${isStartup ? '(Startup - up to 30 min)' : '(Max 5 minutes)'}`);
+
+  // Also bounded now (was literally Infinity on the startup path) as a second,
+  // independent safety net: this snapshot is a finished, static result once the
+  // prewarm job completes, not something that keeps changing while polled — if the
+  // day's universe genuinely never reaches minPicks, no amount of extra waiting
+  // changes that. 180 retries (30 min) is generous for a genuinely slow cold start
+  // while guaranteeing this always eventually falls through to "send whatever is
+  // available" (below), the same fallback the non-startup path already uses.
+  const maxRetries = isStartup ? 180 : 30;
   const retryDelay = 10000; // 10 seconds between retries
-  
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const cacheKey = buildWeeklyPredictionCacheKey(
@@ -110,16 +127,16 @@ async function waitForPredictionsReady(isStartup = false) {
       );
       const snapshot = loadWeeklyPredictionSnapshot(cacheKey, REPORT_PREDICTION_CONFIG.snapshotMaxAgeMs);
       const reportPicks = snapshot?.payload?.topPicks || [];
-      
-      if (snapshot?.payload && reportPicks.length >= 10) {
-        
+
+      if (snapshot?.payload && reportPicks.length >= minPicks) {
+
         // Verify predictions have complete data
         const firstPrediction = reportPicks[0];
         const hasCompleteData = firstPrediction.symbol &&
                                firstPrediction.currentPrice &&
                                firstPrediction.prediction &&
                                firstPrediction.prediction.targetPrice;
-        
+
         if (hasCompleteData) {
           console.log(`[Report Wait] ✓ Predictions ready from persisted snapshot! Found ${reportPicks.length} complete predictions`);
           logger.info('[Report Wait] Predictions ready for Telegram report', {
@@ -132,9 +149,9 @@ async function waitForPredictionsReady(isStartup = false) {
         }
       } else {
         const count = reportPicks.length;
-        console.log(`[Report Wait] Attempt ${attempt}/${maxRetries}: Snapshot has only ${count} predictions ready, need 10+...`);
+        console.log(`[Report Wait] Attempt ${attempt}/${maxRetries}: Snapshot has only ${count} predictions ready, need ${minPicks}+...`);
       }
-      
+
     } catch (error) {
       console.log(`[Report Wait] Attempt ${attempt}/${maxRetries}: Error - ${error.message}`);
     }

@@ -763,17 +763,32 @@ async function withYahooFallback(method, label, ...args) {
         }
     }
 
+    // 404 = symbol not in a provider's universe (OTC, delisted, pink-sheet, SPAC unit/
+    // warrant Alpaca still marks tradable, etc). Broadened 2026-09-17: only matched
+    // `err.response?.status`/`err.status`/the literal substring "status code 404" —
+    // missed Alpaca's own shape entirely (its error message reads "code: 404, message:
+    // no snapshot found for X", no "status code 404" substring and no `.status`
+    // property), so a dead ticker's Alpaca failure always fell through to try Polygon
+    // pointlessly, AND — the bigger cost — a subsequent Polygon 404 for the same dead
+    // ticker was never checked at all, unconditionally falling through to Yahoo every
+    // time. Confirmed live: the nightly scan's per-symbol loop ground through a run of
+    // legacy/delisted tickers (EMSE, XVNV, MUNJ, QSE, MUNG, ...) each cascading
+    // Alpaca 404 → Polygon 404 → Yahoo, and Yahoo's shared rate-limit circuit breaker
+    // (tripped by any caller, process-wide, for 60s at a time) stalled the scan's next
+    // symbol regardless of source — for a ticker BOTH paid providers already agree
+    // doesn't exist, that Yahoo call was pure wasted rate-limit pressure with zero
+    // chance of a different answer.
+    function _is404(err) {
+        return err.response?.status === 404 || err.status === 404 || /\b404\b/.test(err.message || '');
+    }
+
     try {
         return await activeProvider[method](...args);
     } catch (err) {
         if (activeProvider === yahooProvider) throw err; // already Yahoo — no fallback
 
-        // 404 = symbol not in provider's universe (OTC, delisted, pink-sheet).
-        // Skip Yahoo fallback — it burns rate limit for a symbol that has no data there either.
         // DataPatch catches the rethrown error and returns { regularMarketPrice: 0 } gracefully.
-        const httpStatus = err.response?.status || err.status;
-        const is404 = httpStatus === 404 || /status code 404/.test(err.message || '');
-        if (is404) {
+        if (_is404(err)) {
             logger.debug(`[DataProvider] ${activeProvider.name} 404 for ${args[0]} — not in universe, skipping Yahoo fallback`);
             throw err;
         }
@@ -789,6 +804,10 @@ async function withYahooFallback(method, label, ...args) {
                 });
                 return await polygonProvider[method](...args);
             } catch (polygonErr) {
+                if (_is404(polygonErr)) {
+                    logger.debug(`[DataProvider] Polygon 404 for ${args[0]} too — not in either provider's universe, skipping Yahoo fallback`);
+                    throw polygonErr;
+                }
                 logger.warn(`[DataProvider] Polygon ${label} also failed, falling back to Yahoo`, {
                     symbol: args[0], error: polygonErr.message
                 });

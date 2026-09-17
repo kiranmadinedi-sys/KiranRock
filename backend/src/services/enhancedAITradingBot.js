@@ -5163,7 +5163,12 @@ async function manageExistingPositions(userId) {
                     shouldSell = true;
                     sellQuantity = Math.floor(holding.quantity / 2);
                     reason = `Partial take-profit at ${(changePercent * 100).toFixed(2)}% (selling 50%) [regime: ${exitThresholds.regime}]`;
-                    await holdingsDb.markPartialProfitTaken(userId, holding.symbol, true);
+                    // markPartialProfitTaken moved to AFTER the sell actually confirms a real
+                    // fill (see the sellMarket call below) — found 2026-09-17: this used to
+                    // fire the moment the DECISION was made, before the order even reached the
+                    // broker, so a sell that failed or never filled still permanently flipped
+                    // this flag and the bot would never offer this position a 50% partial exit
+                    // again even though nothing was actually sold.
                 }
                 // Early partial (sell 25% to lock in floor) — skipped on entry day
                 else if (!tooNew && changePercent >= exitThresholds.earlyPartial && !holding.partial_profit_taken) {
@@ -5316,7 +5321,6 @@ async function manageExistingPositions(userId) {
                     }
 
                     _sellInProgress.add(sellKey);
-                    const isFullExit = sellQuantity >= holding.quantity;
 
                     // Set exit-pending BEFORE attempting the sell so the next bot cycle
                     // won't re-trigger even if the sell order fails (broker error, 429, etc.).
@@ -5334,16 +5338,50 @@ async function manageExistingPositions(userId) {
 
                         const result = await brokerService.sellMarket(userId, holding.symbol, sellQuantity, { executedBy: 'AI_BOT', reason });
 
+                        // Use the REAL filled quantity, not the requested one — brokerService
+                        // places a limit order and waits up to 15s; a slow-filling order can be
+                        // fully unfilled, partially filled, or fill later at a different price
+                        // than known here (found 2026-09-17: brokerService itself computed the
+                        // correct filled quantity but then recorded the requested one regardless
+                        // — fixed there too, this mirrors it on the calling side).
+                        const actualSellQty = result.filledQty ?? 0;
+
+                        if (actualSellQty <= 0) {
+                            // Nothing actually sold yet — the limit order is still resting at the
+                            // broker. Don't touch holdings, don't send a "sold" alert, don't mark
+                            // partial-profit-taken (moved here from decision time for exactly this
+                            // reason). Leave _exitPending at its 30-min default (already set above)
+                            // rather than extending it — the position isn't confirmed exited, and a
+                            // shorter retry window lets the next cycle's own pre-sell order-cancel
+                            // step (sellMarket cancels any resting order for the symbol before
+                            // placing a new one) reasonably re-attempt. The existing SHADOW/PHANTOM/
+                            // exit reconciliation will pick up the real fill accurately whenever it
+                            // lands, the same way it already does for extended-hours entries.
+                            logger.warn('[ExitCleanup] Sell order did not fill within the wait window — leaving holding as-is for reconciliation to catch the real fill', {
+                                userId, symbol: holding.symbol, requestedQty: sellQuantity, orderId: result.orderId, status: result.status
+                            });
+                            continue; // the enclosing try's `finally` (below) already clears _sellInProgress
+                        }
+
+                        // Real outcome may differ from intent (partial fill) — recompute against
+                        // what actually sold, not what was requested.
+                        const actualIsFullExit = actualSellQty >= holding.quantity;
                         const exitPrice  = result.filledAvgPrice || currentPrice;
-                        const profitLoss = (exitPrice - purchasePrice) * sellQuantity;
+                        const profitLoss = (exitPrice - purchasePrice) * actualSellQty;
                         const pnlPercent = purchasePrice > 0 ? ((exitPrice - purchasePrice) / purchasePrice) * 100 : 0;
 
+                        // Only now that the sell has actually happened for real — see the removed
+                        // eager call at decision time above for why this moved.
+                        if (reason.startsWith('Partial take-profit at')) {
+                            await holdingsDb.markPartialProfitTaken(userId, holding.symbol, true);
+                        }
+
                         // Extend exit-pending to 2h now that the sell is confirmed.
-                        _exitPending.set(sellKey, Date.now() + (isFullExit ? 2 * 3600_000 : 1800_000));
+                        _exitPending.set(sellKey, Date.now() + (actualIsFullExit ? 2 * 3600_000 : 1800_000));
 
                         // For full exits, immediately remove the holding from DB so the
                         // next call to getUserHoldings doesn't return a stale record.
-                        if (isFullExit) {
+                        if (actualIsFullExit) {
                             try { await holdingsDb.deleteHolding(userId, holding.symbol); } catch (_delErr) {
                                 logger.warn('[ExitCleanup] Failed to delete holding from DB', { userId, symbol: holding.symbol });
                             }
@@ -5356,7 +5394,7 @@ async function manageExistingPositions(userId) {
                         }
 
                         await performanceService.recordTradePerformance(userId, {
-                            action: 'SELL', symbol: holding.symbol, quantity: sellQuantity,
+                            action: 'SELL', symbol: holding.symbol, quantity: actualSellQty,
                             price: exitPrice, profit_loss: profitLoss, fees: result.commission || 0
                         });
 
@@ -5365,7 +5403,11 @@ async function manageExistingPositions(userId) {
                             aiReasoning += '\n' + holding.scoringLog.slice(0, 8).join('\n');
                         }
 
-                        alertService.alertTradeExecuted(userId, 'SELL', holding.symbol, sellQuantity, exitPrice, holding.aiScore || '', aiReasoning).catch(() => {});
+                        if (actualSellQty < sellQuantity) {
+                            aiReasoning += `\n(Partial fill: ${actualSellQty}/${sellQuantity} shares — remainder still resting at the broker)`;
+                        }
+
+                        alertService.alertTradeExecuted(userId, 'SELL', holding.symbol, actualSellQty, exitPrice, holding.aiScore || '', aiReasoning).catch(() => {});
 
                         const sellSlippage = exitPrice - currentPrice; // positive = worse fill
                         // Classify the exit into a clean category for hypothesis analytics
@@ -5407,7 +5449,7 @@ async function manageExistingPositions(userId) {
                             outcome: _outcome,
                             metadata: {
                                 reason, exitReason: _exitCategory, winLossReason: _winLossReason,
-                                sellQuantity, purchasePrice,
+                                sellQuantity: actualSellQty, requestedSellQuantity: sellQuantity, purchasePrice,
                                 exitRegime: exitThresholds.regime,
                                 signalPrice: currentPrice,
                                 daysToEarningsAtExit: _exitDte,

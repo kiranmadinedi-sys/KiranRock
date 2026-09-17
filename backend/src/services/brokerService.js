@@ -287,21 +287,35 @@ const alpacaBroker = (() => {
         // Wait for fill (poll up to 15 seconds)
         const filled = await waitForFill(client, order.id, 15000);
 
-        // Mirror the trade in our DB for portfolio tracking
-        const tradingServiceDB = require('./tradingServiceDB');
-        await tradingServiceDB.executeBuyOrder(
-            userId, symbol, quantity,
-            `ALPACA_${isPaper ? 'PAPER' : 'LIVE'}`,
-            meta.aiScore || null,
-            meta.sector  || null,
-            null, null, null,
-            meta.atr || null
-        );
-
         const buyMarketFinalStatus = filled.status || 'submitted';
-        const buyMarketFilledQty   = filled.filled_qty
-            ? parseInt(filled.filled_qty)
-            : (buyMarketFinalStatus === 'filled' ? quantity : 0);
+        // Falls back to 0, NOT the requested `quantity` — this is a LIMIT order (see
+        // comment above); a slow-filling order can easily still be unfilled after 15s.
+        // Found 2026-09-17 (same bug as sellMarket, fixed alongside it): this always
+        // recorded the FULL requested quantity in the DB regardless of what actually
+        // filled, so an unfilled or partially-filled buy was recorded as a complete one.
+        const buyMarketFilledQty = filled.filled_qty ? parseInt(filled.filled_qty) : 0;
+        const buyFillPrice = filled.filled_avg_price ? parseFloat(filled.filled_avg_price) : null;
+
+        // Mirror the trade in our DB for portfolio tracking. Only record what actually
+        // filled — executeBuyOrder throws on qty<=0, and a zero-fill isn't an error, the
+        // order is still resting at the broker; SHADOW reconciliation catches the real
+        // fill later, the same way it already does for extended-hours entries. Also now
+        // passes the real broker fill price (was always null before, despite
+        // executeBuyOrder already supporting it — see its own comment, which says the
+        // buy side "already" skips the internal balance deduction on a broker-confirmed
+        // fill the way the sell side does; it never actually received one to trigger
+        // that path) instead of letting it re-fetch a fresh, possibly-different quote.
+        if (buyMarketFilledQty > 0) {
+            const tradingServiceDB = require('./tradingServiceDB');
+            await tradingServiceDB.executeBuyOrder(
+                userId, symbol, buyMarketFilledQty,
+                `ALPACA_${isPaper ? 'PAPER' : 'LIVE'}`,
+                meta.aiScore || null,
+                meta.sector  || null,
+                null, buyFillPrice, null,
+                meta.atr || null
+            );
+        }
 
         return {
             orderId:        order.id,
@@ -309,7 +323,7 @@ const alpacaBroker = (() => {
             side:           'buy',
             qty:            quantity,
             filledQty:      buyMarketFilledQty,
-            filledAvgPrice: filled.filled_avg_price ? parseFloat(filled.filled_avg_price) : quote.price,
+            filledAvgPrice: buyFillPrice || quote.price,
             status:         buyMarketFinalStatus,
             broker:         isPaper ? 'alpaca-paper' : 'alpaca-live'
         };
@@ -817,19 +831,36 @@ const alpacaBroker = (() => {
         const filled = await waitForFill(client, order.id, 15000);
 
         const sellStatus   = filled.status || 'submitted';
-        const sellFillQty  = filled.filled_qty ? parseInt(filled.filled_qty) : quantity;
+        // Falls back to 0, NOT the requested `quantity` — this is a LIMIT order (see
+        // comment above); waitForFill's 15s window can easily expire before a real fill
+        // lands (confirmed live 2026-09-17: a NAT sell filled 5.5 hours later, at a
+        // different price, than what this code recorded at the time). Recording the
+        // full requested quantity regardless of what actually filled was the bug: found
+        // this function computed the correct filled quantity here but then passed the
+        // ORIGINAL `quantity` to executeSellOrder below instead — every not-fully-filled
+        // sell (including a completely unfilled one) was recorded as a full, immediate
+        // sale. sellFillQty (now correctly used below) is the fix.
+        const sellFillQty  = filled.filled_qty ? parseInt(filled.filled_qty) : 0;
         const sellFillPx   = filled.filled_avg_price ? parseFloat(filled.filled_avg_price) : sellPrice;
+
+        const sellBroker   = isPaper ? 'alpaca-paper' : 'alpaca-live';
 
         // Mirror in DB — pass the broker fill price so executeSellOrder doesn't
         // need to re-fetch a quote (avoids failures when Alpaca snapshot returns 0).
-        const tradingServiceDB = require('./tradingServiceDB');
-        await tradingServiceDB.executeSellOrder(
-            userId, symbol, quantity,
-            `ALPACA_${isPaper ? 'PAPER' : 'LIVE'}`,
-            meta.reason || '',
-            sellFillPx || null
-        );
-        const sellBroker   = isPaper ? 'alpaca-paper' : 'alpaca-live';
+        // Only record what actually filled; executeSellOrder throws on qty<=0, and a
+        // zero-fill here isn't an error — the order is still resting at the broker. The
+        // existing SHADOW/PHANTOM/exit reconciliation (positionReconciliationService.js)
+        // picks up the real fill accurately once it lands, the same way it already
+        // does for extended-hours entries.
+        if (sellFillQty > 0) {
+            const tradingServiceDB = require('./tradingServiceDB');
+            await tradingServiceDB.executeSellOrder(
+                userId, symbol, sellFillQty,
+                `ALPACA_${isPaper ? 'PAPER' : 'LIVE'}`,
+                meta.reason || '',
+                sellFillPx || null
+            );
+        }
         const reason       = (meta.reason || '').toLowerCase();
 
         // Determine exit state from reason tag

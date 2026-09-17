@@ -670,7 +670,8 @@ async function executeLegacyAIBuyOrder(userId, symbol, quantity, aiScore = null,
 
     return {
         price: result.filledAvgPrice,
-        total: result.total ?? ((result.filledAvgPrice || 0) * quantity),
+        total: result.total ?? ((result.filledAvgPrice || 0) * result.filledQty),
+        filledQty: result.filledQty,
         broker: result.broker,
         orderId: result.orderId,
         status: result.status
@@ -685,7 +686,8 @@ async function executeLegacyAISellOrder(userId, symbol, quantity, reason = null)
 
     return {
         price: result.filledAvgPrice,
-        total: result.total ?? ((result.filledAvgPrice || 0) * quantity),
+        total: result.total ?? ((result.filledAvgPrice || 0) * result.filledQty),
+        filledQty: result.filledQty,
         broker: result.broker,
         orderId: result.orderId,
         status: result.status

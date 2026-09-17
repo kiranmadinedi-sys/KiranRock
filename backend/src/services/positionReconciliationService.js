@@ -62,6 +62,225 @@ async function _auditLog(userId, discrepancy, symbol, dbQty, brokerQty, action, 
     }
 }
 
+// ─── Fill-history reconciliation ───────────────────────────────────────────────
+
+/**
+ * Catches what PHANTOM/DRIFT/SHADOW structurally cannot: those three only ever
+ * compare the CURRENT DB quantity against the CURRENT Alpaca quantity at the
+ * instant reconcilePositions happens to run. A complete round trip that opens
+ * and closes entirely between two of those checks — landing back on the same
+ * net share count — produces zero drift at either checkpoint, so it's
+ * invisible to that comparison no matter how often it runs.
+ *
+ * Found 2026-09-17: a SOXL position went 9→0→9→0→9 shares within about an
+ * hour on 2026-09-11 (a real stop-loss then an immediate re-entry-and-exit),
+ * and both intermediate fills were completely missing from `trades` — no
+ * PHANTOM/DRIFT/SHADOW was ever flagged because the share count matched DB's
+ * expectation at every point reconcilePositions actually looked. No log trace
+ * existed either, at any bot's decision-logging level, of what submitted
+ * those two orders — this function can't explain a gap like that, only make
+ * sure it can never stay invisible again.
+ *
+ * Approach: pull every real closed ORDER from Alpaca over the lookback window
+ * (aggregated filled_qty/filled_avg_price — see the partial-fill note below)
+ * and match each one against an existing `trades` row — first by
+ * broker_order_id (exact, for rows written after 2026-09-17), falling back to
+ * a symbol+action+qty+price+time fuzzy match (for everything recorded before
+ * that column existed). Anything left unmatched is a real fill this app never
+ * wrote down.
+ *
+ * Detect-and-ALERT only — deliberately does not auto-backfill. Building this,
+ * two separate live runs against real data produced false positives before
+ * being caught and rolled back: matching against raw per-partial-fill
+ * activities instead of per-order aggregates (one 189-share order's 7 partial
+ * fills looked like 7 separate missing trades), and — even after fixing that —
+ * a genuinely fragmented real order sequence (VEEA, an already-known messy
+ * multi-whipsaw day) where quantities didn't line up exactly with the nearest
+ * recorded trade despite close time/price. A fuzzy match this imprecise is
+ * good enough to flag something for a human to look at; it is not good enough
+ * to trust with an unattended write of real financial history. `result.missing`
+ * is surfaced through runMorningReconciliation's Telegram alert so a real gap
+ * (like the SOXL one that started this) gets found and fixed by hand the way
+ * that one was, instead of sitting invisible indefinitely.
+ *
+ * Deliberately NOT a substitute for the PHANTOM/DRIFT/SHADOW checks above —
+ * those still exist because a currently-wrong balance is worth flagging even
+ * before any fill-level detail is available (e.g. a network blip mid-fetch).
+ * This is a second, independent safety net over the same ground.
+ */
+async function reconcileFillHistory(userId, { trigger = 'SCHEDULED', lookbackHours = 26 } = {}) {
+    const result = { ok: true, missing: [], fixes: [], errors: [] };
+
+    const broker = (process.env.BROKER || 'simulated').toLowerCase();
+    if (broker !== 'alpaca') return result;
+
+    const axios    = require('axios');
+    const userDb   = require('./userDatabaseService');
+    const tradesDb = require('./tradesDatabaseService');
+
+    const afterIso = new Date(Date.now() - lookbackHours * 3600 * 1000).toISOString();
+
+    let fills;
+    try {
+        const creds = await userDb.getUserAlpacaCredentials(userId);
+        const base  = (creds?.isPaper !== false) ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets';
+        const headers = {
+            'APCA-API-KEY-ID':     creds?.keyId     || process.env.ALPACA_KEY_ID,
+            'APCA-API-SECRET-KEY': creds?.secretKey || process.env.ALPACA_SECRET_KEY
+        };
+        // Deliberately /v2/orders, NOT /v2/account/activities?activity_type=FILL.
+        // A single order commonly fills across several PARTIAL activity records
+        // (large or illiquid orders especially) at slightly different prices —
+        // recordTrade() throughout this codebase always writes ONE row per ORDER
+        // using its aggregated filled_qty/filled_avg_price, never one row per
+        // partial fill. Matching against raw FILL activities compares that one
+        // aggregated row against each individual partial slice, none of which
+        // matches on qty or price alone — guaranteed false positives. Confirmed
+        // live 2026-09-17: an early version of this function, run once against
+        // real data, mistook 7 partial fills of one 189-share MEDS order for 7
+        // separate missing trades and inserted all of them — caught immediately
+        // by re-reading the result before trusting it, rolled back before
+        // shipping. /v2/orders gives exactly the same per-order aggregate this
+        // app's own recording code already uses, so it's the correct unit to
+        // compare against.
+        const ordRes = await axios.get(`${base}/v2/orders`, {
+            headers, params: { status: 'closed', after: afterIso, limit: 500, direction: 'asc' }, timeout: 10000
+        });
+        fills = (ordRes.data || [])
+            .filter(o => o.symbol && (o.side === 'buy' || o.side === 'sell')
+                && parseFloat(o.filled_qty) > 0 && parseFloat(o.filled_avg_price) > 0 && o.filled_at)
+            // Crypto has its own separate ledger (crypto_positions/crypto_trades) —
+            // never reconcile it into the stock `trades` table. Alpaca crypto symbols
+            // always carry a '/' (e.g. "BTC/USD"); equities never do.
+            .filter(o => !o.symbol.includes('/'))
+            .map(o => ({
+                symbol: o.symbol, side: o.side,
+                qty: o.filled_qty, price: o.filled_avg_price,
+                transaction_time: o.filled_at, order_id: o.id
+            }))
+            .sort((a, b) => new Date(a.transaction_time) - new Date(b.transaction_time));
+    } catch (err) {
+        const isNetworkErr = err.code === 'ENOTFOUND' || err.code === 'ECONNREFUSED' ||
+                             err.code === 'ETIMEDOUT'  || err.code === 'ECONNRESET'  ||
+                             (err.response?.status >= 500);
+        if (isNetworkErr) {
+            logger.warn('[Reconcile:FillHistory] Alpaca unreachable (transient) — skipping', { userId, err: err.message });
+            return result;
+        }
+        logger.error('[Reconcile:FillHistory] Failed to fetch orders', { userId, err: err.message });
+        result.ok = false;
+        result.errors.push(`Orders fetch failed: ${err.message}`);
+        return result;
+    }
+
+    if (fills.length === 0) return result;
+
+    try {
+        await tradesDb.ensureBrokerOrderIdColumn();
+    } catch (err) {
+        logger.error('[Reconcile:FillHistory] Could not ensure broker_order_id column', { userId, err: err.message });
+        result.ok = false;
+        result.errors.push(`Schema check failed: ${err.message}`);
+        return result;
+    }
+
+    // Wider than the lookback on the low end so a fill right at the boundary can still
+    // find its match (or its own cost-basis BUY) rather than getting falsely flagged.
+    // trade_date_utc converts the naive `timestamp without time zone` column to a real
+    // instant server-side (AT TIME ZONE), the same correctness reasoning as every other
+    // trade_date read/write in this file — comparing raw JS-parsed naive values against
+    // Alpaca's real UTC timestamps would silently reintroduce the exact round-trip bug
+    // fixed elsewhere this week.
+    let existingRows;
+    try {
+        const res = await query(
+            `SELECT id, symbol, action, quantity, price, broker_order_id,
+                    (trade_date AT TIME ZONE 'America/Chicago') AS trade_date_utc
+             FROM trades
+             WHERE user_id = $1
+               AND trade_date >= (($2::timestamptz AT TIME ZONE 'America/Chicago') - INTERVAL '30 minutes')`,
+            [userId, afterIso]
+        );
+        existingRows = res.rows;
+    } catch (err) {
+        logger.error('[Reconcile:FillHistory] Failed to load existing trades for matching', { userId, err: err.message });
+        result.ok = false;
+        result.errors.push(`Trades read failed: ${err.message}`);
+        return result;
+    }
+
+    const consumed        = new Set();
+    // Widened 2026-09-17 after a live run against real data: the EXISTING recorder
+    // (the SHADOW backfill above, and presumably others) records the price of
+    // whichever single partial fill it happened to look up, not the order's true
+    // filled_avg_price — confirmed on a real MEDS order where the recorded price
+    // (5.90) was 0.6% off the order's actual average (5.865). A tight tolerance
+    // here would flag already-correctly-recorded trades as "missing" purely
+    // because of that pre-existing, unrelated imprecision.
+    const PRICE_TOL_ABS    = 0.10;
+    const PRICE_TOL_PCT    = 0.02;   // 2%
+    const TIME_TOL_MINUTES = 15;
+
+    function findMatch(fill) {
+        const action = fill.side === 'buy' ? 'BUY' : 'SELL';
+
+        const byOrderId = existingRows.find(r =>
+            !consumed.has(r.id) && r.broker_order_id && r.broker_order_id === fill.order_id);
+        if (byOrderId) return byOrderId;
+
+        const fillTimeMs = new Date(fill.transaction_time).getTime();
+        const fillPrice  = parseFloat(fill.price);
+        const fillQty    = parseFloat(fill.qty);
+        const priceTol   = Math.max(PRICE_TOL_ABS, fillPrice * PRICE_TOL_PCT);
+
+        let best = null, bestDiffMs = Infinity;
+        for (const r of existingRows) {
+            if (consumed.has(r.id)) continue;
+            if (r.symbol.toUpperCase() !== fill.symbol.toUpperCase()) continue;
+            if (r.action !== action) continue;
+            if (Math.abs(parseFloat(r.quantity) - fillQty) > 0.001) continue;
+            if (Math.abs(parseFloat(r.price) - fillPrice) > priceTol) continue;
+            const diffMs = Math.abs(new Date(r.trade_date_utc).getTime() - fillTimeMs);
+            if (diffMs > TIME_TOL_MINUTES * 60000) continue;
+            if (diffMs < bestDiffMs) { best = r; bestDiffMs = diffMs; }
+        }
+        return best;
+    }
+
+    // Report-only, deliberately NOT auto-backfilled. Two live runs against real
+    // data while building this each produced false positives before this was
+    // caught and rolled back: first, matching against raw partial-fill activities
+    // instead of aggregated orders (7 partials of one 189-share MEDS order looked
+    // like 7 separate missing trades); second, even after fixing that, a genuinely
+    // fragmented real order sequence (VEEA, already a known messy multi-whipsaw
+    // day) produced fills whose quantity didn't line up exactly with the nearest
+    // recorded trade (194 vs 189 shares) despite matching time and price closely.
+    // Auto-writing on a fuzzy match this imprecise risks exactly the kind of
+    // phantom-duplicate mess this whole feature exists to catch. A human
+    // reviewing an alert and deciding whether to backfill (the same way the SOXL
+    // gap that started this was fixed) is the safe version of this feature;
+    // silently trusting a fuzzy match to insert real financial data is not.
+    for (const fill of fills) {
+        const match = findMatch(fill);
+        if (match) { consumed.add(match.id); continue; }
+
+        const action = fill.side === 'buy' ? 'BUY' : 'SELL';
+        const qty    = parseFloat(fill.qty);
+        const price  = parseFloat(fill.price);
+
+        await _auditLog(userId, 'MISSING_FILL', fill.symbol, null, null, 'DETECTED',
+            `${action} ${qty} @ $${price.toFixed(2)} on ${fill.transaction_time} (order ${fill.order_id}) — ` +
+            `no matching trades row found within ±${TIME_TOL_MINUTES}min / ±${(PRICE_TOL_PCT * 100).toFixed(1)}% price. Needs manual review.`,
+            trigger);
+        result.missing.push(`${fill.symbol} ${action} ${qty}@$${price.toFixed(2)} (${fill.transaction_time})`);
+        logger.warn('[Reconcile:FillHistory] Real fill has no matching trades row — needs manual review', {
+            userId, symbol: fill.symbol, action, qty, price, filledAt: fill.transaction_time, orderId: fill.order_id
+        });
+    }
+
+    return result;
+}
+
 // ─── Core reconciliation logic ────────────────────────────────────────────────
 
 /**
@@ -85,6 +304,8 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
         phantoms:     [],
         drifts:       [],
         shadows:      [],
+        missingFills: [],
+        fillErrors:   [], // separate from `errors` — never halt-worthy, see reconcileFillHistory
         fixes:        [],
         errors:       []
     };
@@ -565,13 +786,38 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
         }
     }
 
-    const totalIssues = result.phantoms.length + result.drifts.length + result.shadows.length;
+    // ── Step 5: fill-history reconciliation ──────────────────────────────────
+    // Runs after the PHANTOM/DRIFT/SHADOW fixes above so their inserts are
+    // already in `trades` and get matched, not duplicated. See
+    // reconcileFillHistory's own doc comment for why this exists.
+    // Note: fillResult.ok is intentionally never propagated into result.ok — this
+    // whole step is retrospective ledger auditing (which historical fills got
+    // recorded), never a signal about whether a CURRENT position is safe. It must
+    // not be able to trip runMorningReconciliation's HALT_ALL circuit breaker, no
+    // matter what fails inside it (a bad Alpaca fetch, a DB write failure, etc.).
+    // fillErrors is kept separate from result.errors on purpose — it's surfaced in
+    // its own non-blocking alert section rather than under "Auto-fix FAILED —
+    // trading halted", since (per the note above) it can never actually halt anything.
+    try {
+        const fillResult = await reconcileFillHistory(userId, { trigger });
+        result.missingFills = fillResult.missing;
+        result.fillErrors   = fillResult.errors;
+        result.fixes.push(...fillResult.fixes);
+    } catch (err) {
+        logger.error('[Reconcile] Fill-history reconciliation threw unexpectedly', { userId, err: err.message });
+        result.missingFills = [];
+        result.fillErrors   = [err.message];
+        result.errors.push(`Fill-history reconciliation failed: ${err.message}`);
+    }
+
+    const totalIssues = result.phantoms.length + result.drifts.length + result.shadows.length + result.missingFills.length;
     if (totalIssues === 0) {
         logger.info('[Reconcile] Clean — no discrepancies', { userId, positions: dbMap.size, trigger });
     } else {
         logger.warn(`[Reconcile] ${totalIssues} discrepancy(s) | ${result.errors.length} error(s)`, {
             userId, trigger,
             phantoms: result.phantoms,
+            missingFills: result.missingFills,
             drifts:   result.drifts.map(d => `${d.symbol}:${d.dbQty}→${d.alpacaQty}`),
             shadows:  result.shadows,
             errors:   result.errors
@@ -603,7 +849,7 @@ async function runMorningReconciliation(activeUsers, { trigger = 'SCHEDULED' } =
             totalIssues  += issues;
             totalErrors  += r.errors.length;
 
-            if (issues > 0 || r.errors.length > 0) {
+            if (issues > 0 || r.errors.length > 0 || r.missingFills.length > 0 || r.fillErrors.length > 0) {
                 const date  = new Date().toISOString().slice(0, 10);
                 const lines = [
                     `⚖️ *Position Reconciliation — ${date}* _(${trigger})_`,
@@ -620,6 +866,20 @@ async function runMorningReconciliation(activeUsers, { trigger = 'SCHEDULED' } =
                     lines.push('');
                     lines.push(`❌ *Auto-fix FAILED* — trading halted until resolved:`);
                     r.errors.forEach(e => lines.push(`  • ${e}`));
+                }
+                // Missing fills / lookup errors are reported but never gate the "halted"
+                // language above — see reconcileFillHistory's doc comment for why this
+                // whole category is detect-and-alert only, never an auto-fix, and never a
+                // live-safety signal.
+                if (r.missingFills.length) {
+                    lines.push('');
+                    lines.push(`📜 *Real fill(s) with no matching trades row — needs manual review:*`);
+                    r.missingFills.forEach(m => lines.push(`  • ${m}`));
+                }
+                if (r.fillErrors.length) {
+                    lines.push('');
+                    lines.push(`⚠️ *Fill-history check issue(s)* (non-blocking, worth a manual look):`);
+                    r.fillErrors.forEach(e => lines.push(`  • ${e}`));
                 }
                 lines.push('');
                 lines.push(r.ok
@@ -656,5 +916,6 @@ async function runMorningReconciliation(activeUsers, { trigger = 'SCHEDULED' } =
 
 module.exports = {
     reconcilePositions,
-    runMorningReconciliation
+    runMorningReconciliation,
+    reconcileFillHistory // exported 2026-09-17 for testability
 };

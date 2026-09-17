@@ -3,6 +3,15 @@ jest.mock('../src/config/database', () => ({ query: jest.fn() }));
 const { query } = require('../src/config/database');
 const { recordTrade } = require('../src/services/tradesDatabaseService');
 
+// recordTrade lazily runs a one-time `ALTER TABLE ... ADD COLUMN IF NOT EXISTS
+// broker_order_id` (+ index) ahead of the actual INSERT (added 2026-09-17,
+// _ensureBrokerOrderIdColumn) — only on the first call this module instance
+// ever makes, so its position in query.mock.calls isn't stable across tests.
+// Find the INSERT call by content instead of assuming an index.
+function findInsertCall() {
+    return query.mock.calls.find(([sql]) => sql.includes('INSERT INTO trades'));
+}
+
 /**
  * Added 2026-09-14: recordTrade gained an optional tradeDate override so the
  * position reconciler's SHADOW backfill (positionReconciliationService.js)
@@ -23,7 +32,7 @@ describe('tradesDatabaseService.recordTrade — tradeDate override', () => {
             executedBy: 'reconciler', tradeDate: '2026-09-10T14:00:23.467Z'
         });
 
-        const [sql, params] = query.mock.calls[0];
+        const [sql, params] = findInsertCall();
         expect(sql).toContain("COALESCE($12::timestamptz AT TIME ZONE 'America/Chicago', NOW())");
         expect(params[11]).toBe('2026-09-10T14:00:23.467Z');
     });
@@ -33,7 +42,7 @@ describe('tradesDatabaseService.recordTrade — tradeDate override', () => {
             userId: 'u1', symbol: 'AAPL', action: 'BUY', quantity: 1, price: 200, total: 200
         });
 
-        const [, params] = query.mock.calls[0];
+        const [, params] = findInsertCall();
         expect(params[11]).toBeNull();
     });
 });
@@ -57,7 +66,7 @@ describe('tradesDatabaseService.recordTrade — pnl/pnlPercent/status', () => {
             executedBy: 'reconciler', pnl: 37.48, pnlPercent: 3.35
         });
 
-        const [, params] = query.mock.calls[0];
+        const [, params] = findInsertCall();
         expect(params[12]).toBe(37.48);
         expect(params[13]).toBe(3.35);
         expect(params[14]).toBe('CLOSED');
@@ -68,7 +77,7 @@ describe('tradesDatabaseService.recordTrade — pnl/pnlPercent/status', () => {
             userId: 'u1', symbol: 'AAPL', action: 'BUY', quantity: 1, price: 200, total: 200
         });
 
-        const [, params] = query.mock.calls[0];
+        const [, params] = findInsertCall();
         expect(params[12]).toBeNull();
         expect(params[13]).toBeNull();
         expect(params[14]).toBe('OPEN');

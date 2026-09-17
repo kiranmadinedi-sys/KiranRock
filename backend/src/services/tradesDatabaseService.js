@@ -5,12 +5,29 @@ const { query } = require('../config/database');
  * Records all trading activity for audit trail
  */
 
+// broker_order_id — added 2026-09-17 alongside the fill-history reconciliation
+// (positionReconciliationService.reconcileFillHistory). Lets a real Alpaca
+// order be matched against its trades row by exact ID instead of only by
+// fuzzy symbol/qty/price/time comparison — every caller that has an order id
+// on hand should pass it. Ensured lazily (like cryptoDatabaseService's
+// ensureCryptoSchema) rather than depending on initDatabase.js's startup
+// path, which not every process here calls.
+let _brokerOrderIdColumnEnsured = false;
+async function _ensureBrokerOrderIdColumn() {
+    if (_brokerOrderIdColumnEnsured) return;
+    await query(`ALTER TABLE trades ADD COLUMN IF NOT EXISTS broker_order_id VARCHAR(100)`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_trades_broker_order_id ON trades(broker_order_id) WHERE broker_order_id IS NOT NULL`);
+    _brokerOrderIdColumnEnsured = true;
+}
+
 // Record a trade
 async function recordTrade(tradeData) {
+    await _ensureBrokerOrderIdColumn();
     const {
         userId, symbol, action, quantity, price, total,
         commission = 0, executedBy = 'MANUAL', notes = null,
         aiScore = null, sector = null,
+        brokerOrderId = null,
         // Optional real historical timestamp — added 2026-09-14 for reconciler
         // backfills, where the trade actually happened at a real broker fill
         // time in the past, not "now" (when the reconciler happened to catch
@@ -49,15 +66,15 @@ async function recordTrade(tradeData) {
         INSERT INTO trades (
             user_id, symbol, action, quantity, price, total,
             commission, executed_by, notes, ai_score, sector, trade_date,
-            pnl, pnl_percent, status
+            pnl, pnl_percent, status, broker_order_id
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
             COALESCE($12::timestamptz AT TIME ZONE 'America/Chicago', NOW()),
-            $13, $14, $15)
+            $13, $14, $15, $16)
         RETURNING *
     `, [
         userId, symbol, action, quantity, price, total,
         commission, executedBy, notes, aiScore, sector, tradeDate,
-        pnl, pnlPercent, status
+        pnl, pnlPercent, status, brokerOrderId
     ]);
 
     return result.rows[0];
@@ -149,6 +166,9 @@ module.exports = {
     getSymbolTrades,
     getTradesByDateRange,
     getTradeStatistics,
-    getRecentAITrades
-    , getFirstBuyDates
+    getRecentAITrades,
+    getFirstBuyDates,
+    ensureBrokerOrderIdColumn: _ensureBrokerOrderIdColumn // exported so callers reading
+    // trades.broker_order_id directly (e.g. reconcileFillHistory) can ensure it exists
+    // first too, not only recordTrade's own INSERT path.
 };

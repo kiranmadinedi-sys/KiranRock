@@ -5372,7 +5372,22 @@ async function manageExistingPositions(userId) {
 
                         // Only now that the sell has actually happened for real — see the removed
                         // eager call at decision time above for why this moved.
-                        if (reason.startsWith('Partial take-profit at')) {
+                        //
+                        // Covers BOTH partial-exit reasons, not just the 50% one — both the
+                        // mainPartial (50%) and earlyPartial (25%) branches above guard on the
+                        // SAME shared `!holding.partial_profit_taken` flag, so either one firing
+                        // must set it or the other stays able to re-trigger forever. Found
+                        // 2026-09-17 live on Parvataneni's NAT: the earlyPartial branch's reason
+                        // ("Early partial take-profit at...") never matched this check at all (a
+                        // pre-existing gap, not something introduced by moving this call earlier
+                        // tonight — the ORIGINAL code never set this flag from the earlyPartial
+                        // branch either) — a real 2-share sale filled cleanly at market open, but
+                        // the flag stayed false, so the exact same decision re-fired every cycle
+                        // all day, blocked each time by the idempotency guard (the day-scoped key
+                        // was already claimed by the first real fill) and firing a misleading
+                        // "Trade Executed" alert on every single blocked retry (14 by the time
+                        // this was caught) despite nothing actually selling after the first one.
+                        if (reason.startsWith('Partial take-profit at') || reason.startsWith('Early partial take-profit at')) {
                             await holdingsDb.markPartialProfitTaken(userId, holding.symbol, true);
                         }
 

@@ -781,11 +781,22 @@ async function runMorningStopVerification() {
 
                 if (!positions || positions.length === 0) continue;
 
-                // Build set of symbols with active stop protection
+                // Build set of symbols already protected by ANY resting sell order —
+                // not just stop-typed ones. A bracket order's take-profit LIMIT leg
+                // reserves the shares exactly as effectively as a stop would (Alpaca
+                // reports qty_available: 0 either way), so treating only stop/
+                // stop_limit/trailing_stop as "protected" made this job believe
+                // bracket-protected positions were naked and attempt a redundant stop
+                // placement — which Alpaca always rejects with a 403 (insufficient
+                // qty_available), since the shares are already committed elsewhere.
+                // Found 2026-09-16/17: 8 of 11 restoration attempts failed this way
+                // (C, PFE, XLC, SMCI, INTC, PBR) — traced C and PFE's real Alpaca order
+                // history and confirmed both had fully intact bracket stops the whole
+                // time; none were actually naked. A genuinely unprotected position has
+                // qty_available equal to the full qty and would place successfully.
                 const protectedSymbols = new Set(
                     openOrders
-                        .filter(o => o.side === 'sell' &&
-                            (o.type === 'stop' || o.type === 'stop_limit' || o.type === 'trailing_stop'))
+                        .filter(o => o.side === 'sell')
                         .map(o => o.symbol)
                 );
 
@@ -797,6 +808,7 @@ async function runMorningStopVerification() {
                     : 0.05;
 
                 const restored = [];
+                const failed = [];
                 for (const pos of positions) {
                     if (parseFloat(pos.qty) <= 0) continue;
                     if (protectedSymbols.has(pos.symbol)) continue;
@@ -822,7 +834,12 @@ async function runMorningStopVerification() {
                         restored.push(`${pos.symbol} stop@$${stopPrice}`);
                         console.log(`[StopVerify] Restored missing stop for ${pos.symbol} @ $${stopPrice}`);
                     } catch (placeErr) {
-                        console.warn(`[StopVerify] Could not place stop for ${pos.symbol}:`, placeErr.message);
+                        // Surface Alpaca's actual rejection reason, not just the generic axios
+                        // "Request failed with status code N" — needed to tell a benign
+                        // already-protected race apart from a real, actionable restriction.
+                        const detail = placeErr.response?.data?.message || placeErr.message;
+                        failed.push(`${pos.symbol}: ${detail}`);
+                        console.warn(`[StopVerify] Could not place stop for ${pos.symbol}:`, detail);
                     }
                 }
 
@@ -832,6 +849,20 @@ async function runMorningStopVerification() {
                         restored.map(r => `  ✅ ${r}`).join('\n') + `\n\n` +
                         `_These stops were missing at market open. Stops are now active._`
                     );
+                }
+
+                // Never let a failed restoration stay silent behind a console.warn nobody
+                // watches live. Most failures here mean the shares were already committed
+                // to an existing order (bracket leg, or another stop mid cancel-replace) —
+                // now much rarer since protectedSymbols above accounts for those — but any
+                // that DO still fail deserve a human look rather than being indistinguishable
+                // from that benign case, per the 2026-09-16/17 StopVerify investigation.
+                if (failed.length > 0) {
+                    await alertService.sendMessage(user.id,
+                        `🚨 *Could not confirm stop protection for ${failed.length} position(s) at open*\n\n` +
+                        failed.map(f => `  ❌ ${f}`).join('\n') + `\n\n` +
+                        `_Verify directly in Alpaca — this may be benign (shares already committed to an existing order) or may need manual action._`
+                    ).catch(alertErr => console.warn('[StopVerify] Failure alert send failed:', alertErr.message));
                 }
             } catch (userErr) {
                 console.warn(`[StopVerify] Error for user ${user.id}:`, userErr.message);
@@ -1872,5 +1903,6 @@ module.exports = {
     stopScheduler,
     getStatus,
     runScheduledTrading,
-    runWeeklyParameterHealthCheck
+    runWeeklyParameterHealthCheck,
+    runMorningStopVerification // exported 2026-09-17 for the StopVerify false-alarm/silent-failure fix
 };

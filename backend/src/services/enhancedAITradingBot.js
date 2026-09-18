@@ -141,11 +141,32 @@ function deriveWeinSteinStage(price, sma50, sma150, sma200, sma200Rising) {
  * Automatically analyzes ALL available stocks and trades autonomously
  */
 
-// Per-cycle ORACLE budget — limits Claude API calls per scan to control cost.
-// HERMES RS sort guarantees only the highest-momentum stocks use these slots.
-// Cached results (1-hour window per symbol) don't count toward the cap.
-const ORACLE_MAX_PER_CYCLE = Math.max(5, parseInt(process.env.ORACLE_MAX_PER_CYCLE || '25', 10));
+// Per-cycle ORACLE budget — limits local-LLM (Ollama) calls per scheduler tick to
+// control both cost and Ollama queue contention. HERMES RS sort guarantees only the
+// highest-momentum stocks use these slots. Cached results (15-min window per symbol,
+// shared across users — see ollamaService.js) don't count toward the cap.
+//
+// This is a GLOBAL budget across the whole tick, not per-user — was previously reset
+// to 0 at the top of scanMarketForOpportunities(userId, ...), which enhancedAIScheduler.js
+// calls once per user via Promise.all(activeUsers.map(processUser)), i.e. concurrently
+// for all active users every tick. Each user's reset wiped out whatever the OTHER
+// users' concurrent scans had already spent, so the "budget" never actually limited
+// anything under real conditions — it just kept getting replenished mid-flight.
+// Confirmed live 2026-09-17/18: 205 of 210 Ollama queue-wait events that day were
+// live-vs-live (accounts competing with each other, not batch bleed-through), with
+// this single-lane CPU-bound server (no GPU offload — see ollamaService.js) unable to
+// do anything but serialize them, up to 7+ minutes of wait for one request. Fixed by
+// moving the reset to resetOracleCycleBudget(), called once per tick from
+// enhancedAIScheduler.js before dispatching to users, and lowering the default from
+// 25 (which, per user, could never really have been enforced anyway) to a real global
+// ceiling across however many users are active this tick.
+const ORACLE_MAX_PER_CYCLE = Math.max(5, parseInt(process.env.ORACLE_MAX_PER_CYCLE || '15', 10));
 let _oracleCycleCount = 0;
+
+/** Call once per scheduler tick, before dispatching to users — see ORACLE_MAX_PER_CYCLE comment. */
+function resetOracleCycleBudget() {
+    _oracleCycleCount = 0;
+}
 
 // ─── FOMC CALENDAR ────────────────────────────────────────────────────────────
 // Fed decision days (the second day of each 2-day meeting, ~2 PM ET announcement).
@@ -2518,7 +2539,9 @@ function analyzeStockWithAICached(symbol, vixLevel, regime) {
  * @param {number} [overrideMinScore] - optional regime-adjusted min score
  */
 async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore = null) {
-    _oracleCycleCount = 0; // reset per-cycle budget so ORACLE fires fresh each scan
+    // Budget reset moved to resetOracleCycleBudget(), called once per scheduler tick —
+    // see ORACLE_MAX_PER_CYCLE's comment for why resetting it here (once per USER, when
+    // all users' scans run concurrently) never actually enforced anything.
     logger.info('Scanning market for opportunities', { userId, limit });
 
     const [vixLevel, regime] = await Promise.all([
@@ -5557,7 +5580,8 @@ module.exports = {
     getUserRiskConfig,
     manageExistingPositions,
     getGateStats,
-    getVixLevel
+    getVixLevel,
+    resetOracleCycleBudget
 };
 
 // Test-only exports — stripped from consideration in production because NODE_ENV !== 'test'

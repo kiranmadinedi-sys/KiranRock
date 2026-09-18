@@ -152,7 +152,17 @@ async function runScheduledTrading() {
         }
         
         console.log(`[Enhanced AI Scheduler] Found ${activeUsers.length} users with AI trading enabled\n`);
-        
+
+        // Reset the shared ORACLE (Ollama) per-tick call budget exactly once here, before
+        // dispatching to all users in parallel below — see enhancedAITradingBot.js's
+        // ORACLE_MAX_PER_CYCLE comment. It used to reset once per USER instead (inside
+        // scanMarketForOpportunities), which under this same parallel dispatch meant each
+        // user's reset wiped out whatever the others had already spent — the budget never
+        // actually capped anything. Found 2026-09-17/18 investigating heavy Ollama queue
+        // contention (up to 7+ min waits): 205 of 210 queued requests that day were
+        // live-vs-live, i.e. this exact uncapped concurrent demand, not batch bleed-through.
+        enhancedAITradingBot.resetOracleCycleBudget();
+
         // Process all users in PARALLEL — sequential processing meant the last user
         // could be 25–60s behind on every cycle, missing time-sensitive opportunities.
         // Each user gets an independent 4-minute hard timeout so one slow account

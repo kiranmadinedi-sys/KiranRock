@@ -4800,8 +4800,25 @@ async function manageExistingPositions(userId) {
             const brokerOrders = await brokerService.getOpenOrders(userId).catch(() => []);
             // Build map: symbol → active stop order(s) on the sell side
             const stopOrderMap = new Map(); // symbol → { orderId, stopPrice }
+            // Separate from stopOrderMap on purpose: stopOrderMap's stopPrice feeds the
+            // monotonicity/raise-stop logic below, which is only meaningful for a genuine
+            // stop/stop_limit/trailing_stop order — a bracket's take-profit LIMIT leg has
+            // no stop price at all, and treating its limit_price as one would corrupt that
+            // logic. This second set exists purely to answer "is ANY resting sell order
+            // already committing these shares" for the missing-stop check just below.
+            // Found 2026-09-17/18: this per-cycle repair (far more frequent than the
+            // once-a-day StopVerify job, which had the identical bug already fixed) hit a
+            // 403 sixty-five times in one day for NAT alone — its bracket take-profit leg
+            // wasn't recognized as protection, so this treated the position as unprotected
+            // and attempted a redundant stop every cycle, always rejected (Alpaca reports
+            // qty_available: 0 once any resting order exists, regardless of its type) —
+            // never an actually-naked position, just noise, but the failure path is
+            // indistinguishable in the log from one that would be.
+            const anyRestingSellSymbols = new Set();
             for (const o of brokerOrders) {
-                if (o.side === 'sell' && (o.type === 'stop' || o.type === 'stop_limit' || o.type === 'trailing_stop')) {
+                if (o.side !== 'sell') continue;
+                anyRestingSellSymbols.add(o.symbol);
+                if (o.type === 'stop' || o.type === 'stop_limit' || o.type === 'trailing_stop') {
                     stopOrderMap.set(o.symbol, { orderId: o.id, stopPrice: parseFloat(o.stop_price || o.limit_price || 0) });
                 }
             }
@@ -4824,6 +4841,13 @@ async function manageExistingPositions(userId) {
 
                 const existing = stopOrderMap.get(sym);
                 const qty = String(parseFloat(h.quantity));
+
+                if (!existing && anyRestingSellSymbols.has(sym)) {
+                    // Some other resting sell order (bracket take-profit leg, etc.) already
+                    // commits these shares — not a genuinely missing stop, and attempting one
+                    // would only be rejected. Nothing to do this cycle for this symbol.
+                    continue;
+                }
 
                 if (!existing) {
                     // MISSING stop — but first confirm the position is actually still live at the

@@ -240,10 +240,16 @@ function getRiskEmoji(riskScore) {
 async function getWeeklyReport() {
   try {
     // Step 1: Login to get JWT token
+    // timeout was missing entirely here — every other network call in this file
+    // (and the equivalent login() in sendClaudeWeeklyBuyList.js) has one; axios has
+    // no default timeout, so a login call that never gets a response hangs this
+    // whole report forever. Confirmed live 2026-09-17/18: a manually-triggered
+    // report send sat here for 13+ hours with no error, no progress, and no way to
+    // tell it apart from a process that was still legitimately working.
     const loginRes = await axios.post('http://localhost:3001/api/auth/login', {
       username: process.env.BOT_USERNAME || 'user',
       password: process.env.BOT_PASSWORD || 'password'
-    });
+    }, { timeout: 15000 });
     const token = loginRes.data.token;
     if (!token) throw new Error('No token received from login');
 

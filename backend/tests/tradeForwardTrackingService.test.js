@@ -126,4 +126,46 @@ describe('tradeForwardTrackingService', () => {
             expect(aggCall[1]).toEqual([30]);
         });
     });
+
+    /**
+     * Added 2026-09-18 investigating why kmadined's live account was down for
+     * the month: half its exits were stop-losses while every other exit type
+     * was net profitable. This answers the follow-up question the raw
+     * aggregate can't — were those stop-losses cutting real winners short
+     * (high avg MFE beforehand) or catching weak entries that barely moved
+     * favorably at all (low avg MFE)? Confirmed live: avg MFE for kmadined's
+     * stop_loss bucket was only +3.09% — an entry-quality signal, not a
+     * stop-width one.
+     */
+    describe('getMfeMaeByExitCategory', () => {
+        test('passes userId and days through, and returns the grouped rows as-is', async () => {
+            const mockRows = [
+                { exit_category: 'stop_loss', n: 7, avg_mfe_pct: '3.09', avg_mae_pct: '-7.01', total_pnl: '-74.20' },
+                { exit_category: 'partial_take_profit', n: 1, avg_mfe_pct: '16.81', avg_mae_pct: '0.99', total_pnl: '7.85' },
+            ];
+            query.mockImplementation((sql, params) => {
+                if (sql.includes('FROM trade_forward_tracking ft')) {
+                    expect(params).toEqual(['user-1', 90]);
+                    return Promise.resolve({ rows: mockRows });
+                }
+                return Promise.resolve({ rows: [] });
+            });
+
+            const result = await tradeForwardTrackingService.getMfeMaeByExitCategory('user-1', { days: 90 });
+
+            expect(result).toEqual(mockRows);
+        });
+
+        test('userId is always stringified (a numeric-looking id must not break the query)', async () => {
+            query.mockImplementation((sql, params) => {
+                if (sql.includes('FROM trade_forward_tracking ft')) {
+                    expect(typeof params[0]).toBe('string');
+                    return Promise.resolve({ rows: [] });
+                }
+                return Promise.resolve({ rows: [] });
+            });
+
+            await tradeForwardTrackingService.getMfeMaeByExitCategory(12345, {});
+        });
+    });
 });

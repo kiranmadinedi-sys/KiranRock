@@ -176,6 +176,82 @@ async function getActualBuyAttribution({ days = 90 } = {}) {
     return res.rows[0];
 }
 
+/**
+ * Breaks down average MFE/MAE by WHY the trade eventually exited — the
+ * question the raw aggregate above can't answer on its own: are stop-losses
+ * cutting real winners short (high avg MFE before the stop), or catching
+ * weak entries that barely moved favorably before drawing down (low avg
+ * MFE, meaningful avg MAE)? Those are different problems needing different
+ * fixes (stop width vs. entry-signal quality), and this is the first place
+ * that separates them with real forward-tracked data instead of guessing
+ * from hold-time patterns.
+ *
+ * Added 2026-09-18, investigating why kmadined's live account was down for
+ * the month despite every non-stop-loss exit type being net profitable:
+ * half of all exits were stop-losses, and this breakdown showed most of
+ * them had barely gone positive at all (avg MFE a few percent) before
+ * reversing — an entry-quality signal, not a "the stop cut off a real
+ * winner" one (which would show a much higher avg MFE for that bucket).
+ *
+ * Classifies via `trades.notes`, since there's no dedicated exit-category
+ * column — mirrors enhancedAITradingBot.js's own inline `_exitCategory`
+ * classification (built from the live-detected `reason` string) plus the
+ * separate `exitReasonTag` labels positionReconciliationService.js writes
+ * for broker-side exits it catches after the fact, unified into the same
+ * category names so both populations compare like-for-like.
+ */
+async function getMfeMaeByExitCategory(userId, { days = 90 } = {}) {
+    await _ensureSchema();
+    // ft.trade_id links to the BUY that opened the position (recordTradeEntry fires
+    // right after a buy fills) — there's no lot-tracking linking a BUY to whichever
+    // SELL(s) eventually closed it, so the closing sell is approximated as the
+    // earliest SELL for the same user+symbol dated after the buy. Good enough for
+    // the common single-lot case; a symbol with multiple round trips in the window
+    // attributes each buy's forward MFE/MAE to its own first subsequent sell, which
+    // is still a reasonable per-entry pairing, just not a guaranteed exact one.
+    const res = await query(`
+        SELECT
+            CASE
+                WHEN sell.notes ILIKE 'Stop-loss triggered%'                       OR sell.notes ILIKE '%exit type: stop_loss_reconciled%'       THEN 'stop_loss'
+                WHEN sell.notes ILIKE 'Trailing stop%'                             OR sell.notes ILIKE '%exit type: trailing_stop_reconciled%'   THEN 'trailing_stop'
+                WHEN sell.notes ILIKE 'Break-even protection%'                                                                                   THEN 'break_even'
+                WHEN sell.notes ILIKE 'Early partial take-profit%' OR sell.notes ILIKE 'Partial take-profit%'
+                     OR sell.notes ILIKE '%exit type: partial_profit_reconciled%'                                                                THEN 'partial_take_profit'
+                WHEN sell.notes ILIKE 'Take-profit target%'                        OR sell.notes ILIKE '%exit type: take_profit_reconciled%'
+                     OR sell.notes ILIKE '%exit type: protective_limit_reconciled%'                                                              THEN 'take_profit'
+                WHEN sell.notes ILIKE 'Pre-earnings%'                                                                                            THEN 'pre_earnings_exit'
+                WHEN sell.notes ILIKE 'Swing max-hold partial%'                                                                                  THEN 'max_hold_partial'
+                WHEN sell.notes ILIKE 'Swing max-hold%'                                                                                          THEN 'max_hold_time'
+                WHEN sell.notes ILIKE 'Slow mover%'                                                                                              THEN 'slow_mover'
+                WHEN sell.notes ILIKE 'Quality score decay%'                                                                                     THEN 'quality_decay'
+                WHEN sell.notes ILIKE '%exit type: market_exit_reconciled%'                                                                      THEN 'reconciler_market_exit'
+                WHEN sell.id IS NULL                                                                                                             THEN 'still_open'
+                ELSE 'other'
+            END AS exit_category,
+            COUNT(*)::int                                       AS n,
+            COUNT(*) FILTER (WHERE ft.mfe_pct IS NOT NULL)::int AS n_with_mfe,
+            ROUND(AVG(ft.mfe_pct)::numeric, 2)                  AS avg_mfe_pct,
+            ROUND(AVG(ft.mae_pct)::numeric, 2)                  AS avg_mae_pct,
+            ROUND(AVG(sell.pnl_percent)::numeric, 2)            AS avg_realized_pnl_pct,
+            ROUND(SUM(sell.pnl)::numeric, 2)                    AS total_pnl
+        FROM trade_forward_tracking ft
+        JOIN trades buy ON buy.id = ft.trade_id
+        LEFT JOIN LATERAL (
+            SELECT s.id, s.notes, s.pnl, s.pnl_percent
+            FROM trades s
+            WHERE s.user_id = buy.user_id AND s.symbol = buy.symbol AND s.action = 'SELL'
+              AND s.status != 'VOIDED' AND s.trade_date >= buy.trade_date
+            ORDER BY s.trade_date ASC
+            LIMIT 1
+        ) sell ON true
+        WHERE ft.user_id = $1
+          AND ft.recorded_at >= NOW() - ($2 || ' days')::interval
+        GROUP BY exit_category
+        ORDER BY total_pnl ASC NULLS LAST
+    `, [String(userId), days]);
+    return res.rows;
+}
+
 function startTradeForwardTrackingScheduler() {
     if (job) {
         logger.warn('[TradeForwardTracking] Scheduler already running');
@@ -209,6 +285,7 @@ module.exports = {
     recordTradeEntry,
     updateTradeForwardTracking,
     getActualBuyAttribution,
+    getMfeMaeByExitCategory,
     startTradeForwardTrackingScheduler,
     stopTradeForwardTrackingScheduler,
 };

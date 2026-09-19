@@ -230,9 +230,20 @@ async function recordCandidate(userId, candidate) {
 }
 
 async function recordExecution(userId, execution) {
+    // 2026-09-19: EXECUTED rows went completely dark platform-wide for ~2 weeks
+    // (Sept 1-15) with zero errors logged anywhere — real trades kept happening,
+    // CANDIDATE/CLOSED rows kept populating, but this insert produced nothing and
+    // never threw. Root cause not found from code/log inspection alone. Added an
+    // entry trace + RETURNING id + full error detail (not just error.message) so
+    // the next occurrence is actually diagnosable instead of silent. See
+    // project_journal_executed_phase_gap_2026_09_19 memory. Safe to trim this
+    // back to a plain debug log once the gap is understood and stops recurring.
+    logger.info('[TradeIntelligence] recordExecution called', {
+        userId, symbol: execution.symbol, setupFamily: execution.setupFamily
+    });
     try {
         await ensureTradeIntelligenceSchema();
-        await query(
+        const result = await query(
             `INSERT INTO trade_decision_journal (
                 user_id, bot_type, symbol, setup_family, strategy_family, regime,
                 decision_phase, score, score_adjustment, size_multiplier, expectancy,
@@ -241,7 +252,7 @@ async function recordExecution(userId, execution) {
                 $1, $2, $3, $4, $5, $6,
                 'EXECUTED', $7, $8, $9, $10,
                 $11, $12, $13, $14, $15::jsonb
-             )`,
+             ) RETURNING id`,
             [
                 userId,
                 execution.botType,
@@ -264,11 +275,22 @@ async function recordExecution(userId, execution) {
                 JSON.stringify({ ...(execution.metadata || {}), strategyVersion: STRATEGY_VERSION })
             ]
         );
+        logger.info('[TradeIntelligence] recordExecution wrote row', {
+            userId,
+            symbol: execution.symbol,
+            rowCount: result.rowCount,
+            insertedId: result.rows?.[0]?.id ?? null
+        });
     } catch (error) {
         logger.error('[TradeIntelligence] Failed to record execution', {
             userId,
             symbol: execution.symbol,
-            error: error.message
+            error: error.message,
+            code: error.code,
+            detail: error.detail,
+            constraint: error.constraint,
+            table: error.table,
+            stack: error.stack
         });
     }
 }

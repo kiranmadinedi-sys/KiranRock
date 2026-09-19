@@ -384,24 +384,51 @@ const alpacaBroker = (() => {
             ? parseInt(filled.filled_qty)
             : (finalStatus === 'filled' ? quantity : 0);
         const fillPrice = filled.filled_avg_price ? parseFloat(filled.filled_avg_price) : quote.price;
+        // Only a genuinely complete fill is recorded here — a 'partially_filled' status
+        // from waitForFill just means "stop polling, something happened", not that the
+        // order is done: extended-hours liquidity is thin, and a 'day' order can keep
+        // filling for the rest of the session. Recording a partial amount as final (the
+        // old behavior) meant the remaining shares that filled later never made it into
+        // trades at all. Confirmed live 2026-09-18: HPQ recorded 11sh here, the order's
+        // real total was 14; SWKS recorded 4, real total was 5 — both HPQ and SWKS values
+        // exactly matched filled_qty at whatever moment waitForFill happened to return,
+        // not the order's eventual true size. An incomplete fill is now left unrecorded
+        // for SHADOW/fill-history reconciliation to catch accurately once the order
+        // actually finishes (it looks up the real fill via account activities, not a
+        // same-moment quote like the old fillPrice=null fallback below did too).
+        const isComplete = finalStatus === 'filled';
 
-        if (filledQty > 0) {
+        if (isComplete && filledQty > 0) {
             await logOrderState(idemKey, userId, symbol, 'FILLED', 'SUBMITTED', {
                 brokerOrderId: order.id, price: fillPrice, quantity: filledQty,
                 broker: isPaper ? 'alpaca-paper' : 'alpaca-live',
                 extra: { extendedHours: true, noStopAttached: true }
             });
 
-            // Mirror into holdings exactly like buyMarket.
+            // Mirror into holdings exactly like buyMarket. fillPrice now passed through —
+            // was always null here despite being known, forcing executeBuyOrder to look up
+            // a fresh quote instead (wrong for a symbol that can move between the real fill
+            // and whenever this DB write happens to run, especially in thin extended-hours
+            // trading — the same gap fixed in buyMarket/sellMarket 2026-09-17).
             const tradingServiceDB = require('./tradingServiceDB');
             await tradingServiceDB.executeBuyOrder(
                 userId, symbol, filledQty,
                 `ALPACA_${isPaper ? 'PAPER' : 'LIVE'}_EXTENDED_HOURS`,
                 meta.aiScore || null,
                 meta.sector  || null,
-                null, null, null,
+                null, fillPrice, null,
                 meta.atr || null
             );
+        } else if (filledQty > 0) {
+            logger.warn('[Broker:Alpaca] Extended-hours order partially filled — not recording yet, leaving the rest for reconciliation to catch once complete', {
+                userId, symbol, filledQty, requestedQty: quantity, status: finalStatus, orderId: order.id
+            });
+        }
+
+        // Stop-placement is independent of the recording decision above — whatever is
+        // confirmed filled right now deserves protection immediately, regardless of
+        // whether the order is fully done yet.
+        if (filledQty > 0) {
 
             // Attempt a real GTC stop immediately, right after the fill — confirmed live
             // (2026-08-01) that Alpaca accepts a plain stop order (no extended_hours flag)

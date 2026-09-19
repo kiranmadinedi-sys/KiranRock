@@ -325,6 +325,19 @@ async function runEodCleanup() {
     // Compares today's trade activity to the 90-day baseline.
     // Flags deviations > 50% in trade count, win rate, or avg position size —
     // symptoms of runaway bugs, sudden strategy breakdown, or market-structure changes.
+    // Catastrophic cases (runaway bot, strategy breakdown) engage the HALT_ALL kill switch.
+    //
+    // 2026-09-19: every query in this block (and the EOD digest / weekly health-check
+    // queries further below) filtered `decision_phase = 'EXIT'` — a value that has
+    // never existed in trade_decision_journal's CHECK constraint (CANDIDATE/EXECUTED/
+    // CLOSED only), present since this table and this exact detector were introduced
+    // together on 2026-06-05. Every query here has always matched zero rows, so
+    // today_count/baseline_avg/today_wr/baseline_wr were always 0/null, every anomaly
+    // and auto-pause condition below was structurally unreachable, and the EOD digest's
+    // "today's P&L" section and the weekly report's score/regime/alpha-decay/top-worst-
+    // symbol/what-if sections have been silently empty for 3.5 months. Fixed to 'CLOSED'
+    // everywhere in this file (11 sites total between this file and getSystemHealthMultiplier
+    // in enhancedAITradingBot.js).
     try {
         const activeUsers = await getActiveAIUsers();
         for (const user of activeUsers) {
@@ -337,7 +350,7 @@ async function runEodCleanup() {
                     ROUND(AVG(CASE WHEN created_at >= CURRENT_DATE AND pnl IS NOT NULL THEN CASE WHEN pnl > 0 THEN 100.0 ELSE 0 END END)::numeric, 1) AS today_wr,
                     ROUND(AVG(CASE WHEN created_at >= NOW() - INTERVAL '90 days' AND created_at < CURRENT_DATE AND pnl IS NOT NULL THEN CASE WHEN pnl > 0 THEN 100.0 ELSE 0 END END)::numeric, 1) AS baseline_wr
                 FROM trade_decision_journal
-                WHERE user_id = $1 AND decision_phase = 'EXIT'
+                WHERE user_id = $1 AND decision_phase = 'CLOSED'
             `, [user.id]);
 
             const s = statsRes.rows[0];
@@ -504,7 +517,7 @@ async function runDailyDigest(activeUsers, etDate) {
                         ROUND(AVG(pnl_percent)::numeric, 2)                   AS avg_pnl_pct
                     FROM trade_decision_journal
                     WHERE user_id = $1 AND created_at >= CURRENT_DATE
-                      AND decision_phase = 'EXIT' AND pnl IS NOT NULL
+                      AND decision_phase = 'CLOSED' AND pnl IS NOT NULL
                 `, [user.id]),
                 // Open positions
                 query(`
@@ -517,7 +530,7 @@ async function runDailyDigest(activeUsers, etDate) {
                     SELECT symbol, pnl, pnl_percent, setup_family, metadata
                     FROM trade_decision_journal
                     WHERE user_id = $1 AND created_at >= CURRENT_DATE
-                      AND decision_phase = 'EXIT' AND pnl > 0
+                      AND decision_phase = 'CLOSED' AND pnl > 0
                     ORDER BY pnl DESC LIMIT 1
                 `, [user.id]),
                 // Worst trade today
@@ -525,7 +538,7 @@ async function runDailyDigest(activeUsers, etDate) {
                     SELECT symbol, pnl, pnl_percent, setup_family, metadata
                     FROM trade_decision_journal
                     WHERE user_id = $1 AND created_at >= CURRENT_DATE
-                      AND decision_phase = 'EXIT' AND pnl < 0
+                      AND decision_phase = 'CLOSED' AND pnl < 0
                     ORDER BY pnl ASC LIMIT 1
                 `, [user.id]),
                 // Order execution stats from audit log
@@ -1660,7 +1673,7 @@ async function runWeeklyParameterHealthCheck() {
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
                 ROUND(AVG(pnl_percent)::numeric, 2) AS avg_pnl_pct
             FROM trade_decision_journal
-            WHERE created_at >= $1 AND pnl IS NOT NULL AND decision_phase = 'EXIT'
+            WHERE created_at >= $1 AND pnl IS NOT NULL AND decision_phase = 'CLOSED'
             GROUP BY 1 ORDER BY 1 DESC
         `, [str30]);
 
@@ -1672,7 +1685,7 @@ async function runWeeklyParameterHealthCheck() {
                 SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
                 ROUND(AVG(pnl_percent)::numeric, 2) AS avg_pnl_pct
             FROM trade_decision_journal
-            WHERE created_at >= $1 AND pnl IS NOT NULL AND decision_phase = 'EXIT'
+            WHERE created_at >= $1 AND pnl IS NOT NULL AND decision_phase = 'CLOSED'
             GROUP BY 1 ORDER BY 4 DESC
         `, [str30]);
 
@@ -1687,7 +1700,7 @@ async function runWeeklyParameterHealthCheck() {
                 ROUND(AVG(CASE WHEN created_at >= NOW() - INTERVAL '30 days' THEN pnl_percent END)::numeric, 2) AS avg_30d,
                 ROUND(AVG(CASE WHEN created_at < NOW() - INTERVAL '30 days' THEN pnl_percent END)::numeric, 2) AS avg_prior
             FROM trade_decision_journal
-            WHERE created_at >= $1 AND pnl IS NOT NULL AND decision_phase = 'EXIT'
+            WHERE created_at >= $1 AND pnl IS NOT NULL AND decision_phase = 'CLOSED'
             GROUP BY 1 ORDER BY 1
         `, [str90]);
 
@@ -1767,7 +1780,7 @@ async function runWeeklyParameterHealthCheck() {
                        ROUND(SUM(pnl)::numeric, 2) AS total_pnl,
                        ROUND(AVG(pnl_percent)::numeric, 2) AS avg_pnl_pct
                 FROM trade_decision_journal
-                WHERE created_at >= $1 AND pnl IS NOT NULL AND decision_phase = 'EXIT'
+                WHERE created_at >= $1 AND pnl IS NOT NULL AND decision_phase = 'CLOSED'
                 GROUP BY symbol HAVING COUNT(*) >= 2
                 ORDER BY total_pnl DESC
             `, [str30]);
@@ -1800,7 +1813,7 @@ async function runWeeklyParameterHealthCheck() {
                     ROUND(SUM(pnl)::numeric, 2) AS total_pnl
                 FROM trade_decision_journal
                 CROSS JOIN (SELECT unnest(ARRAY[82,84,85,86,88,90]) AS threshold) t
-                WHERE created_at >= $1 AND pnl IS NOT NULL AND decision_phase = 'EXIT'
+                WHERE created_at >= $1 AND pnl IS NOT NULL AND decision_phase = 'CLOSED'
                   AND score >= t.threshold
                 GROUP BY threshold ORDER BY threshold
             `, [str30]);
@@ -1914,5 +1927,6 @@ module.exports = {
     getStatus,
     runScheduledTrading,
     runWeeklyParameterHealthCheck,
-    runMorningStopVerification // exported 2026-09-17 for the StopVerify false-alarm/silent-failure fix
+    runMorningStopVerification, // exported 2026-09-17 for the StopVerify false-alarm/silent-failure fix
+    runEodCleanup // exported 2026-09-19 for the decision_phase EXIT->CLOSED auto-pause fix
 };

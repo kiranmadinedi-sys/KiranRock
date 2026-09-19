@@ -688,6 +688,14 @@ async function getBleedingSymbols(userId) {
  *   -0.20  ≥2 setup families with alpha decay (30d WR drops >15 pts vs prior 60d)
  *
  * Scores sum; multiplier = max(0.5, 1.0 + total_penalty).
+ *
+ * 2026-09-19: both queries below filtered `decision_phase = 'EXIT'`, a value
+ * that has never existed in trade_decision_journal's CHECK constraint
+ * (CANDIDATE/EXECUTED/CLOSED only) — present since the table and this
+ * function were introduced together on 2026-06-05. Every query silently
+ * matched zero rows, so `multiplier` never left its 1.0 default: this
+ * position-size safety brake has never actually engaged for any account,
+ * including through kmadined's Sept losing stretch. Fixed to 'CLOSED'.
  */
 async function getSystemHealthMultiplier(userId) {
     const cached = _systemHealthCache.get(userId);
@@ -711,7 +719,7 @@ async function getSystemHealthMultiplier(userId) {
                                THEN CASE WHEN pnl > 0 THEN 100.0 ELSE 0 END END)::numeric, 1) AS wr_14d,
                 COUNT(CASE WHEN created_at >= NOW() - INTERVAL '7 days' AND pnl IS NOT NULL THEN 1 END) AS n_recent
             FROM trade_decision_journal
-            WHERE user_id = $1 AND decision_phase = 'EXIT'
+            WHERE user_id = $1 AND decision_phase = 'CLOSED'
         `, [userId]);
 
         const { wr_recent, wr_prior, wr_14d, n_recent } = wrRes.rows[0] || {};
@@ -736,7 +744,7 @@ async function getSystemHealthMultiplier(userId) {
                 SUM(CASE WHEN created_at <  NOW() - INTERVAL '30 days' THEN 1 ELSE 0 END)               AS n_prior,
                 SUM(CASE WHEN created_at <  NOW() - INTERVAL '30 days' AND pnl > 0 THEN 1 ELSE 0 END)   AS w_prior
             FROM trade_decision_journal
-            WHERE user_id = $1 AND decision_phase = 'EXIT' AND pnl IS NOT NULL
+            WHERE user_id = $1 AND decision_phase = 'CLOSED' AND pnl IS NOT NULL
               AND created_at >= NOW() - INTERVAL '90 days'
             GROUP BY 1
         `, [userId]);
@@ -5591,6 +5599,7 @@ if (process.env.NODE_ENV === 'test') {
         checkLossStreakBreaker,
         deriveStockSetupFamily,
         refreshSectorRotationCache,
-        getSectorRotation: () => _sectorRotation
+        getSectorRotation: () => _sectorRotation,
+        getSystemHealthMultiplier
     };
 }

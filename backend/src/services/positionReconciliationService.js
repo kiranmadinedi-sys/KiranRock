@@ -731,6 +731,7 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
                 // nothing, exactly like the crypto stale_skip fix's fallback.
                 let fillPrice = avgPrice;
                 let fillTime  = null;
+                let fillOrderId = null;
                 try {
                     const axiosLib = require('axios');
                     const userDbLib = require('./userDatabaseService');
@@ -749,6 +750,13 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
                     if (fills.length > 0) {
                         fillPrice = parseFloat(fills[0].price);
                         fillTime  = fills[0].transaction_time;
+                        // 2026-09-19: real ORCL incident — this SHADOW path and the live
+                        // executeBuyOrder path each independently recorded the same real
+                        // fill with no broker_order_id on either row, so nothing could
+                        // ever catch the duplicate. FILL activities carry the order_id
+                        // that produced them; passing it through lets recordTrade's
+                        // unique index catch this exact race if the live path already won it.
+                        fillOrderId = fills[0].order_id || null;
                     }
                 } catch (lookupErr) {
                     logger.debug('[Reconcile] SHADOW real-fill lookup failed, using cached avgPrice/NOW()', {
@@ -757,15 +765,21 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
                 }
 
                 const tradesDb = require('./tradesDatabaseService');
-                await tradesDb.recordTrade({
+                const shadowTradeResult = await tradesDb.recordTrade({
                     userId, symbol, action: 'BUY',
                     quantity: alpacaQty,
                     price: fillPrice,
                     total: fillPrice * alpacaQty,
                     executedBy: 'reconciler',
                     tradeDate: fillTime,
+                    brokerOrderId: fillOrderId,
                     notes: 'Shadow position — broker fill never reached trades (see positionReconciliationService SHADOW fix)'
                 });
+                if (shadowTradeResult?._duplicate) {
+                    logger.info('[Reconcile] SHADOW backfill skipped — live path already recorded this exact fill', {
+                        userId, symbol, existingTradeId: shadowTradeResult.id
+                    });
+                }
             } catch (tradeErr) {
                 // Never let this block the holdings fix above — an unrecorded trade is a
                 // data-completeness gap, not a live-position-safety issue.

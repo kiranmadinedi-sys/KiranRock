@@ -25,7 +25,7 @@ const getCurrentPrice = async (symbol) => {
 /**
  * Execute a buy order
  */
-const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', aiScore = null, sector = null, notes = null, fillPrice = null, entryRegime = null, atr = null) => {
+const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', aiScore = null, sector = null, notes = null, fillPrice = null, entryRegime = null, atr = null, brokerOrderId = null) => {
     try {
         // Fractional (notional) buys from brokerService.buyFractional() fill with a decimal
         // quantity — only whole shares used to reach here, so this rejected every fractional
@@ -34,7 +34,16 @@ const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', 
         if (!(quantity > 0)) {
             throw new Error('Quantity must be positive');
         }
-        
+
+        // 2026-09-19: brokerOrderId (new trailing param — every existing positional
+        // caller is unaffected, defaults to null) lets the trades INSERT below collide
+        // with a real unique index instead of silently duplicating when two code paths
+        // record the same fill — see tradesDatabaseService.js's
+        // _ensureBrokerOrderIdColumn comment for the full incident this closes
+        // (kmadined's ORCL double-buy). Ensured unconditionally since the INSERT below
+        // always references the column now, not just when a caller happens to pass one.
+        await require('./tradesDatabaseService').ensureBrokerOrderIdColumn();
+
         // Get current price
         const currentPrice = await getCurrentPrice(symbol);
         if (!currentPrice) {
@@ -157,8 +166,8 @@ const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', 
                 INSERT INTO trades (
                     user_id, symbol, action, quantity, price, total,
                     commission, executed_by, ai_score, sector, notes,
-                    entry_regime, slippage_pct
-                ) VALUES ($1, $2, 'BUY', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    entry_regime, slippage_pct, broker_order_id
+                ) VALUES ($1, $2, 'BUY', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 RETURNING *
             `, [
                 userId,
@@ -172,7 +181,8 @@ const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', 
                 sector,
                 notes,
                 _entryRegime,
-                _slippagePct
+                _slippagePct,
+                brokerOrderId
             ]);
 
             // Persist buy lot for FIFO accounting
@@ -219,6 +229,41 @@ const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', 
         });
 
     } catch (error) {
+        // 2026-09-19: a unique-constraint hit on broker_order_id means this exact real
+        // fill was already recorded by another code path (or a retried call) — the
+        // transaction rolled back automatically (see config/database.js's transaction()),
+        // so holdings/balance were never double-applied. Resolve to the already-recorded
+        // row instead of throwing: this is the fix working, not a failure. Caller code
+        // written before this fix still gets a normal-shaped { success, trade, ... }
+        // result — it just won't be a NEW trade.
+        if (error.code === '23505' && brokerOrderId) {
+            try {
+                const { query } = require('../config/database');
+                const existing = await query(
+                    `SELECT * FROM trades WHERE user_id = $1 AND broker_order_id = $2 LIMIT 1`,
+                    [userId, brokerOrderId]
+                );
+                if (existing.rows[0]) {
+                    const row = existing.rows[0];
+                    console.warn(`[executeBuyOrder] Duplicate broker order blocked — already recorded as trade #${row.id}`, { userId, symbol, brokerOrderId });
+                    return {
+                        success: true,
+                        duplicate: true,
+                        trade: row,
+                        symbol: row.symbol,
+                        quantity: parseFloat(row.quantity),
+                        price: parseFloat(row.price),
+                        total: parseFloat(row.total),
+                        commission: parseFloat(row.commission || 0),
+                        entryRegime: row.entry_regime
+                    };
+                }
+            } catch (lookupErr) {
+                console.error('Error looking up duplicate trade after unique violation:', lookupErr);
+                // fall through to the original error below — better to surface the
+                // original failure than to swallow it on top of a failed lookup
+            }
+        }
         console.error(`Error executing buy order:`, error);
         throw error;
     }
@@ -227,11 +272,14 @@ const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', 
 /**
  * Execute a sell order
  */
-const executeSellOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', notes = null, fillPrice = null) => {
+const executeSellOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', notes = null, fillPrice = null, brokerOrderId = null) => {
     try {
         if (!(quantity > 0)) {
             throw new Error('Quantity must be positive');
         }
+
+        // See executeBuyOrder's identical comment (2026-09-19) — same fix, same reason.
+        await require('./tradesDatabaseService').ensureBrokerOrderIdColumn();
 
         // Use broker-confirmed fill price when available; fall back to live quote only when needed.
         // This prevents a second price fetch from failing (Alpaca returning 0 for thin symbols)
@@ -350,8 +398,8 @@ const executeSellOrder = async (userId, symbol, quantity, executedBy = 'MANUAL',
                 INSERT INTO trades (
                     user_id, symbol, action, quantity, price, total,
                     commission, executed_by, notes, pnl, pnl_percent,
-                    ai_score, sector, entry_regime, hold_hours
-                ) VALUES ($1, $2, 'SELL', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    ai_score, sector, entry_regime, hold_hours, broker_order_id
+                ) VALUES ($1, $2, 'SELL', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 RETURNING *
             `, [
                 userId,
@@ -367,7 +415,8 @@ const executeSellOrder = async (userId, symbol, quantity, executedBy = 'MANUAL',
                 entryScore,
                 entrySector,
                 entryRegime,
-                holdHours
+                holdHours,
+                brokerOrderId
             ]);
 
             // Consume buy lots (FIFO) for this sell
@@ -405,8 +454,39 @@ const executeSellOrder = async (userId, symbol, quantity, executedBy = 'MANUAL',
                 profitLossPercent
             };
         });
-        
+
     } catch (error) {
+        // See executeBuyOrder's identical block (2026-09-19) for the full reasoning —
+        // a unique violation here means this exact sell fill was already recorded and
+        // the transaction rolled back cleanly (holdings/balance untouched), so resolve
+        // to the existing row rather than throw.
+        if (error.code === '23505' && brokerOrderId) {
+            try {
+                const { query } = require('../config/database');
+                const existing = await query(
+                    `SELECT * FROM trades WHERE user_id = $1 AND broker_order_id = $2 LIMIT 1`,
+                    [userId, brokerOrderId]
+                );
+                if (existing.rows[0]) {
+                    const row = existing.rows[0];
+                    console.warn(`[executeSellOrder] Duplicate broker order blocked — already recorded as trade #${row.id}`, { userId, symbol, brokerOrderId });
+                    return {
+                        success: true,
+                        duplicate: true,
+                        trade: row,
+                        symbol: row.symbol,
+                        quantity: parseFloat(row.quantity),
+                        price: parseFloat(row.price),
+                        total: parseFloat(row.total),
+                        commission: parseFloat(row.commission || 0),
+                        profitLoss: row.pnl != null ? parseFloat(row.pnl) : null,
+                        profitLossPercent: row.pnl_percent != null ? parseFloat(row.pnl_percent) : null
+                    };
+                }
+            } catch (lookupErr) {
+                console.error('Error looking up duplicate trade after unique violation:', lookupErr);
+            }
+        }
         console.error(`Error executing sell order:`, error);
         throw error;
     }

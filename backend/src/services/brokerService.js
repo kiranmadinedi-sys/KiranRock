@@ -313,7 +313,8 @@ const alpacaBroker = (() => {
                 meta.aiScore || null,
                 meta.sector  || null,
                 null, buyFillPrice, null,
-                meta.atr || null
+                meta.atr || null,
+                order.id // 2026-09-19: lets a duplicate recording of this same real fill be rejected, not silently repeated
             );
         }
 
@@ -417,7 +418,8 @@ const alpacaBroker = (() => {
                 meta.aiScore || null,
                 meta.sector  || null,
                 null, fillPrice, null,
-                meta.atr || null
+                meta.atr || null,
+                order.id // 2026-09-19: same duplicate-recording guard as buyMarket/buyBracket
             );
         } else if (filledQty > 0) {
             logger.warn('[Broker:Alpaca] Extended-hours order partially filled — not recording yet, leaving the rest for reconciliation to catch once complete', {
@@ -614,7 +616,12 @@ const alpacaBroker = (() => {
                 }),
                 fillPrice,
                 null,  // entryRegime (passed via notes JSON above)
-                meta.atr || null  // ATR at entry — enables ATR-aware trailing stops in position management
+                meta.atr || null,  // ATR at entry — enables ATR-aware trailing stops in position management
+                // 2026-09-19: real ORCL incident — this exact fill got recorded twice
+                // (once here, once by the reconciler's SHADOW backfill), each unaware
+                // of the other. A real duplicate now hits the unique index and resolves
+                // to the existing row instead of inserting a second one.
+                order.id
             ).catch(err => {
                 // DB write failed AFTER the broker order was confirmed filled.
                 // Log at error level and fire a Telegram alert — morning reconciliation
@@ -762,7 +769,8 @@ const alpacaBroker = (() => {
                 }),
                 fillPrice,
                 null,
-                meta.atr || null
+                meta.atr || null,
+                order.id // 2026-09-19: same duplicate-recording guard as buyMarket/buyBracket
             ).catch(err => {
                 logger.error('[Broker:Alpaca] buyFractional DB record failed — order filled but not in DB', {
                     symbol, filledQty, fillPrice, orderId: order.id, err: err.message
@@ -885,7 +893,8 @@ const alpacaBroker = (() => {
                 userId, symbol, sellFillQty,
                 `ALPACA_${isPaper ? 'PAPER' : 'LIVE'}`,
                 meta.reason || '',
-                sellFillPx || null
+                sellFillPx || null,
+                order.id // 2026-09-19: same duplicate-recording guard as the buy side
             );
         }
         const reason       = (meta.reason || '').toLowerCase();

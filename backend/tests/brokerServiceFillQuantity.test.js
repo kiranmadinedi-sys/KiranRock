@@ -87,7 +87,7 @@ describe('brokerService (alpaca) — records only what actually filled', () => {
 
         const result = await brokerService.sellMarket('user-1', 'SOXL', 9, { reason: 'test' });
 
-        expect(tradesDb.executeSellOrder).toHaveBeenCalledWith('user-1', 'SOXL', 9, 'ALPACA_PAPER', 'test', 121.70);
+        expect(tradesDb.executeSellOrder).toHaveBeenCalledWith('user-1', 'SOXL', 9, 'ALPACA_PAPER', 'test', 121.70, 'ord-1');
         expect(result.filledQty).toBe(9);
         expect(result.filledAvgPrice).toBe(121.70);
     });
@@ -116,7 +116,7 @@ describe('brokerService (alpaca) — records only what actually filled', () => {
 
         const result = await brokerService.sellMarket('user-1', 'XYZ', 10, { reason: 'test' });
 
-        expect(tradesDb.executeSellOrder).toHaveBeenCalledWith('user-1', 'XYZ', 3, 'ALPACA_PAPER', 'test', 50.00);
+        expect(tradesDb.executeSellOrder).toHaveBeenCalledWith('user-1', 'XYZ', 3, 'ALPACA_PAPER', 'test', 50.00, 'ord-1');
         expect(result.filledQty).toBe(3);
     });
 
@@ -127,7 +127,7 @@ describe('brokerService (alpaca) — records only what actually filled', () => {
         const result = await brokerService.buyMarket('user-1', 'AAPL', 10, {});
 
         expect(tradesDb.executeBuyOrder).toHaveBeenCalledWith(
-            'user-1', 'AAPL', 10, 'ALPACA_PAPER', null, null, null, 150.25, null, null
+            'user-1', 'AAPL', 10, 'ALPACA_PAPER', null, null, null, 150.25, null, null, 'ord-1'
         );
         expect(result.filledQty).toBe(10);
         expect(result.filledAvgPrice).toBe(150.25);
@@ -220,7 +220,7 @@ describe('brokerService (alpaca) — buyLimitExtendedHours defers incomplete fil
         const result = await brokerService.buyLimitExtendedHours('user-1', 'HPQ', 14, {});
 
         expect(tradesDb.executeBuyOrder).toHaveBeenCalledWith(
-            'user-1', 'HPQ', 14, 'ALPACA_PAPER_EXTENDED_HOURS', null, null, null, 34.60, null, null
+            'user-1', 'HPQ', 14, 'ALPACA_PAPER_EXTENDED_HOURS', null, null, null, 34.60, null, null, 'ord-1'
         );
         expect(result.filledQty).toBe(14);
     });

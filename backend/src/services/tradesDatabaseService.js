@@ -17,8 +17,26 @@ async function _ensureBrokerOrderIdColumn() {
     if (_brokerOrderIdColumnEnsured) return;
     await query(`ALTER TABLE trades ADD COLUMN IF NOT EXISTS broker_order_id VARCHAR(100)`);
     await query(`CREATE INDEX IF NOT EXISTS idx_trades_broker_order_id ON trades(broker_order_id) WHERE broker_order_id IS NOT NULL`);
+    // 2026-09-19: added after a real duplicate slipped through — kmadined's ORCL buy
+    // got recorded twice (once by the live executeBuyOrder path, once by this file's
+    // own SHADOW-backfill reconciler path), each unaware of the other, because nothing
+    // at the DB level made a second insert for the same real order impossible. Every
+    // duplicate incident this session (this one, the 8/15 Blitz naked-short race, the
+    // 9/5 IST-ARROW 6,787-row duplicate journal) shared this same gap: detection only
+    // ever happens after the fact via fuzzy matching. A real Alpaca order id is unique
+    // per order, so a unique index on it turns "two code paths raced to record the same
+    // fill" from a silent data-integrity bug into a rejected second insert that the
+    // caller can recognize and shrug off instead of duplicating. Partial (WHERE NOT
+    // NULL) so the many pre-existing NULL rows never collide with each other.
+    await query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_broker_order_unique
+        ON trades(user_id, broker_order_id) WHERE broker_order_id IS NOT NULL
+    `);
     _brokerOrderIdColumnEnsured = true;
 }
+
+// Postgres error code for a unique-constraint violation.
+const UNIQUE_VIOLATION = '23505';
 
 // Record a trade
 async function recordTrade(tradeData) {
@@ -62,22 +80,41 @@ async function recordTrade(tradeData) {
     // is explicitly in the column list below instead of omitted.
     const status = pnl !== null ? 'CLOSED' : 'OPEN';
 
-    const result = await query(`
-        INSERT INTO trades (
-            user_id, symbol, action, quantity, price, total,
-            commission, executed_by, notes, ai_score, sector, trade_date,
-            pnl, pnl_percent, status, broker_order_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-            COALESCE($12::timestamptz AT TIME ZONE 'America/Chicago', NOW()),
-            $13, $14, $15, $16)
-        RETURNING *
-    `, [
-        userId, symbol, action, quantity, price, total,
-        commission, executedBy, notes, aiScore, sector, tradeDate,
-        pnl, pnlPercent, status, brokerOrderId
-    ]);
+    try {
+        const result = await query(`
+            INSERT INTO trades (
+                user_id, symbol, action, quantity, price, total,
+                commission, executed_by, notes, ai_score, sector, trade_date,
+                pnl, pnl_percent, status, broker_order_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                COALESCE($12::timestamptz AT TIME ZONE 'America/Chicago', NOW()),
+                $13, $14, $15, $16)
+            RETURNING *
+        `, [
+            userId, symbol, action, quantity, price, total,
+            commission, executedBy, notes, aiScore, sector, tradeDate,
+            pnl, pnlPercent, status, brokerOrderId
+        ]);
 
-    return result.rows[0];
+        return result.rows[0];
+    } catch (error) {
+        // 2026-09-19: a duplicate broker_order_id means this exact real fill was already
+        // recorded (by this function or by executeBuyOrder/executeSellOrder) — not a
+        // failure. Return the existing row with `_duplicate: true` so a caller like the
+        // SHADOW backfill can log and move on instead of throwing, exactly the outcome
+        // we want (one row per real order) instead of exactly the bug this index exists
+        // to catch (two).
+        if (error.code === UNIQUE_VIOLATION && brokerOrderId) {
+            const existing = await query(
+                `SELECT * FROM trades WHERE user_id = $1 AND broker_order_id = $2 LIMIT 1`,
+                [userId, brokerOrderId]
+            );
+            if (existing.rows[0]) {
+                return { ...existing.rows[0], _duplicate: true };
+            }
+        }
+        throw error;
+    }
 }
 
 // Get user's trade history

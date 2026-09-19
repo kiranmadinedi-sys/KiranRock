@@ -127,13 +127,49 @@ function buildAdjustment(stats) {
     };
 }
 
-async function fetchExpectancyStats({ botType, strategyFamily, setupFamily, regime }) {
+const EXPECTANCY_STATS_SELECT = `
+    COUNT(*)::int AS sample_size,
+    AVG(CASE WHEN pnl > 0 THEN 100.0 ELSE 0 END) AS win_rate,
+    AVG(COALESCE(pnl_percent, 0)) AS avg_return,
+    AVG(COALESCE(pnl_percent, 0)) AS expectancy
+`;
+
+/**
+ * 2026-09-19: this used to go straight to the cross-account "exact" tier below,
+ * which blends every account's history together. Diagnosing kmadined's monthly
+ * loss found that dilutes exactly the signal this gate exists to catch: globally
+ * news_momentum looked roughly breakeven (50% WR) so it got almost no penalty,
+ * while kmadined's own 180-day record for it was persistently negative on every
+ * timeframe checked; meanwhile oversold_reversal — a genuinely positive-expectancy
+ * setup for kmadined specifically — got no support because its one bad month blended
+ * into an unrelated global number anyway. Same blending mistake already fixed for
+ * SAGE/LocalBrain on 2026-09-05. Now tries the requesting account's OWN history
+ * first, and only falls back to the cross-account tiers when that account doesn't
+ * have enough of its own data yet — see project_kmadined_stoploss_diagnosis_2026_09_18
+ * memory for the full before/after numbers.
+ */
+async function fetchExpectancyStats({ botType, strategyFamily, setupFamily, regime, userId }) {
+    if (userId) {
+        const perUser = await query(
+            `SELECT ${EXPECTANCY_STATS_SELECT}
+             FROM trade_decision_journal
+             WHERE user_id = $1
+               AND bot_type = $2
+               AND decision_phase = 'CLOSED'
+               AND strategy_family = $3
+               AND setup_family = $4
+               AND regime = $5
+               AND closed_at >= NOW() - ($6 * INTERVAL '1 day')`,
+            [String(userId), botType, strategyFamily, setupFamily, regime, LOOKBACK_DAYS]
+        );
+
+        if (Number(perUser.rows[0]?.sample_size || 0) >= MIN_SAMPLE_SIZE) {
+            return { stats: perUser.rows[0], source: 'user-exact' };
+        }
+    }
+
     const exact = await query(
-        `SELECT
-            COUNT(*)::int AS sample_size,
-            AVG(CASE WHEN pnl > 0 THEN 100.0 ELSE 0 END) AS win_rate,
-            AVG(COALESCE(pnl_percent, 0)) AS avg_return,
-            AVG(COALESCE(pnl_percent, 0)) AS expectancy
+        `SELECT ${EXPECTANCY_STATS_SELECT}
          FROM trade_decision_journal
          WHERE bot_type = $1
            AND decision_phase = 'CLOSED'
@@ -149,11 +185,7 @@ async function fetchExpectancyStats({ botType, strategyFamily, setupFamily, regi
     }
 
     const fallback = await query(
-        `SELECT
-            COUNT(*)::int AS sample_size,
-            AVG(CASE WHEN pnl > 0 THEN 100.0 ELSE 0 END) AS win_rate,
-            AVG(COALESCE(pnl_percent, 0)) AS avg_return,
-            AVG(COALESCE(pnl_percent, 0)) AS expectancy
+        `SELECT ${EXPECTANCY_STATS_SELECT}
          FROM trade_decision_journal
          WHERE bot_type = $1
            AND decision_phase = 'CLOSED'
@@ -168,8 +200,8 @@ async function fetchExpectancyStats({ botType, strategyFamily, setupFamily, regi
 async function getExpectancyAdjustment(context) {
     try {
         await ensureTradeIntelligenceSchema();
-        const { botType, strategyFamily, setupFamily, regime } = context;
-        const { stats, source } = await fetchExpectancyStats({ botType, strategyFamily, setupFamily, regime });
+        const { botType, strategyFamily, setupFamily, regime, userId } = context;
+        const { stats, source } = await fetchExpectancyStats({ botType, strategyFamily, setupFamily, regime, userId });
         return {
             ...buildAdjustment(stats),
             lookupSource: source

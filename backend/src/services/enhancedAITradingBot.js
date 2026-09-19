@@ -2766,7 +2766,8 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
                 botType: 'stock',
                 strategyFamily: opportunity.strategyFamily || 'equity_long',
                 setupFamily: opportunity.setupFamily,
-                regime: regime.regime
+                regime: regime.regime,
+                userId
             });
 
             const baseAiScore = Number(opportunity.aiScore || 0);

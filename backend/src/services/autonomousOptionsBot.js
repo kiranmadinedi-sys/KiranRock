@@ -1499,7 +1499,8 @@ async function executeAutonomousOptionsTrading(userId) {
                     botType: 'options',
                     strategyFamily: opp.strategy,
                     setupFamily,
-                    regime: marketRegime.regime
+                    regime: marketRegime.regime,
+                    userId
                 });
                 const intelligenceScoreAdjustment = regimeAdjustment.scoreAdjustment + expectancyStats.scoreAdjustment;
                 const intelligenceSizeMultiplier = regimeAdjustment.sizeMultiplier * (expectancyStats.sizeMultiplier || 1);

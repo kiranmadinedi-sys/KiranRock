@@ -1603,6 +1603,7 @@ function startScheduler() {
         runNightlyScanTrigger();           // nightly universe scan at 16:15 ET (after close)
         runScanHealthCheck();              // stall/deadline alert — catches a bad scan in hours, not days
         runWeeklyParameterHealthCheck();   // Friday 15:45 ET: health check + backtest summary
+        runWeeklyPnlReport();              // Friday 16:10 ET: realized $/day per account vs target
         runMorningBriefing();              // 8:00 AM ET Mon-Fri: STRONG BUY pre-market alert
         runPremarketGapBriefing();         // 8:30 AM ET Mon-Fri: gap check on tonight's setups
         runMorningReconciliationTick();    // 9:00 AM ET Mon-Fri: DB vs Alpaca position sync
@@ -1636,6 +1637,26 @@ function stopScheduler() {
 // then sends a Telegram summary with suggested threshold adjustments.
 // Does NOT auto-apply — gives the operator visibility to decide.
 let _weeklyHealthRanDate = null;
+
+// Friday 16:10 ET (after the close, so the week's exits are all in): sends every account its
+// own realized $/day report and admin one combined scoreboard — see dailyPnlTargetService.js.
+let _weeklyPnlRanDate = null;
+async function runWeeklyPnlReport() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit'
+    }).formatToParts(new Date());
+    const get = t => parts.find(p => p.type === t).value;
+    const etDate = `${get('year')}-${get('month')}-${get('day')}`;
+    if (get('weekday') !== 'Fri' || parseInt(get('hour'), 10) !== 16 || parseInt(get('minute'), 10) < 10) return;
+    if (_weeklyPnlRanDate === etDate) return;
+    _weeklyPnlRanDate = etDate;
+    try {
+        await require('./dailyPnlTargetService').sendWeeklyPnlReports();
+    } catch (err) {
+        console.error('[WeeklyPnl] Error:', err.message);
+    }
+}
 
 async function runWeeklyParameterHealthCheck() {
     const formatter = new Intl.DateTimeFormat('en-US', {
@@ -1928,5 +1949,6 @@ module.exports = {
     runScheduledTrading,
     runWeeklyParameterHealthCheck,
     runMorningStopVerification, // exported 2026-09-17 for the StopVerify false-alarm/silent-failure fix
+    runWeeklyPnlReport,
     runEodCleanup // exported 2026-09-19 for the decision_phase EXIT->CLOSED auto-pause fix
 };

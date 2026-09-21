@@ -337,6 +337,10 @@ async function _buildStockUniverse() {
 
         // Build static symbol list
         staticSymbols = [...new Set([...etfSymbols, ...sp500Symbols, ...nasdaqTop, ...midCapSymbols, ...TIER5_SPECULATIVE])];
+        // 2026-09-20: the hardcoded lists above go stale (acquired/delisted names like ANSS, JNPR,
+        // DFS, K, MRO, HOLX kept being scored every night and returned null). Drop anything Alpaca
+        // no longer lists as an active, tradable asset. Fail-open if the asset table is unhealthy.
+        staticSymbols = await dropInactiveTickers(staticSymbols);
 
         // ── DB-driven universe (opt-in, graceful fallback) ────────────────────
         // Merges Alpaca-sourced symbols from asset_universe_daily into the pool.
@@ -371,6 +375,8 @@ async function _buildStockUniverse() {
         const allSymbols = [...new Set([...staticSymbols, ...velocitySymbols])];
         console.log(`[HERMES] Symbol pool: ${staticSymbols.length} static + ${velocitySymbols.size} velocity = ${allSymbols.length} unique`);
         const staticSymbolSet = new Set(staticSymbols); // O(1) lookup below, not O(n) per symbol over ~13k
+        // One query for the whole pool's consolidated 20-day average volume (see avgVol below).
+        const realAvgVolumes = await loadRealAvgVolumes(allSymbols);
 
         // HERMES filters
         const qualified  = [];
@@ -415,7 +421,15 @@ async function _buildStockUniverse() {
                         // excluded on "cap" today, all with market_cap=0 in hermes_symbol_log.
                         const isVelocityOnly = isVelocity && !staticSymbolSet.has(symbol);
                         const marketCap = rawCap > 0 ? rawCap : (isVelocityOnly ? 0 : fallbackCap);
-                        const avgVol = quote.averageDailyVolume3Month || quote.regularMarketVolume || 0;
+                        // 2026-09-21: the quote's volume comes from a partial (IEX-only) feed —
+                        // a median ~22x smaller than the real consolidated figure. ARM (real
+                        // ~4.4M/day, +17% today) was recorded at 147,659 and cut on "volume",
+                        // along with PG, ANET, SNOW, COF, STX...: 79% of the pool failed this
+                        // floor, ~570 of them names that actually clear it. Use the larger of
+                        // the quote and our own 20-day average from daily_bars (consolidated
+                        // volume). Fail-open: no bars for a symbol -> the quote value stands.
+                        const quoteAvgVol = quote.averageDailyVolume3Month || quote.regularMarketVolume || 0;
+                        const avgVol = Math.max(quoteAvgVol, realAvgVolumes.get(symbol) || 0);
                         let week52High = quote.fiftyTwoWeekHigh || null;
                         let week52Low = quote.fiftyTwoWeekLow || null;
                         let price = quote.regularMarketPrice || null;
@@ -885,7 +899,68 @@ async function getStockOnlySymbolList() {
     return all.filter(sym => !etfSet.has(sym));
 }
 
+/**
+ * Removes symbols that Alpaca no longer lists as active+tradable, using the asset_universe
+ * table refreshed daily by assetUniverseService. Fail-OPEN: if the table is empty/unhealthy
+ * or the query fails, the list is returned untouched so a bad table can never shrink the
+ * trading universe. A symbol is dropped only when it is absent from the table, marked
+ * inactive/non-tradable, or was last seen well before the latest refresh (fell off Alpaca's
+ * list while its old row lingered).
+ */
+async function dropInactiveTickers(symbols, deps = {}) {
+    try {
+        const runQuery = deps.query || require('../config/database').query;
+        const health = await runQuery(`SELECT COUNT(*)::int AS n, MAX(last_refreshed_at) AS latest FROM asset_universe`);
+        const { n, latest } = health.rows[0] || {};
+        if (!n || n < 5000 || !latest) return symbols; // table not healthy enough to judge by
+        const res = await runQuery(
+            `SELECT symbol FROM asset_universe
+             WHERE symbol = ANY($1) AND tradable = true AND status = 'active'
+               AND last_refreshed_at >= $2::timestamp - INTERVAL '3 days'`,
+            [symbols, latest]
+        );
+        const alive = new Set(res.rows.map(r => r.symbol));
+        const kept = symbols.filter(sym => alive.has(sym));
+        const dropped = symbols.filter(sym => !alive.has(sym));
+        if (dropped.length > 0) {
+            console.log(`[HERMES] Dropped ${dropped.length} inactive/delisted ticker(s) from the static pool: ${dropped.slice(0, 40).join(', ')}${dropped.length > 40 ? '...' : ''}`);
+        }
+        // Safety valve: if this would remove an implausible share of the list, distrust it.
+        if (dropped.length > symbols.length * 0.25) {
+            console.warn('[HERMES] Inactive-ticker filter would drop >25% of the pool — ignoring it (asset table likely out of sync)');
+            return symbols;
+        }
+        return kept;
+    } catch (_) {
+        return symbols;
+    }
+}
+
+/**
+ * 20-day average DAILY volume per symbol from daily_bars (consolidated volume — the quote
+ * feed's volume is a partial-feed figure, median ~22x too small; see the avgVol comment in
+ * getStockUniverse). Fail-open: any error returns an empty map, so the screener falls back
+ * to exactly its previous behavior.
+ */
+async function loadRealAvgVolumes(symbols, deps = {}) {
+    try {
+        const runQuery = deps.query || require('../config/database').query;
+        const res = await runQuery(
+            `SELECT symbol, AVG(volume)::float AS av
+             FROM daily_bars
+             WHERE symbol = ANY($1) AND timestamp >= NOW() - INTERVAL '20 days' AND volume > 0
+             GROUP BY symbol`,
+            [symbols]
+        );
+        return new Map(res.rows.map(r => [r.symbol, r.av]));
+    } catch (_) {
+        return new Map();
+    }
+}
+
 module.exports = {
+    loadRealAvgVolumes, // exported 2026-09-21 for testability
+    dropInactiveTickers, // exported 2026-09-20 for testability
     getStockUniverse,
     getStaticSymbolList,
     getStockOnlySymbolList,

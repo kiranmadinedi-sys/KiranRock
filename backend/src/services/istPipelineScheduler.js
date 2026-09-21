@@ -31,16 +31,31 @@ const { query }       = require('../config/database');
 // ─── Stage function imports (lazy-required inside functions to avoid circular deps)
 // Each stage is a thin wrapper that calls the real service and returns { ok, detail }
 
+// 2026-09-20: this stage used to call dataIngestionService.ingestDataForSymbols(), which
+// fetched via yahooFinance.historical() — removed in yahoo-finance2 v3, so every one of the
+// ~1,350 fetches threw, was swallowed into an empty array, and the stage still reported
+// success (450+ warnings per startup, DATA_STALE:atlas never set). Yahoo also rate-limits
+// (429) this app now anyway. daily_bars is kept current by eodIngestionService (batched
+// Alpaca), so the real question ATLAS should answer is "are the bars fresh?" — checked
+// directly below instead of re-ingesting through a dead path.
+const ATLAS_MAX_STALE_DAYS = 4; // covers a weekend + a Monday/Friday holiday
+
 async function stageATLAS(users) {
-    logger.info('[IST-ATLAS] Starting market data refresh');
+    logger.info('[IST-ATLAS] Verifying daily_bars freshness');
     try {
-        const { ingestDataForSymbols } = require('./dataIngestionService');
-        const { getStockUniverse }     = require('./stockUniverseService');
-        const symbols = await getStockUniverse();
-        await ingestDataForSymbols(symbols, 1); // last 1 day incremental update
+        const res = await query(
+            `SELECT MAX(timestamp) AS latest, COUNT(DISTINCT symbol)::int AS symbols FROM daily_bars`
+        );
+        const latest = res.rows[0]?.latest ? new Date(res.rows[0].latest) : null;
+        const ageDays = latest ? (Date.now() - latest.getTime()) / 86400000 : Infinity;
+        if (ageDays > ATLAS_MAX_STALE_DAYS) {
+            await redis.setDataStale('atlas');
+            logger.error('[IST-ATLAS] daily_bars is stale — DATA_STALE:atlas set', { latest, ageDays: Number.isFinite(ageDays) ? ageDays.toFixed(1) : 'none' });
+            return { ok: false, detail: `daily_bars stale (latest ${latest ? latest.toISOString().slice(0, 10) : 'none'})` };
+        }
         await redis.clearDataStale('atlas');
-        logger.info('[IST-ATLAS] Market data refreshed', { symbols: symbols.length });
-        return { ok: true, detail: `${symbols.length} symbols refreshed` };
+        logger.info('[IST-ATLAS] Market data fresh', { latest, symbols: res.rows[0].symbols });
+        return { ok: true, detail: `daily_bars fresh through ${latest.toISOString().slice(0, 10)} (${res.rows[0].symbols} symbols)` };
     } catch (err) {
         await redis.setDataStale('atlas');
         logger.error('[IST-ATLAS] Failed — DATA_STALE:atlas set', { err: err.message });

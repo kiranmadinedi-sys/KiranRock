@@ -1604,6 +1604,7 @@ function startScheduler() {
         runScanHealthCheck();              // stall/deadline alert — catches a bad scan in hours, not days
         runWeeklyParameterHealthCheck();   // Friday 15:45 ET: health check + backtest summary
         runWeeklyPnlReport();              // Friday 16:10 ET: realized $/day per account vs target
+        runCryptoWatchdog();               // every tick, 24/7: alert if the crypto process went silent while positions are open
         runMorningBriefing();              // 8:00 AM ET Mon-Fri: STRONG BUY pre-market alert
         runPremarketGapBriefing();         // 8:30 AM ET Mon-Fri: gap check on tonight's setups
         runMorningReconciliationTick();    // 9:00 AM ET Mon-Fri: DB vs Alpaca position sync
@@ -1640,6 +1641,13 @@ let _weeklyHealthRanDate = null;
 
 // Friday 16:10 ET (after the close, so the week's exits are all in): sends every account its
 // own realized $/day report and admin one combined scoreboard — see dailyPnlTargetService.js.
+// Cross-process watchdog for the separate crypto process — see cryptoUptimeGuard.js. Runs on
+// every scheduler tick (not market-hours gated: crypto never closes). Never throws.
+async function runCryptoWatchdog() {
+    try { await require('./cryptoUptimeGuard').runLiveWatchdog(); }
+    catch (err) { console.error('[CryptoWatchdog] Error:', err.message); }
+}
+
 let _weeklyPnlRanDate = null;
 async function runWeeklyPnlReport() {
     const parts = new Intl.DateTimeFormat('en-US', {
@@ -1950,5 +1958,6 @@ module.exports = {
     runWeeklyParameterHealthCheck,
     runMorningStopVerification, // exported 2026-09-17 for the StopVerify false-alarm/silent-failure fix
     runWeeklyPnlReport,
+    runCryptoWatchdog,
     runEodCleanup // exported 2026-09-19 for the decision_phase EXIT->CLOSED auto-pause fix
 };

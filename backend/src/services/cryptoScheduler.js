@@ -19,11 +19,13 @@ const cron = require('node-cron');
 const cryptoBot = require('./cryptoTradingBot');
 const cryptoDb = require('./cryptoDatabaseService');
 const { logger } = require('../utils/logger');
+const uptimeGuard = require('./cryptoUptimeGuard');
 
 let schedulerActive = false;
 let tickJob = null;
 
 async function runTick() {
+    uptimeGuard.writeHeartbeat(); // proof-of-life for cryptoUptimeGuard's cross-process watchdog
     let users;
     try {
         users = await cryptoDb.getActiveUsers();
@@ -62,6 +64,10 @@ function startScheduler() {
     // Every 5 minutes, every day, no timezone restriction — crypto has no
     // market-hours concept to anchor a cron timezone to either.
     tickJob = cron.schedule('*/5 * * * *', runTick);
+
+    // Tell anyone holding positions if we were dark for a while before this start; also
+    // refreshes the heartbeat. Non-blocking and never allowed to stop the scheduler.
+    uptimeGuard.checkStartupGap().catch(() => {});
 
     schedulerActive = true;
     logger.info('[CryptoBot] Scheduler started — 5-min cycle, 24/7 (no market-hours gate)');

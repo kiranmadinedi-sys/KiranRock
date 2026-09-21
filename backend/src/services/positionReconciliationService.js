@@ -667,11 +667,29 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
 
     for (const { symbol, dbQty, alpacaQty } of result.drifts) {
         try {
-            await query(
-                `UPDATE holdings SET quantity = $1, updated_at = NOW()
-                 WHERE user_id = $2 AND UPPER(symbol) = $3`,
-                [alpacaQty, userId, symbol]
+            // Read the cost basis BEFORE the update, for the exit's P&L below.
+            const before = await query(
+                `SELECT average_price FROM holdings WHERE user_id = $1 AND UPPER(symbol) = $2`,
+                [userId, symbol]
             );
+            const avgCost = parseFloat(before.rows[0]?.average_price) || 0;
+            const soldSome = alpacaQty < dbQty;
+            // 2026-09-21: a DECREASE means a partial exit filled at the broker after the bot's
+            // 15s fill-wait gave up (sellMarket deliberately records only confirmed fills).
+            // This used to fix only the share count — no trades row (P&L lost) and
+            // partial_profit_taken never set, so the bot tried the same partial take-profit
+            // AGAIN the next cycle (confirmed live: AMD 2026-09-21, only the daily order-key
+            // guard stopped a second sale). Now also marks it taken and records the fill.
+            await query(
+                `UPDATE holdings SET quantity = $1, updated_at = NOW(),
+                        partial_profit_taken = CASE WHEN $4 THEN TRUE ELSE partial_profit_taken END
+                 WHERE user_id = $2 AND UPPER(symbol) = $3`,
+                [alpacaQty, userId, symbol, soldSome]
+            );
+            if (soldSome) {
+                await _backfillPartialExit(userId, symbol, dbQty - alpacaQty, avgCost)
+                    .catch(e => logger.warn('[Reconcile] DRIFT exit backfill failed (holdings already fixed)', { userId, symbol, err: e.message }));
+            }
             await _auditLog(userId, 'DRIFT', symbol, dbQty, alpacaQty, 'UPDATED',
                 `DB qty ${dbQty} corrected to Alpaca qty ${alpacaQty}`, trigger);
             result.fixes.push(`DRIFT fixed: ${symbol} DB=${dbQty} → ${alpacaQty}`);
@@ -928,8 +946,63 @@ async function runMorningReconciliation(activeUsers, { trigger = 'SCHEDULED' } =
     return { totalIssues, totalErrors };
 }
 
+/**
+ * Record the real sell fill(s) behind a DRIFT decrease so the exit shows up in trades with
+ * its P&L. Conservative by design (the fill-history reconciler's two early false-positive
+ * inserts taught this): only fills from the last 26h, only orders with no matching SELL
+ * row already, and recordTrade's unique (user_id, broker_order_id) index makes a repeat
+ * insert of the same order impossible.
+ */
+async function _backfillPartialExit(userId, symbol, qtyGone, avgCost, deps = {}) {
+    const tradesDb = deps.tradesDb || require('./tradesDatabaseService');
+    const fetchOrders = deps.fetchOrders || (async () => {
+        const axios = require('axios');
+        const creds = await require('./userDatabaseService').getUserAlpacaCredentials(userId);
+        const base = (creds?.isPaper !== false) ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets';
+        const res = await axios.get(`${base}/v2/orders`, {
+            headers: { 'APCA-API-KEY-ID': creds?.keyId || process.env.ALPACA_KEY_ID, 'APCA-API-SECRET-KEY': creds?.secretKey || process.env.ALPACA_SECRET_KEY },
+            params: { status: 'closed', symbols: symbol, direction: 'desc', limit: 20, after: new Date(Date.now() - 26 * 3600 * 1000).toISOString() },
+            timeout: 10000
+        });
+        return res.data || [];
+    });
+    const findExisting = deps.findExisting || (async (o) => (await query(
+        `SELECT id FROM trades WHERE user_id = $1 AND UPPER(symbol) = $2 AND action = 'SELL' AND status != 'VOIDED'
+           AND (broker_order_id = $3
+                OR (ABS(quantity - $4) < 0.001 AND ABS(price - $5) <= $5 * 0.005
+                    AND trade_date >= NOW() - INTERVAL '2 days'))
+         LIMIT 1`,
+        [userId, symbol, o.id, parseFloat(o.filled_qty), parseFloat(o.filled_avg_price)]
+    )).rows.length > 0);
+
+    const orders = (await fetchOrders())
+        .filter(o => o.side === 'sell' && parseFloat(o.filled_qty) > 0 && parseFloat(o.filled_avg_price) > 0 && o.filled_at)
+        .sort((a, b) => new Date(b.filled_at) - new Date(a.filled_at));
+
+    let remaining = qtyGone, recorded = 0;
+    for (const o of orders) {
+        if (remaining <= 0.0001) break;
+        const qty = parseFloat(o.filled_qty), px = parseFloat(o.filled_avg_price);
+        if (qty > remaining + 0.0001) continue;                    // doesn't fit the missing quantity — not ours
+        if (await findExisting(o)) { remaining -= qty; continue; } // already recorded — explains part of the gap
+        const pnl = avgCost > 0 ? (px - avgCost) * qty : null;
+        const row = await tradesDb.recordTrade({
+            userId, symbol, action: 'SELL', quantity: qty, price: px, total: px * qty,
+            executedBy: 'reconciler', tradeDate: o.filled_at, brokerOrderId: o.id,
+            pnl: pnl !== null ? parseFloat(pnl.toFixed(4)) : null,
+            pnlPercent: pnl !== null ? parseFloat((((px - avgCost) / avgCost) * 100).toFixed(4)) : null,
+            notes: 'Partial exit filled after the bot stopped waiting — recorded by position reconciler DRIFT fix — exit type: partial_profit_reconciled'
+        });
+        if (!row?._duplicate) recorded++;
+        remaining -= qty;
+    }
+    if (recorded > 0) logger.info('[Reconcile] DRIFT exit recorded in trades', { userId, symbol, recorded, qtyGone });
+    return { recorded, unexplained: Math.max(remaining, 0) };
+}
+
 module.exports = {
     reconcilePositions,
     runMorningReconciliation,
-    reconcileFillHistory // exported 2026-09-17 for testability
+    reconcileFillHistory, // exported 2026-09-17 for testability
+    _backfillPartialExit  // exported 2026-09-21 for testability
 };

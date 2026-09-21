@@ -44,6 +44,13 @@ function _toPositionSymbol(pairSymbol) {
     return pairSymbol.replace('/', '');
 }
 
+// Truncate (never round up) a numeric string/number to at most `dp` decimals.
+function _truncDecimals(value, dp) {
+    const str = String(value);
+    const i = str.indexOf('.');
+    return i === -1 ? str : str.slice(0, i + 1 + dp);
+}
+
 async function _getAuth(userId) {
     const creds = await userDb.getUserAlpacaCredentials(userId);
     const base = creds.isPaper ? 'https://paper-api.alpaca.markets/v2' : 'https://api.alpaca.markets/v2';
@@ -244,7 +251,14 @@ async function sellCrypto(userId, symbol, { exitReason, scoreAtEntry }) {
         }).catch(() => {});
         return null;
     }
-    const sellQty = Math.min(parseFloat(position.quantity), parseFloat(realPosition.qty));
+    // 2026-09-20: never sell more than Alpaca actually holds. crypto_positions.quantity is
+    // stored at 8 decimals, but Alpaca reports up to 9 — SHIB/USD's DB qty (96359707.06155586)
+    // rounded UP past the real 96359707.061555858, so Math.min() of the two parsed doubles
+    // (identical at this magnitude) sent the rounded-up string and every take-profit exit was
+    // rejected 403 insufficient balance, retrying identically each 5-min cycle. Truncate
+    // (never round) the STRING form to 8 decimals, preferring the broker's own figure.
+    const sellQty = _truncDecimals(
+        parseFloat(realPosition.qty) <= parseFloat(position.quantity) ? realPosition.qty : position.quantity, 8);
 
     const { base, headers } = await _getAuth(userId);
 
@@ -292,4 +306,4 @@ async function hasRealPosition(userId, symbol) {
     return !!realPosition && parseFloat(realPosition.qty) > 0;
 }
 
-module.exports = { buyCrypto, sellCrypto, hasRealPosition };
+module.exports = { buyCrypto, sellCrypto, hasRealPosition, _truncDecimals };

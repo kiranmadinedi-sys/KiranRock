@@ -153,7 +153,7 @@ async function _logHermesSymbol(universeDate, symbol, marketCap, avgVol, capFloo
                  fail_reason  = EXCLUDED.fail_reason,
                  is_velocity  = EXCLUDED.is_velocity,
                  tier         = EXCLUDED.tier`,
-            [universeDate, symbol, marketCap, avgVol, capFloor, minVolume, passed, failReason, isVelocity, tier]
+            [universeDate, symbol, marketCap, Math.round(Number(avgVol) || 0), capFloor, minVolume, passed, failReason, isVelocity, tier]
         );
     } catch (_) {
         // Diagnostic-only — never let a logging failure affect the actual HERMES build.
@@ -429,7 +429,7 @@ async function _buildStockUniverse() {
                         // the quote and our own 20-day average from daily_bars (consolidated
                         // volume). Fail-open: no bars for a symbol -> the quote value stands.
                         const quoteAvgVol = quote.averageDailyVolume3Month || quote.regularMarketVolume || 0;
-                        const avgVol = Math.max(quoteAvgVol, realAvgVolumes.get(symbol) || 0);
+                        const avgVol = Math.round(Math.max(quoteAvgVol, realAvgVolumes.get(symbol) || 0));
                         let week52High = quote.fiftyTwoWeekHigh || null;
                         let week52Low = quote.fiftyTwoWeekLow || null;
                         let price = quote.regularMarketPrice || null;
@@ -956,7 +956,7 @@ async function loadRealAvgVolumes(symbols, deps = {}) {
              GROUP BY symbol`,
             [symbols]
         );
-        return new Map(res.rows.map(r => [r.symbol, r.av]));
+        return new Map(res.rows.map(r => [r.symbol, Math.round(r.av)])); // whole shares — hermes_symbol_log.avg_volume is BIGINT
     } catch (_) {
         return new Map();
     }

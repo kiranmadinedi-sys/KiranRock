@@ -80,3 +80,15 @@ describe('dropInactiveTickers — class-share tickers (BRK.B)', () => {
         expect(out).not.toContain('ANSS');
     });
 });
+
+describe('loadRealAvgVolumes — whole-number volumes (regression 2026-09-21)', () => {
+    test('rounds fractional averages: hermes_symbol_log.avg_volume is BIGINT and rejected "3090236.625"', async () => {
+        const query = jest.fn().mockResolvedValue({ rows: [
+            { symbol: 'A', av: 3090236.625 }, { symbol: 'B', av: 11714771.772727273 }, { symbol: 'C', av: 1731544.4583333333 },
+        ] });
+        const m = await loadRealAvgVolumes(['A', 'B', 'C'], { query });
+        for (const v of m.values()) expect(Number.isInteger(v)).toBe(true);
+        expect(m.get('A')).toBe(3090237);
+        expect(m.get('B')).toBe(11714772);
+    });
+});

@@ -920,6 +920,10 @@ async function dropInactiveTickers(symbols, deps = {}) {
             [symbols, latest]
         );
         const alive = new Set(res.rows.map(r => r.symbol));
+        // Class-share tickers with a dot (BRK.B, BF.B) are not stored in asset_universe (its ingest
+        // filters them out), so absence there says nothing about them — never drop those. Found
+        // 2026-09-21: BRK.B was wrongly dropped though Alpaca lists it active and tradable.
+        symbols.filter(sym => sym.includes('.')).forEach(sym => alive.add(sym));
         const kept = symbols.filter(sym => alive.has(sym));
         const dropped = symbols.filter(sym => !alive.has(sym));
         if (dropped.length > 0) {

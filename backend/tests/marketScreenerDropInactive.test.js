@@ -67,3 +67,16 @@ describe('loadRealAvgVolumes', () => {
         expect(pick(147659, undefined)).toBe(147659);
     });
 });
+
+describe('dropInactiveTickers — class-share tickers (BRK.B)', () => {
+    test('a dotted class-share symbol absent from asset_universe is NOT dropped', async () => {
+        const live = Array.from({ length: 30 }, (_, i) => `LIVE${i}`);
+        const all = [...live, 'BRK.B', 'ANSS'];
+        const query = jest.fn(async sql => sql.includes('COUNT(*)')
+            ? { rows: [{ n: 13159, latest: '2026-09-19T00:00:00Z' }] }
+            : { rows: live.map(symbol => ({ symbol })) });
+        const out = await dropInactiveTickers(all, { query });
+        expect(out).toContain('BRK.B');
+        expect(out).not.toContain('ANSS');
+    });
+});

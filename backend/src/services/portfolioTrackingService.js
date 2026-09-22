@@ -31,6 +31,15 @@ const _lastSnapshotGuardAlert = new Map(); // userId -> timestamp
 // well above ordinary noise.
 const SUSPICIOUS_DEVIATION_THRESHOLD = 0.07;
 
+// Extracted 2026-09-21 for testability and reuse — see the cash-deviation comment further
+// below (the "transient Alpaca cash read" guard) for the real incident this now also covers.
+function median(values) {
+    const sorted = values.filter(v => v > 0).sort((a, b) => a - b);
+    if (sorted.length === 0) return null;
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
 // Deposit history cache — Alpaca ledger activities rarely change (new deposit = rare event).
 // TTL: 24h. Automatically refreshed on the next portfolio fetch after expiry.
 const _depositsCache = new Map(); // userId -> { totalDeposited, totalWithdrawn, fetchedAt }
@@ -356,12 +365,27 @@ const getPortfolioSummary = async (userId) => {
                 .sort((a, b) => a - b);
 
             if (recentValues.length > 0) {
-                const mid = Math.floor(recentValues.length / 2);
-                const baselineValue = recentValues.length % 2 === 0
-                    ? (recentValues[mid - 1] + recentValues[mid]) / 2
-                    : recentValues[mid];
+                const baselineValue = median(recentValues);
 
-                let deviation = Math.abs(totalPortfolioValue - baselineValue) / baselineValue;
+                // 2026-09-21, kmadined: a real incident (cash briefly misread ~$413 low
+                // for ~5 min, then correct again — the same "transient Alpaca cash read"
+                // shape described above) produced only a 5.5% swing in totalPortfolioValue,
+                // under this threshold, because $1,989.95 of this account is now in
+                // holdings that were untouched by the bad read — so the SAME dollar-size
+                // glitch that was 9.4% of an all-cash-ish account back when this threshold
+                // was tuned (2026-08-27) is proportionally smaller as the cash:holdings mix
+                // shifts, and can silently slip through on total value alone. The bug is
+                // specifically in cash, so check cash deviation against its own recent
+                // median too, and let either signal trigger the guard.
+                const baselineCash = median(recentSnapshots.map(s => parseFloat(s.cashBalance || 0)));
+                const cashDeviation = (baselineCash && baselineCash > 0)
+                    ? Math.abs(cashBalance - baselineCash) / baselineCash
+                    : 0;
+
+                let deviation = Math.max(
+                    Math.abs(totalPortfolioValue - baselineValue) / baselineValue,
+                    cashDeviation
+                );
                 if (deviation > SUSPICIOUS_DEVIATION_THRESHOLD) {
                     const gapDollars = totalPortfolioValue - baselineValue;
                     console.warn(`[PortfolioTracking] Suspicious value swing for user ${userId}: ${totalPortfolioValue.toFixed(2)} vs recent median ${baselineValue.toFixed(2)} (n=${recentValues.length}, ${(deviation * 100).toFixed(1)}% dev, gap=$${gapDollars.toFixed(2)})`, {
@@ -410,7 +434,13 @@ const getPortfolioSummary = async (userId) => {
                             const fresh = await _getAlpacaData(userId, true);
                             const retriedCashBalance = fresh.cash ?? account.balance;
                             const retriedTotalPortfolioValue = fresh.equity ?? (retriedCashBalance + totalCurrentValue);
-                            const retriedDeviation = Math.abs(retriedTotalPortfolioValue - baselineValue) / baselineValue;
+                            const retriedCashDeviation = (baselineCash && baselineCash > 0)
+                                ? Math.abs(retriedCashBalance - baselineCash) / baselineCash
+                                : 0;
+                            const retriedDeviation = Math.max(
+                                Math.abs(retriedTotalPortfolioValue - baselineValue) / baselineValue,
+                                retriedCashDeviation
+                            );
                             console.warn(`[PortfolioTracking] Retry ${attempt} raw Alpaca fetch for user ${userId}`, {
                                 userId, attempt, rawCash: fresh.cash, rawEquity: fresh.equity, positionCount: fresh.positions?.length ?? 0,
                                 retriedTotalPortfolioValue, retriedDeviation
@@ -751,5 +781,6 @@ module.exports = {
     getSectorAllocation,
     getRiskMetrics,
     getPortfolioHistory,
-    clearUserCache
+    clearUserCache,
+    _median: median // exported 2026-09-21 for testability
 };

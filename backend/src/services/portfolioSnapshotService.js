@@ -180,7 +180,8 @@ async function getRecentSnapshots(userId, { limit = 5, withinMs = 2 * 60 * 60 * 
     await ensureSchema();
     const result = await query(`
         SELECT total_portfolio_value AS "totalPortfolioValue",
-               captured_at AS "capturedAt"
+               cash_balance          AS "cashBalance",
+               captured_at           AS "capturedAt"
         FROM portfolio_snapshots
         WHERE user_id = $1
           AND captured_at >= NOW() - ($2 || ' milliseconds')::interval

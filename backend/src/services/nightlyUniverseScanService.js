@@ -467,11 +467,11 @@ async function runNightlyUniverseScan(opts = {}) {
         if (etDay === 1) { // Monday
             const drift = await precomputedSvc.checkPrescreenDrift(7);
             if (drift) {
-                console.log(`[NightlyScan] 📊 7-day drift: ${drift.prescreenCount} prescreened → ${drift.tradedCount} traded (${drift.conversionRate}%) | win rate: ${drift.winRate}% | avg P&L: $${drift.avgPnl}`);
+                console.log(`[NightlyScan] 📊 7-day drift: ${drift.prescreenCount} prescreened → ${drift.boughtCount} bought (${drift.conversionRate}%) | of those, ${drift.closedCount} closed so far — win rate: ${drift.winRate}% | avg P&L: $${drift.avgPnl}`);
                 if (drift.conversionRate < 5 && drift.prescreenCount > 20) {
                     console.warn('[NightlyScan] ⚠️ Low conversion rate — prescreen threshold may be too strict or regime blocking entries');
                 }
-                if (drift.winRate < 40 && drift.tradedCount >= 5) {
+                if (drift.winRate < 40 && drift.closedCount >= 5) {
                     console.warn('[NightlyScan] ⚠️ Low win rate on prescreened stocks — consider raising ai_score threshold');
                 }
             }

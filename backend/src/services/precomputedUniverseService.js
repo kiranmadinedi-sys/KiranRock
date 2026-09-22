@@ -184,50 +184,69 @@ async function getNewTickers() {
 }
 
 /**
- * Prescreen drift check — compares last week's pre-screened symbols against
- * actual trades executed within 3 days, computing conversion + P&L.
+ * Prescreen drift check — how many symbols that passed pre-screen over the lookback
+ * WINDOW were actually bought (by any account), and what happened to the ones that have
+ * since closed.
  *
  * Called weekly to validate that prescreen thresholds are still effective.
- * Low conversion rate = threshold too strict or regime blocking entries.
- * Low win rate on traded stocks = overnight scoring is stale / threshold needs raising.
+ * Low buy-conversion = threshold too strict or regime blocking entries.
+ * Low win rate on closed trades = overnight scoring is stale / threshold needs raising.
+ *
+ * 2026-09-21: despite the name and the lookbackDays param, this measured a single day
+ * (`analysis_date = CURRENT_DATE - $1`, an equality, not a range) exactly `lookbackDays`
+ * ago — not an aggregate over the week. It also called a symbol "traded" only once it had
+ * already CLOSED with a realized P&L, so any bought position still open (the normal state
+ * for a multi-day swing trade) never counted as "traded" at all. Confirmed live 2026-09-21:
+ * Sept 14 passed 717 symbols; 31 of those were genuinely bought by some account within the
+ * following week (4.3%, not the reported 0.8%), and 14 of those 31 were still open when
+ * this was checked — explaining most of the gap between "31 bought" and "6 closed-with-pnl".
+ * Fixed to aggregate the whole window and to separate "was it bought" (the trades table,
+ * the real conversion question) from "how did the ones that closed do" (win rate — a
+ * different question, now reported alongside rather than conflated into one number).
  *
  * @param {number} [lookbackDays=7]
- * @returns {{ prescreenCount, tradedCount, conversionRate, avgPnl, winRate } | null}
+ * @returns {{ lookbackDays, prescreenCount, boughtCount, conversionRate, closedCount, avgPnl, winRate } | null}
  */
 async function checkPrescreenDrift(lookbackDays = 7) {
     try {
         const res = await query(
-            `SELECT
-                COUNT(DISTINCT d.symbol)                                          AS prescreen_count,
-                COUNT(DISTINCT t.symbol)                                          AS traded_count,
-                ROUND(AVG(t.pnl)::numeric, 2)                                    AS avg_pnl,
-                ROUND(
-                    100.0 * COUNT(DISTINCT t.symbol) FILTER (WHERE t.pnl > 0)
-                    / NULLIF(COUNT(DISTINCT t.symbol), 0)
-                , 1)                                                              AS win_rate
-             FROM daily_universe_analysis d
-             LEFT JOIN trade_decision_journal t
-                ON  t.symbol         = d.symbol
-                AND t.bot_type       = 'stock'
-                AND t.decision_phase = 'CLOSED'
-                AND t.pnl IS NOT NULL
-                AND t.created_at BETWEEN d.analysis_date::timestamptz
-                                     AND d.analysis_date::timestamptz + INTERVAL '3 days'
-             WHERE d.analysis_date = CURRENT_DATE - $1::int
-               AND d.passed_prescreen = true`,
+            `WITH prescreened AS (
+                SELECT DISTINCT symbol FROM daily_universe_analysis
+                WHERE analysis_date BETWEEN CURRENT_DATE - $1::int AND CURRENT_DATE
+                  AND passed_prescreen = true
+             ),
+             bought AS (
+                SELECT DISTINCT symbol FROM trades
+                WHERE action = 'BUY' AND status != 'VOIDED'
+                  AND trade_date >= CURRENT_DATE - $1::int
+                  AND symbol IN (SELECT symbol FROM prescreened)
+             ),
+             closed AS (
+                SELECT symbol, pnl FROM trade_decision_journal
+                WHERE bot_type = 'stock' AND decision_phase = 'CLOSED' AND pnl IS NOT NULL
+                  AND created_at >= CURRENT_DATE - $1::int
+                  AND symbol IN (SELECT symbol FROM bought)
+             )
+             SELECT
+                (SELECT COUNT(*) FROM prescreened)                                          AS prescreen_count,
+                (SELECT COUNT(*) FROM bought)                                                AS bought_count,
+                (SELECT COUNT(DISTINCT symbol) FROM closed)                                  AS closed_count,
+                (SELECT ROUND(AVG(pnl)::numeric, 2) FROM closed)                             AS avg_pnl,
+                (SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE pnl > 0) / NULLIF(COUNT(*), 0), 1) FROM closed) AS win_rate`,
             [lookbackDays]
         );
         const r = res.rows[0];
         if (!r) return null;
         const prescreenCount = parseInt(r.prescreen_count) || 0;
-        const tradedCount    = parseInt(r.traded_count)    || 0;
+        const boughtCount    = parseInt(r.bought_count)    || 0;
         return {
             lookbackDays,
             prescreenCount,
-            tradedCount,
+            boughtCount,
             conversionRate: prescreenCount > 0
-                ? Number(((tradedCount / prescreenCount) * 100).toFixed(1))
+                ? Number(((boughtCount / prescreenCount) * 100).toFixed(1))
                 : 0,
+            closedCount: parseInt(r.closed_count) || 0,
             avgPnl:  parseFloat(r.avg_pnl)  || 0,
             winRate: parseFloat(r.win_rate)  || 0,
         };

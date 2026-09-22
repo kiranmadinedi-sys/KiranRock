@@ -44,10 +44,21 @@ const { reconcileFillHistory } = require('../src/services/positionReconciliation
 describe('positionReconciliationService.reconcileFillHistory', () => {
     const userId = 'user-1';
 
+    // 2026-09-21: reconcileFillHistory now queries intraday_positions/intraday_trades FIRST
+    // (Blitz-managed symbols to exclude — Blitz keeps its own separate, correct ledger; see
+    // the source comment) before the existing trades-lookup query each test below arms.
+    // Route by SQL text rather than call order, so a test's queued trades-lookup response
+    // (set via mockTradesLookup, below) is never wrongly consumed by the Blitz query.
+    let tradesLookupResponse;
     beforeEach(() => {
         jest.clearAllMocks();
         process.env.BROKER = 'alpaca';
         userDb.getUserAlpacaCredentials.mockResolvedValue({ keyId: 'k', secretKey: 's', isPaper: true });
+        tradesLookupResponse = { rows: [] };
+        query.mockImplementation(async (sql) => {
+            if (/intraday_positions|intraday_trades/.test(sql)) return { rows: [] }; // no Blitz activity in these tests
+            return tradesLookupResponse;
+        });
     });
 
     // `orders` are Alpaca /v2/orders-shaped: {symbol, side, filled_qty, filled_avg_price, filled_at, id}
@@ -58,6 +69,12 @@ describe('positionReconciliationService.reconcileFillHistory', () => {
         });
     }
 
+    // Replaces the old `query.mockResolvedValueOnce(...)` pattern, now that the Blitz-symbol
+    // query runs first — sets what the (single, per-test) trades-lookup query returns.
+    function mockTradesLookup(response) {
+        tradesLookupResponse = response;
+    }
+
     test('a single order with multiple partial fills is treated as ONE fill, not several', async () => {
         // Real incident shape: one 189-share order, filled in 7 partial executions
         // at slightly different prices — Alpaca's /v2/orders reports it as a single
@@ -66,7 +83,7 @@ describe('positionReconciliationService.reconcileFillHistory', () => {
         mockOrders([
             { symbol: 'MEDS', side: 'buy', filled_qty: '189', filled_avg_price: '5.8724', filled_at: '2026-09-16T14:01:06.131Z', id: 'ord-meds' },
         ]);
-        query.mockResolvedValueOnce({
+        mockTradesLookup({
             rows: [{ id: 1, symbol: 'MEDS', action: 'BUY', quantity: '189', price: '5.90', broker_order_id: null, trade_date_utc: '2026-09-16T14:01:06.131Z' }],
         });
 
@@ -79,7 +96,7 @@ describe('positionReconciliationService.reconcileFillHistory', () => {
         mockOrders([
             { symbol: 'AAPL', side: 'buy', filled_qty: '10', filled_avg_price: '150.00', filled_at: '2026-09-11T19:01:10.000Z', id: 'ord-1' },
         ]);
-        query.mockResolvedValueOnce({
+        mockTradesLookup({
             rows: [{ id: 1, symbol: 'AAPL', action: 'BUY', quantity: '10', price: '150.01', broker_order_id: null, trade_date_utc: '2026-09-11T19:01:11.000Z' }],
         });
 
@@ -92,7 +109,7 @@ describe('positionReconciliationService.reconcileFillHistory', () => {
         mockOrders([
             { symbol: 'AAPL', side: 'buy', filled_qty: '10', filled_avg_price: '150.00', filled_at: '2026-09-11T19:01:10.000Z', id: 'ord-1' },
         ]);
-        query.mockResolvedValueOnce({
+        mockTradesLookup({
             // Price wildly outside tolerance, but the order id matches exactly.
             rows: [{ id: 1, symbol: 'AAPL', action: 'BUY', quantity: '10', price: '999.00', broker_order_id: 'ord-1', trade_date_utc: '2026-01-01T00:00:00.000Z' }],
         });
@@ -106,7 +123,7 @@ describe('positionReconciliationService.reconcileFillHistory', () => {
         mockOrders([
             { symbol: 'SOXL', side: 'sell', filled_qty: '9', filled_avg_price: '121.70', filled_at: '2026-09-11T19:28:46.000Z', id: 'ord-2' },
         ]);
-        query.mockResolvedValueOnce({ rows: [] });
+        mockTradesLookup({ rows: [] });
 
         const result = await reconcileFillHistory(userId);
 
@@ -119,7 +136,7 @@ describe('positionReconciliationService.reconcileFillHistory', () => {
         mockOrders([
             { symbol: 'XYZ', side: 'buy', filled_qty: '10', filled_avg_price: '100.00', filled_at: '2026-09-11T19:01:10.000Z', id: 'ord-9' },
         ]);
-        query.mockResolvedValueOnce({
+        mockTradesLookup({
             // Same qty/time, but price is 5% off — outside the widened 2%/$0.10 tolerance.
             rows: [{ id: 1, symbol: 'XYZ', action: 'BUY', quantity: '10', price: '105.00', broker_order_id: null, trade_date_utc: '2026-09-11T19:01:10.000Z' }],
         });
@@ -133,7 +150,7 @@ describe('positionReconciliationService.reconcileFillHistory', () => {
         mockOrders([
             { symbol: 'BTC/USD', side: 'buy', filled_qty: '0.01', filled_avg_price: '60000', filled_at: '2026-09-11T19:01:10.000Z', id: 'ord-4' },
         ]);
-        query.mockResolvedValueOnce({ rows: [] });
+        mockTradesLookup({ rows: [] });
 
         const result = await reconcileFillHistory(userId);
 

@@ -21,6 +21,32 @@ const { logger } = require('../utils/logger');
 const { query }  = require('../config/database');
 const tradeIntelligenceService = require('./tradeIntelligenceService');
 
+// ─── Blitz (intraday bot) isolation ─────────────────────────────────────────
+
+/**
+ * Symbols Blitz currently holds, or held/closed within the lookback window, for this user —
+ * uppercased. Blitz keeps its own complete, correct records in intraday_positions/
+ * intraday_trades and trades the SAME Alpaca account this reconciler watches, so without
+ * this exclusion a real Blitz fill looks identical to a genuinely-missing swing trade. Same
+ * isolation reasoning, and same real-incident shape, as the crypto_positions/crypto_trades
+ * exclusion elsewhere in this file (2026-09-02, DOTUSD/LTCUSD wrongly imported into
+ * `holdings`) — found for Blitz 2026-09-21 (META round-tripped 5x in one day, correctly
+ * logged throughout by Blitz, wrongly flagged and partially backfilled into `trades` here).
+ * Fail-open: an error returns an empty set rather than blocking reconciliation.
+ */
+async function _getBlitzManagedSymbols(userId, lookbackHours = 26) {
+    const res = await query(
+        `SELECT symbol FROM intraday_positions WHERE user_id = $1
+         UNION
+         SELECT symbol FROM intraday_trades
+         WHERE user_id = $1
+           AND (exit_time >= NOW() - ($2 || ' hours')::interval
+                OR entry_time >= NOW() - ($2 || ' hours')::interval)`,
+        [userId, lookbackHours]
+    );
+    return new Set(res.rows.map(r => r.symbol.toUpperCase()));
+}
+
 // ─── Alpaca positions fetch ───────────────────────────────────────────────────
 
 async function _fetchAlpacaPositions(userId) {
@@ -120,6 +146,11 @@ async function reconcileFillHistory(userId, { trigger = 'SCHEDULED', lookbackHou
 
     const afterIso = new Date(Date.now() - lookbackHours * 3600 * 1000).toISOString();
 
+    const blitzSymbols = await _getBlitzManagedSymbols(userId, lookbackHours).catch(err => {
+        logger.warn('[Reconcile:FillHistory] Could not load Blitz-managed symbols (proceeding unfiltered)', { userId, err: err.message });
+        return new Set();
+    });
+
     let fills;
     try {
         const creds = await userDb.getUserAlpacaCredentials(userId);
@@ -153,6 +184,13 @@ async function reconcileFillHistory(userId, { trigger = 'SCHEDULED', lookbackHou
             // never reconcile it into the stock `trades` table. Alpaca crypto symbols
             // always carry a '/' (e.g. "BTC/USD"); equities never do.
             .filter(o => !o.symbol.includes('/'))
+            // Blitz (intraday bot) also has its own complete, separately-correct ledger —
+            // see reconcilePositions' identical exclusion for the real incident this fixes
+            // (META round-tripped 5x under Blitz on 2026-09-21; every fill correctly in
+            // intraday_trades, none of it this function's business to "recover"). Matched
+            // by symbol, not order id — intraday_trades has no broker_order_id column on
+            // its exit side, only intraday_positions' entry side does.
+            .filter(o => !blitzSymbols.has(o.symbol.toUpperCase()))
             .map(o => ({
                 symbol: o.symbol, side: o.side,
                 qty: o.filled_qty, price: o.filled_avg_price,
@@ -355,10 +393,27 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
         return result;
     }
 
+    // Blitz (the intraday bot) trades the SAME Alpaca account as swing but keeps its own
+    // complete, separately-correct records in intraday_positions/intraday_trades — never
+    // this shared `holdings`/`trades` (same isolation reasoning as crypto's exclusion just
+    // below). Found 2026-09-21: META round-tripped 5 times in one day under Blitz, each
+    // entry/exit logged and priced correctly in intraday_trades — but this reconciler had
+    // no way to know that, saw real Alpaca fills with no corresponding `trades` row, and
+    // both auto-created a phantom `holdings` row (double-counting portfolio value against
+    // intraday_positions' own row) AND (via reconcileFillHistory, below) alerted "missing"
+    // and then had the DRIFT-decrease backfill write REAL money's worth of wrong-priced
+    // rows into `trades` for a symbol it was never Blitz's ledger to write into. Excluding
+    // any symbol Blitz has touched in the lookback window keeps this reconciler scoped to
+    // what it actually owns, exactly like the crypto filter already does.
+    const blitzSymbols = await _getBlitzManagedSymbols(userId).catch(err => {
+        logger.warn('[Reconcile] Could not load Blitz-managed symbols (proceeding unfiltered)', { userId, err: err.message });
+        return new Set();
+    });
+
     // Build lookup maps (symbol → quantity, normalised to uppercase).
     // Use parseFloat so fractional share positions (e.g. 0.269 ASML) are preserved.
     // Skip short positions (negative qty) — the bot is long-only; shorts are manual/external.
-    const dbMap     = new Map(dbRows.map(r => [r.symbol.toUpperCase(), parseFloat(r.quantity)]));
+    const dbMap     = new Map(dbRows.filter(r => !blitzSymbols.has(r.symbol.toUpperCase())).map(r => [r.symbol.toUpperCase(), parseFloat(r.quantity)]));
     const alpacaMap = new Map(
         alpacaPositions
             .filter(p => parseFloat(p.qty) > 0.0001)   // exclude shorts and dust (< 0.0001 shares)
@@ -375,6 +430,7 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
             // price for DOTUSD") — noisy, though not a real safety gap since the crypto bot
             // was still separately managing the real position correctly throughout.
             .filter(p => (p.asset_class || 'us_equity') === 'us_equity')
+            .filter(p => !blitzSymbols.has(p.symbol.toUpperCase()))
             .map(p => [p.symbol.toUpperCase(), parseFloat(p.qty)])
     );
 
@@ -1004,5 +1060,6 @@ module.exports = {
     reconcilePositions,
     runMorningReconciliation,
     reconcileFillHistory, // exported 2026-09-17 for testability
-    _backfillPartialExit  // exported 2026-09-21 for testability
+    _backfillPartialExit,   // exported 2026-09-21 for testability
+    _getBlitzManagedSymbols // exported 2026-09-21 for testability
 };

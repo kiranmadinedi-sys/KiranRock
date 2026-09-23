@@ -61,10 +61,16 @@ describe('cryptoTradingBot — partial (still-forming) bar exclusion', () => {
         cryptoBroker.hasRealPosition.mockResolvedValue(true);
     });
 
-    function mockHeldPosition(pos, bars) {
+    function mockHeldPosition(pos, bars, latestTradePrice) {
         cryptoDb.getPositions.mockResolvedValue([pos]);
+        // Defaults to confirming whatever the settled bar's Close says, so these
+        // pre-existing tests exercise the partial-bar trim in isolation — the
+        // separate exit-confirmation guard (cryptoTradingBotExitConfirmation.test.js)
+        // covers the live-trade re-check itself.
+        const confirmPrice = latestTradePrice !== undefined ? latestTradePrice : bars[bars.length - 1].Close;
         Alpaca.mockImplementation(() => ({
             getCryptoBars: jest.fn().mockResolvedValue(new Map([[pos.symbol, bars]])),
+            getLatestCryptoTrades: jest.fn().mockResolvedValue(new Map([[pos.symbol, { Price: confirmPrice }]])),
         }));
     }
 

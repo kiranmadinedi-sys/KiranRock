@@ -51,6 +51,7 @@ describe('cryptoTradingBot.runCycleForUser — ghost-position reconciliation', (
         userCycleMutex.withUserLock.mockImplementation((key, fn) => fn());
         Alpaca.mockImplementation(() => ({
             getCryptoBars: jest.fn().mockResolvedValue(new Map()),
+            getLatestCryptoTrades: jest.fn().mockResolvedValue(new Map()),
         }));
         cryptoDb.getPositions.mockResolvedValue([]);
         cryptoDb.updatePositionPrice.mockResolvedValue();
@@ -65,8 +66,12 @@ describe('cryptoTradingBot.runCycleForUser — ghost-position reconciliation', (
 
     function mockHeldPosition(pos, closePrice) {
         cryptoDb.getPositions.mockResolvedValue([pos]);
+        // Confirms whatever the bar says by default — this file exercises the
+        // ghost-reconciliation path, not the separate live-trade confirmation
+        // guard (see cryptoTradingBotExitConfirmation.test.js).
         Alpaca.mockImplementation(() => ({
             getCryptoBars: jest.fn().mockResolvedValue(new Map([[pos.symbol, bars(closePrice)]])),
+            getLatestCryptoTrades: jest.fn().mockResolvedValue(new Map([[pos.symbol, { Price: closePrice }]])),
         }));
     }
 

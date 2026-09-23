@@ -109,6 +109,39 @@ function scoreFromBars(bars) {
 }
 
 /**
+ * Re-verify an exit trigger against a fresh, independent live-trade price
+ * before committing to a sell. Found 2026-09-23: for a thin pair, even an
+ * already-CLOSED 5-min bar (not caught by _getBars' still-forming-bar trim,
+ * which only guards the wall-clock-open case) can carry a single bad/synthetic
+ * tick large enough to spuriously cross the take-profit threshold. UNI/USD
+ * whipsawed 9 times in ~2 hours; the logged takeProfitPrice was always
+ * correctly fillPrice*1.04, but 6 of the "take-profit" exits filled at a REAL
+ * price far below that threshold (e.g. entry 9.628 -> takeProfitPrice
+ * 10.01312 -> real fill 9.71378) — the trigger fired off a bad bar tick that
+ * had already reverted by the time the market sell actually executed.
+ * Same class of bug as the 2026-09-15 fix in _getBars, different
+ * manifestation (a bad tick inside a technically-closed bar, not a
+ * still-forming one). A confirmation miss just leaves the position open for
+ * re-evaluation next cycle (5 min later) — the real broker-side resting stop
+ * from buyCrypto is still the actual hard-downside protection either way, so
+ * failing closed here (skip the exit) costs nothing but a short delay.
+ */
+async function _confirmExitTrigger(client, symbol, hitTakeProfit, pos) {
+    try {
+        const trades = await client.getLatestCryptoTrades([symbol]);
+        const livePrice = trades.get(symbol)?.Price;
+        if (!Number.isFinite(livePrice)) return false;
+
+        return hitTakeProfit
+            ? livePrice >= parseFloat(pos.take_profit_price)
+            : livePrice <= parseFloat(pos.stop_loss_price);
+    } catch (err) {
+        logger.debug('[CryptoBot] Exit confirmation lookup failed', { symbol, error: err.message });
+        return false;
+    }
+}
+
+/**
  * One scan + monitor pass for a single user. Position monitoring runs first
  * (protect capital before chasing new entries), one bar fetch per held
  * symbol; then scans UNIVERSE for new candidates, one bar fetch per symbol
@@ -142,6 +175,14 @@ async function runCycleForUser(user) {
         const hitStopBackstop = pos.stop_loss_price   && price <= parseFloat(pos.stop_loss_price);
 
         if (hitTakeProfit || hitStopBackstop) {
+            const confirmed = await _confirmExitTrigger(client, pos.symbol, hitTakeProfit, pos);
+            if (!confirmed) {
+                logger.warn('[CryptoBot] Exit trigger not confirmed by a fresh live-trade price — likely a bad bar tick, skipping this cycle', {
+                    userId: user.id, symbol: pos.symbol, barPrice: price,
+                    threshold: hitTakeProfit ? pos.take_profit_price : pos.stop_loss_price
+                });
+                continue;
+            }
             await userCycleMutex.withUserLock(`crypto:${user.id}`, () =>
                 cryptoBroker.sellCrypto(user.id, pos.symbol, {
                     exitReason: hitTakeProfit ? 'take-profit' : 'stop-loss-backstop'
@@ -227,4 +268,4 @@ async function runCycleForUser(user) {
     return { opportunities, trades: tradesExecuted };
 }
 
-module.exports = { runCycleForUser, UNIVERSE };
+module.exports = { runCycleForUser, UNIVERSE, _confirmExitTrigger };

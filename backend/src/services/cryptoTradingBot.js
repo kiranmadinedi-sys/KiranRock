@@ -26,6 +26,7 @@ const userDb = require('./userDatabaseService');
 const cryptoDb = require('./cryptoDatabaseService');
 const cryptoBroker = require('./cryptoBrokerService');
 const userCycleMutex = require('./userCycleMutex');
+const { query } = require('../config/database');
 const { logger } = require('../utils/logger');
 
 // Curated core — Alpaca's most liquid, most established pairs (confirmed
@@ -38,6 +39,15 @@ const UNIVERSE = [
 ];
 
 const BAR_WINDOW = 20; // ~20 x 5-min bars = last ~100 min of price action for momentum read
+
+// Stop-loss re-entry cooldown — added 2026-09-24. Real incident: UNI/USD stopped
+// out 3 times in 24h (2026-09-23/24), and unlike swing/Blitz (which already share
+// a cross-strategy cooldown, see intradayTradingBot.js) crypto had nothing stopping
+// it from re-entering the exact same symbol next cycle, 5 minutes later, into the
+// same chop. Same asset_blacklist table and COOLDOWN_{userId}_{symbol} convention
+// as swing/Blitz, but a much shorter window — crypto's cycle is 5 min vs swing's
+// once-a-day, so swing's 5-TRADING-DAY cooldown would be wildly disproportionate here.
+const STOP_LOSS_COOLDOWN_HOURS = 2;
 
 async function _getClientForUser(userId) {
     const creds = await userDb.getUserAlpacaCredentials(userId);
@@ -142,6 +152,45 @@ async function _confirmExitTrigger(client, symbol, hitTakeProfit, pos) {
 }
 
 /**
+ * Blacklist a symbol from re-entry for this user for STOP_LOSS_COOLDOWN_HOURS
+ * after a losing stop-related exit. Best-effort — a failure here must never
+ * block the exit that already happened.
+ */
+async function _setStopLossCooldown(userId, symbol) {
+    try {
+        await query(
+            `INSERT INTO asset_blacklist (symbol, reason, added_by, expires_at)
+             VALUES ($1, $2, 'crypto_bot_stop_loss', NOW() + ($3 || ' hours')::interval)
+             ON CONFLICT (symbol) DO UPDATE
+               SET reason = EXCLUDED.reason,
+                   expires_at = GREATEST(EXCLUDED.expires_at, asset_blacklist.expires_at)`,
+            [`COOLDOWN_${userId}_${symbol}`, `Crypto stop-loss cooldown for ${symbol}`, STOP_LOSS_COOLDOWN_HOURS]
+        );
+        logger.info('[CryptoBot] Stop-loss cooldown set', { userId, symbol, hours: STOP_LOSS_COOLDOWN_HOURS });
+    } catch (err) {
+        logger.warn('[CryptoBot] Failed to set stop-loss cooldown', { userId, symbol, error: err.message });
+    }
+}
+
+async function _getCooldownSymbols(userId) {
+    const cooldownSymbols = new Set();
+    try {
+        const cooldownPrefix = `COOLDOWN_${userId}_`;
+        const res = await query(
+            `SELECT symbol FROM asset_blacklist
+             WHERE symbol LIKE $1 AND (expires_at IS NULL OR expires_at > NOW())`,
+            [`${cooldownPrefix}%`]
+        );
+        for (const row of res.rows) {
+            cooldownSymbols.add(row.symbol.slice(cooldownPrefix.length).toUpperCase());
+        }
+    } catch (err) {
+        logger.debug('[CryptoBot] Cooldown lookup failed — proceeding without it', { userId, error: err.message });
+    }
+    return cooldownSymbols;
+}
+
+/**
  * One scan + monitor pass for a single user. Position monitoring runs first
  * (protect capital before chasing new entries), one bar fetch per held
  * symbol; then scans UNIVERSE for new candidates, one bar fetch per symbol
@@ -188,6 +237,7 @@ async function runCycleForUser(user) {
                     exitReason: hitTakeProfit ? 'take-profit' : 'stop-loss-backstop'
                 })
             ).catch(err => logger.error('[CryptoBot] Exit failed', { userId: user.id, symbol: pos.symbol, err: err.message }));
+            if (!hitTakeProfit) await _setStopLossCooldown(user.id, pos.symbol);
             continue;
         }
 
@@ -206,8 +256,12 @@ async function runCycleForUser(user) {
             logger.warn('[CryptoBot] Position no longer exists at Alpaca — reconciling stale DB row', {
                 userId: user.id, symbol: pos.symbol
             });
-            await cryptoBroker.sellCrypto(user.id, pos.symbol, { exitReason: 'reconciliation_ghost' })
-                .catch(err => logger.error('[CryptoBot] Ghost reconciliation failed', { userId: user.id, symbol: pos.symbol, err: err.message }));
+            const ghostTrade = await cryptoBroker.sellCrypto(user.id, pos.symbol, { exitReason: 'reconciliation_ghost' })
+                .catch(err => { logger.error('[CryptoBot] Ghost reconciliation failed', { userId: user.id, symbol: pos.symbol, err: err.message }); return null; });
+            // A ghost close is almost always the real broker-side stop firing (see the
+            // comment above) — if it closed at a loss, treat it exactly like the
+            // in-band stop-loss-backstop case above and cool the symbol down.
+            if (ghostTrade && parseFloat(ghostTrade.pnl) < 0) await _setStopLossCooldown(user.id, pos.symbol);
         }
     }
 
@@ -225,10 +279,15 @@ async function runCycleForUser(user) {
 
     let opportunities = 0;
     let tradesExecuted = 0;
+    const cooldownSymbols = await _getCooldownSymbols(user.id);
 
     for (const symbol of UNIVERSE) {
         if (heldSymbols.has(symbol)) continue;
         if (openPositions.length + tradesExecuted >= config.max_open_positions) break;
+        if (cooldownSymbols.has(symbol.toUpperCase())) {
+            logger.debug('[CryptoBot] Skipping — stop-loss cooldown active on this symbol', { userId: user.id, symbol });
+            continue;
+        }
 
         const bars = await _getBars(client, symbol);
         if (!bars || bars.length < 2) continue;
@@ -268,4 +327,4 @@ async function runCycleForUser(user) {
     return { opportunities, trades: tradesExecuted };
 }
 
-module.exports = { runCycleForUser, UNIVERSE, _confirmExitTrigger };
+module.exports = { runCycleForUser, UNIVERSE, _confirmExitTrigger, _setStopLossCooldown, _getCooldownSymbols };

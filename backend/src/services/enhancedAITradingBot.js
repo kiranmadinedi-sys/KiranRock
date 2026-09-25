@@ -4828,8 +4828,21 @@ async function manageExistingPositions(userId) {
         // Self-healing: if stop is missing → place it. If stop price is stale (>0.2%
         // off expected) → cancel + replace. Catches API failures, manual cancellations,
         // partial fills, rejected orders, broker outages.
+        //
+        // Found 2026-09-24: this fetch used to swallow its own failure into an empty
+        // array. A transient connectivity blip (ECONNRESET on a position lookup the
+        // same second) made THIS call fail too — silently returning [] instead of
+        // throwing meant stopOrderMap and anyRestingSellSymbols came back empty, so
+        // every single held position in the account looked "missing" a stop in the
+        // same cycle. The code then tried to place a brand-new stop on all 8 of the
+        // paper account's positions at once, each correctly rejected by Alpaca with a
+        // 403 (a real stop already existed and had the shares reserved) — 8 alarming
+        // error logs, no actual naked exposure, but also no visibility into the real
+        // cause. Letting the fetch throw here routes it to the outer catch below,
+        // which already does the right thing (skip verification this cycle, retry
+        // next cycle) instead of pretending every stop just vanished.
         try {
-            const brokerOrders = await brokerService.getOpenOrders(userId).catch(() => []);
+            const brokerOrders = await brokerService.getOpenOrders(userId);
             // Build map: symbol → active stop order(s) on the sell side
             const stopOrderMap = new Map(); // symbol → { orderId, stopPrice }
             // Separate from stopOrderMap on purpose: stopOrderMap's stopPrice feeds the

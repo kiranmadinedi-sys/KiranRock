@@ -4417,6 +4417,30 @@ async function executeAutonomousTrading(userId) {
                 continue;
             }
 
+            // Cross-provider price sanity check — added 2026-09-25 per a cross-validated
+            // ChatGPT review: "never execute a trade when primary and fallback data
+            // sources materially disagree" is a real, worthwhile safety principle to
+            // have on its own merits, independent of whether any specific price turns
+            // out to be correct. Fails open (never blocks) when a second opinion isn't
+            // available at all — only a real, present, materially different second
+            // price stops the trade.
+            {
+                const priceCheck = await dataProvider.verifyPriceCrossProvider(opportunity.symbol, opportunity.price).catch(() => ({ agree: true }));
+                if (!priceCheck.agree) {
+                    logger.warn('[DataQualityGuard] Skipping buy — primary/secondary provider prices materially disagree', {
+                        userId, symbol: opportunity.symbol,
+                        primaryPrice: priceCheck.primaryPrice, secondaryPrice: priceCheck.secondaryPrice,
+                        deviationPct: priceCheck.deviationPct != null ? (priceCheck.deviationPct * 100).toFixed(1) + '%' : null
+                    });
+                    _recordRejection(opportunity, userId, 'data_quality_reject',
+                        `primary $${priceCheck.primaryPrice} vs secondary $${priceCheck.secondaryPrice} (${(priceCheck.deviationPct * 100).toFixed(1)}% apart)`);
+                    alertService.sendMessage(userId,
+                        `⚠️ *Data Quality Guard* — ${opportunity.symbol}\nSkipped a buy: primary price $${priceCheck.primaryPrice} vs secondary $${priceCheck.secondaryPrice} (${(priceCheck.deviationPct * 100).toFixed(1)}% apart). Not trading on a disputed price.`
+                    ).catch(() => {});
+                    continue;
+                }
+            }
+
             let shares = Math.floor(positionSize / opportunity.price);
 
             // Small-account floor: Kelly rounds to 0 for stocks > Kelly positionSize.

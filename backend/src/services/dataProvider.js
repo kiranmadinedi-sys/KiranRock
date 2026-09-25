@@ -994,6 +994,45 @@ const localProvider = (() => {
     return { getBars, getQuote, searchSymbols, getOptionsChain, name };
 })();
 
+/**
+ * Cross-check a price against a SECOND, independent provider right before a trade
+ * executes on it. Added 2026-09-25, from a cross-validated ChatGPT review: "never
+ * execute a trade when primary and fallback data sources materially disagree" is a
+ * real, worthwhile safety principle to have on its own merits, even though the
+ * specific case that prompted the suggestion (NFLX quoted at $71) turned out to be
+ * correct on cross-check against Polygon directly — this platform runs a fictional
+ * simulated market, so it will never match a real-world price lookup, which is a
+ * different thing from the two providers THIS system actually uses disagreeing with
+ * each other.
+ *
+ * Fails OPEN (treats as agreeing) when a second opinion simply isn't available —
+ * a symbol the secondary provider doesn't carry, a missing API key, a transient
+ * error — since the goal is to catch a genuine cross-provider price mismatch, not
+ * to make trading impossible on anything one provider happens to be missing. Only
+ * a real, present, and materially different second price blocks the trade.
+ */
+async function verifyPriceCrossProvider(symbol, primaryPrice, { toleranceThreshold = 0.03 } = {}) {
+    if (!Number.isFinite(primaryPrice) || primaryPrice <= 0) {
+        return { agree: false, reason: 'invalid_primary_price', primaryPrice, secondaryPrice: null, deviationPct: null };
+    }
+    const secondaryProvider = activeProvider === polygonProvider ? alpacaProvider : polygonProvider;
+    try {
+        const secondaryQuote = await secondaryProvider.getQuote(symbol);
+        const secondaryPrice = secondaryQuote?.price;
+        if (!Number.isFinite(secondaryPrice) || secondaryPrice <= 0) {
+            return { agree: true, reason: 'secondary_unavailable', primaryPrice, secondaryPrice: null, deviationPct: null };
+        }
+        const deviationPct = Math.abs(primaryPrice - secondaryPrice) / secondaryPrice;
+        return {
+            agree: deviationPct <= toleranceThreshold,
+            reason: deviationPct <= toleranceThreshold ? 'agree' : 'material_disagreement',
+            primaryPrice, secondaryPrice, deviationPct
+        };
+    } catch (err) {
+        return { agree: true, reason: `secondary_lookup_failed (${(err.message || 'unknown').slice(0, 100)})`, primaryPrice, secondaryPrice: null, deviationPct: null };
+    }
+}
+
 module.exports = {
     // Route daily bar requests through localProvider so the 112k+ rows in daily_bars
     // are actually used. localProvider handles: cache-hit (zero API call), delta-fetch
@@ -1009,5 +1048,6 @@ module.exports = {
     getFundamentals: (...args) => polygonProvider.getFundamentals(...args),
     getGainers:      (...args) => polygonProvider.getGainers(...args),
     getMostActive:   (...args) => polygonProvider.getMostActive(...args),
-    getActiveProvider: () => activeProvider
+    getActiveProvider: () => activeProvider,
+    verifyPriceCrossProvider
 };

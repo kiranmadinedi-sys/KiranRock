@@ -1511,7 +1511,16 @@ const _withQuoteTimeout = (promise, fallback, ms = 10000) =>
 // default false, unchanged. Added 2026-08-31 after this CPU-only box's shared Ollama
 // queue couldn't keep up with real trading-hours concurrent demand (anilboddu1: 8
 // consecutive >4min cycle timeouts, queue waits up to 342s).
-async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null, regime = null, liveMode = false) {
+// Found 2026-09-25: every null-return site below collapsed into the same generic
+// "analyzeStockWithAI returned null" in the nightly scan's exclusion_reason column —
+// a real fraud-risk hard-skip (ASTS), a genuine Weinstein-Stage-4 downtrend skip
+// (GOOGL/AVGO/NFLX), and an actual internal error all looked identical from the DB,
+// with no way to tell them apart short of re-running the analysis live with extra
+// instrumentation (which is how this was actually diagnosed). onSkip is optional and
+// closure-scoped per call (unlike a module-level variable, safe under the nightly
+// scan's concurrent per-symbol batches) — existing callers that don't pass it see no
+// behavior change at all.
+async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null, regime = null, liveMode = false, onSkip = null) {
     // Diagnostic timing — added 2026-08-21 to find why per-symbol nightly-scan time grew
     // steadily over a run (9 min/symbol early, 45+ min/symbol late) with no process-wide
     // leak (handles/memory/DB-pool all stayed flat, scheduler ticks stayed perfectly
@@ -1526,7 +1535,16 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         const _tDataStart = Date.now();
         const [quote, historicalData, spyReturn, spyReturn5d, daysToEarnings, newsData, smartMoneyScore, fundamentals, redditData, globalSentiment, shortInterestData] = await Promise.all([
             _withQuoteTimeout(dataProvider.getQuote(symbol), null).catch(() => null),
-            _withQuoteTimeout(dataProvider.getBars(symbol, '1d', 220), []).catch(() => []), // 220 days needed for 200-day SMA (Weinstein)
+            // 250, not 220: the 200-day SMA itself needs 200 bars, but deriveWeinSteinStage's
+            // sma200Rising check (below) needs a SECOND 200-day SMA computed 30 bars further
+            // back, i.e. 230 bars minimum. Found 2026-09-25: at 220 this was structurally
+            // unsatisfiable for every symbol, always (closes.length >= 230 was never true),
+            // silently forcing sma200Rising to false system-wide — Stage 2 (bullish) could
+            // never fire for ANY stock, and Stage 4 fired on "price below a 200-day SMA" alone,
+            // never distinguishing a genuinely declining SMA from one still rising while price
+            // just dipped under it. The data was there the whole time (confirmed live: asking
+            // for 260 days back returns 235) — the window was just never wide enough to reach it.
+            _withQuoteTimeout(dataProvider.getBars(symbol, '1d', 250), []).catch(() => []),
             getSPY20DayReturn(),
             getSPY5DayReturn(),
             getDaysToEarnings(symbol, yahooFinanceInstance),
@@ -1542,6 +1560,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         _stepTimes.dataGatherMs = Date.now() - _tDataStart;
 
         if (!quote || !quote.price) {
+            if (onSkip) onSkip('no_quote_data');
             return null;
         }
 
@@ -1558,7 +1577,10 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         const highs  = quotes.map(q => q.high).filter(Boolean);
         const lows   = quotes.map(q => q.low).filter(Boolean);
 
-        if (closes.length < 50) return null; // require ~10 weeks of history; rejects micro-caps with 1-7 bars
+        if (closes.length < 50) { // require ~10 weeks of history; rejects micro-caps with 1-7 bars
+            if (onSkip) onSkip(`insufficient_history (${closes.length} bars)`);
+            return null;
+        }
 
         // 52-week high: prefer pre-baked field (Yahoo), otherwise compute from up to 252 trading
         // days of bar data (already loaded). Alpaca and Polygon snapshots return null for high52w.
@@ -1581,7 +1603,8 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         const oraclePattern = detectOraclePatterns(quotes);
 
         // ─── WEINSTEIN STAGE GATE ─────────────────────────────────────────────
-        // Requires 220 days of history for reliable 200-day SMA.
+        // Requires 230 days of history — 200 for the SMA itself, 30 more to check
+        // whether it's rising (see the getBars fetch above for the 2026-09-25 fix).
         const sma50  = computeSMA(closes, 50);
         const sma150 = computeSMA(closes, 150);
         const sma200 = computeSMA(closes, 200);
@@ -1595,6 +1618,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         if (weinSteinStage >= 3) {
             // Stage 3 = topping, Stage 4 = downtrend — PANTHEON hard skip
             logger.debug(`[Weinstein] Skipping ${symbol} — Stage ${weinSteinStage}`);
+            if (onSkip) onSkip(`weinstein_stage_${weinSteinStage} (price ${price} vs sma200 ${sma200?.toFixed(2)}, rising=${sma200Rising})`);
             return null;
         }
 
@@ -2018,6 +2042,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
                 // the soft flags instead of an absolute veto.
                 if (hasHardSkipFlag && geminiResult.source === 'gemini') {
                     logger.info(`[PULSE/RiskFlag] ${symbol} — hard skip`, { riskFlags, source: geminiResult.source });
+                    if (onSkip) onSkip(`risk_flag_hard_skip (${riskFlags.join(', ')})`);
                     return null;
                 }
                 if (hasHardSkipFlag) {
@@ -2505,6 +2530,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         return analysis;
     } catch (error) {
         logger.error('Error analyzing stock', { symbol, error: error.message });
+        if (onSkip) onSkip(`internal_error (${error.message.slice(0, 150)})`);
         return null;
     } finally {
         // Fires on every exit path (success, early return, or catch) — logged as a single

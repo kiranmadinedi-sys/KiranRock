@@ -38,28 +38,37 @@ let _scanStartTime = null; // exposed via getScanStartTime() — see enhancedAIS
  *
  * Kept at 1 retry (not 2) so rate-limited tickers fail fast (~15-45s) rather
  * than burning 90s per ticker and causing 12-hour null loops.
- * Returns null only after all retries are exhausted.
+ *
+ * Returns { analysis: null, reason } once all retries are exhausted, instead of
+ * a bare null — found 2026-09-25: every null case (a real fraud-risk hard-skip,
+ * a genuine Weinstein-downtrend skip, a missing quote, and an actual internal
+ * error) all collapsed into the identical generic "analyzeStockWithAI returned
+ * null" exclusion_reason, with no way to tell them apart short of re-running
+ * the analysis live with extra instrumentation — which is how AVGO/GOOGL/NFLX
+ * were actually diagnosed that day. analyzeStockWithAI's own onSkip callback
+ * now reports the real reason; this just carries it through to the DB.
  */
 async function _analyzeWithRetry(symbol, vixLevel, regime, maxRetries = 1) {
+    let lastReason = 'unknown';
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-            const result = await analyzeStockWithAI(symbol, vixLevel, null, regime);
+            const result = await analyzeStockWithAI(symbol, vixLevel, null, regime, false, (reason) => { lastReason = reason; });
 
-            if (result != null) return result; // success
+            if (result != null) return { analysis: result, reason: null }; // success
 
             // analyzeStockWithAI returned null — retry with a pause
             if (attempt < maxRetries) {
                 const waitMs = 15_000;
-                console.warn(`[NightlyScan] null result for ${symbol} — retrying in ${waitMs / 1000}s (attempt ${attempt + 1}/${maxRetries})`);
+                console.warn(`[NightlyScan] null result for ${symbol} (${lastReason}) — retrying in ${waitMs / 1000}s (attempt ${attempt + 1}/${maxRetries})`);
                 await new Promise(r => setTimeout(r, waitMs));
                 continue;
             }
-            return null; // all retries exhausted
+            return { analysis: null, reason: lastReason }; // all retries exhausted
 
         } catch (err) {
             if (attempt >= maxRetries) {
                 console.warn(`[NightlyScan] ${symbol} failed after ${maxRetries + 1} attempts: ${err.message}`);
-                return null; // convert to null so the loop continues rather than crashing the whole scan
+                return { analysis: null, reason: `retry_exhausted (${err.message.slice(0, 150)})` }; // convert to null so the loop continues rather than crashing the whole scan
             }
 
             const is429 = /429|too many requests/i.test(err.message || '');
@@ -69,7 +78,7 @@ async function _analyzeWithRetry(symbol, vixLevel, regime, maxRetries = 1) {
             await new Promise(r => setTimeout(r, waitMs));
         }
     }
-    return null;
+    return { analysis: null, reason: lastReason };
 }
 
 function _todayET() {
@@ -371,10 +380,10 @@ async function runNightlyUniverseScan(opts = {}) {
                     if (isNewTicker) newTickers.push(stock.symbol);
 
                     try {
-                        const analysis = await _analyzeWithRetry(stock.symbol, vixLevel, regime);
+                        const { analysis, reason } = await _analyzeWithRetry(stock.symbol, vixLevel, regime);
 
                         if (!analysis) {
-                            await _upsert(stock.symbol, today, null, false, 'analyzeStockWithAI returned null');
+                            await _upsert(stock.symbol, today, null, false, reason || 'analyzeStockWithAI returned null');
                             failed++;
                             return;
                         }
@@ -602,8 +611,8 @@ async function rescanSymbol(symbol, reason = 'news') {
     const today = _todayET();
     try {
         const vixLevel = await getVixLevel().catch(() => 15);
-        const analysis = await _analyzeWithRetry(symbol, vixLevel, null);
-        if (!analysis) return { symbol, changed: false, reason: 'no_analysis' };
+        const { analysis, reason: skipReason } = await _analyzeWithRetry(symbol, vixLevel, null);
+        if (!analysis) return { symbol, changed: false, reason: skipReason || 'no_analysis' };
 
         // Read previous recommendation before overwriting
         const prev = await query(
@@ -673,9 +682,9 @@ async function rescanFailedSymbols(date, symbols) {
     for (let i = 0; i < symbols.length; i++) {
         const symbol = symbols[i];
         try {
-            const analysis = await _analyzeWithRetry(symbol, vixLevel, regime);
+            const { analysis, reason } = await _analyzeWithRetry(symbol, vixLevel, regime);
             if (!analysis) {
-                await _upsert(symbol, date, null, false, 'analyzeStockWithAI returned null (rescan)');
+                await _upsert(symbol, date, null, false, reason ? `${reason} (rescan)` : 'analyzeStockWithAI returned null (rescan)');
                 stillFailed++;
                 results.push({ symbol, ok: false });
             } else {

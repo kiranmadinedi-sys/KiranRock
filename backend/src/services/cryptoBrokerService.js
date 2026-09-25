@@ -45,8 +45,22 @@ function _toPositionSymbol(pairSymbol) {
 }
 
 // Truncate (never round up) a numeric string/number to at most `dp` decimals.
+// Found 2026-09-24 (while adding a dust-position check, caught by its own test
+// before shipping): plain String(value) renders any JS number smaller than
+// 1e-6 in exponential notation (e.g. String(0.000000006) === "6e-9"), which
+// has no "." for indexOf to find, so the whole value passes through
+// UNTRUNCATED instead of being cut down. Every existing call site happens to
+// pass a string (straight from Alpaca/DB, never re-parsed to a number first),
+// which sidesteps this — but that's fragile by accident, not by design.
+// Only fall back to toFixed for that exponential case, not unconditionally —
+// toFixed forces the number's exact binary representation to decimal, which
+// for an ordinary value like 8.42461767 is really 8.42461766999999977...,
+// corrupting the last digit; String(value)'s shortest-round-trip formatting
+// (correct for every normal-sized number) is what the un-truncated cases here
+// depend on.
 function _truncDecimals(value, dp) {
-    const str = String(value);
+    let str = String(value);
+    if (typeof value === 'number' && /e/i.test(str)) str = value.toFixed(20);
     const i = str.indexOf('.');
     return i === -1 ? str : str.slice(0, i + 1 + dp);
 }
@@ -216,9 +230,18 @@ async function sellCrypto(userId, symbol, { exitReason, scoreAtEntry }) {
     if (!position) return null;
 
     const realPosition = await brokerService.getPosition(userId, _toPositionSymbol(symbol));
-    if (!realPosition || parseFloat(realPosition.qty) <= 0) {
-        logger.warn('[CryptoBot] Skipping sell — no real position on Alpaca (already closed by a prior call)', {
-            userId, symbol, exitReason
+    // Truncate up front, at the same precision the real sell order will use below — a
+    // "real" position that rounds to zero there is exactly as unsellable as no position
+    // at all. Found 2026-09-24: SHIB/USD's real Alpaca qty had decayed to 0.000000006
+    // (effectively $0, likely fee dust from an earlier real close our DB never learned
+    // about) while our DB still tracked the pre-decay 85.6M quantity as open. Every
+    // 5-min cycle correctly saw the stop-loss threshold breached, tried to sell, and got
+    // a 422 for a truncated qty of "0.00000000" — forever, since the >0 check alone
+    // never routed this into the reconciliation path below.
+    const realQtyTruncated = realPosition ? parseFloat(_truncDecimals(realPosition.qty, 8)) : 0;
+    if (!realPosition || realQtyTruncated <= 0) {
+        logger.warn('[CryptoBot] Skipping sell — no sellable real position on Alpaca (already closed, or reduced to unsellable dust)', {
+            userId, symbol, exitReason, realQty: realPosition?.qty
         });
 
         // The position already really closed at Alpaca (almost always the real

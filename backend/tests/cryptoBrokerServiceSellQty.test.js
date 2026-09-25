@@ -63,4 +63,21 @@ describe('sellCrypto — sell quantity never exceeds the real Alpaca holding', (
         expect(_truncDecimals('5', 8)).toBe('5');
         expect(_truncDecimals(8.42461767, 8)).toBe('8.42461767');
     });
+
+    /**
+     * 2026-09-24: caught while adding a dust-position check elsewhere, before it
+     * shipped. A raw JS number smaller than 1e-6 stringifies in exponential
+     * notation (String(0.000000006) === "6e-9"), which has no "." for the old
+     * implementation to find — the value passed through completely untruncated
+     * instead of correctly truncating to zero. Every existing production call
+     * site happens to pass a string, not a number, so this never fired live,
+     * but it's a correctness bug in the function itself.
+     */
+    test('_truncDecimals correctly truncates a tiny NUMBER input instead of passing it through via exponential notation', () => {
+        const { _truncDecimals } = cryptoBrokerService;
+        expect(_truncDecimals(0.000000006, 8)).toBe('0.00000000');
+        expect(parseFloat(_truncDecimals(0.000000006, 8))).toBe(0);
+        // A tiny value already given as a string (the real production shape) truncates correctly too.
+        expect(_truncDecimals('0.000000006', 8)).toBe('0.00000000');
+    });
 });

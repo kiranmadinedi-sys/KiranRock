@@ -81,4 +81,26 @@ describe('cryptoBrokerService.sellCrypto — stale_skip real-fill lookup', () =>
             exitReason: 'stop-loss-backstop_stale_skip',
         }));
     });
+
+    /**
+     * 2026-09-24 real incident: SHIB/USD's real Alpaca qty had decayed to
+     * 0.000000006 (fee dust from an earlier real close our DB never learned
+     * about) while our DB still tracked 85.6M as open. The plain `qty <= 0`
+     * check let this fall through to a real sell attempt every 5-min cycle,
+     * truncating 0.000000006 to 8 decimals ("0.00000000") and getting a 422
+     * from Alpaca forever. A dust-level real qty must route into the same
+     * stale_skip reconciliation as a genuinely zero one.
+     */
+    test('a real position reduced to sub-precision dust is treated the same as no real position', async () => {
+        brokerService.getPosition.mockResolvedValue({ qty: '0.000000006' });
+        axios.get.mockResolvedValue({ data: [] });
+
+        await cryptoBrokerService.sellCrypto('user-1', 'UNI/USD', { exitReason: 'stop-loss-backstop' });
+
+        expect(cryptoDb.closePosition).toHaveBeenCalledWith('user-1', 'UNI/USD', expect.objectContaining({
+            exitReason: 'stop-loss-backstop_stale_skip',
+        }));
+        // Never attempted a real sell order for the dust quantity.
+        expect(axios.post).not.toHaveBeenCalled();
+    });
 });

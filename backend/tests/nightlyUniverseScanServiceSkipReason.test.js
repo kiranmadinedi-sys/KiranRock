@@ -50,7 +50,7 @@ describe('nightlyUniverseScanService — real skip-reason propagation', () => {
     describe('rescanSymbol', () => {
         test('a real skip reason from analyzeStockWithAI is surfaced, not the generic fallback', async () => {
             analyzeStockWithAI.mockImplementation(async (symbol, vix, yf, regime, liveMode, onSkip) => {
-                onSkip('weinstein_stage_4 (price 343.7 vs sma200 346.47, rising=false)');
+                onSkip('WEINSTEIN_STAGE_4 (price 343.7 vs sma200 346.47, rising=false)');
                 return null;
             });
 
@@ -59,19 +59,19 @@ describe('nightlyUniverseScanService — real skip-reason propagation', () => {
             expect(result).toEqual(expect.objectContaining({
                 symbol: 'GOOGL',
                 changed: false,
-                reason: 'weinstein_stage_4 (price 343.7 vs sma200 346.47, rising=false)',
+                reason: 'WEINSTEIN_STAGE_4 (price 343.7 vs sma200 346.47, rising=false)',
             }));
         });
 
         test('a fraud/risk-flag hard skip is surfaced distinctly', async () => {
             analyzeStockWithAI.mockImplementation(async (symbol, vix, yf, regime, liveMode, onSkip) => {
-                onSkip('risk_flag_hard_skip (litigation_material, fraud_allegation)');
+                onSkip('RISK_FLAG_HARD_SKIP (litigation_material, fraud_allegation)');
                 return null;
             });
 
             const result = await _runWithFakeTimers(() => rescanSymbol('ASTS', 'news'));
 
-            expect(result.reason).toBe('risk_flag_hard_skip (litigation_material, fraud_allegation)');
+            expect(result.reason).toBe('RISK_FLAG_HARD_SKIP (litigation_material, fraud_allegation)');
         });
 
         test('falls back to a generic reason when analyzeStockWithAI never calls onSkip (defensive)', async () => {
@@ -79,7 +79,7 @@ describe('nightlyUniverseScanService — real skip-reason propagation', () => {
 
             const result = await _runWithFakeTimers(() => rescanSymbol('XYZ', 'news'));
 
-            expect(result.reason).toBe('unknown');
+            expect(result.reason).toBe('UNKNOWN');
         });
 
         test('a real analysis result still flows through unaffected', async () => {
@@ -96,7 +96,7 @@ describe('nightlyUniverseScanService — real skip-reason propagation', () => {
     describe('rescanFailedSymbols', () => {
         test('a real skip reason is recorded per-symbol, tagged as a rescan', async () => {
             analyzeStockWithAI.mockImplementation(async (symbol, vix, yf, regime, liveMode, onSkip) => {
-                onSkip('no_quote_data');
+                onSkip('NO_QUOTE_DATA');
                 return null;
             });
 
@@ -104,7 +104,7 @@ describe('nightlyUniverseScanService — real skip-reason propagation', () => {
 
             expect(result.results).toEqual([{ symbol: 'NFLX', ok: false }]);
             const upsertCall = query.mock.calls.find(c => c[0].includes('INSERT INTO daily_universe_analysis'));
-            expect(upsertCall[1]).toEqual(expect.arrayContaining(['no_quote_data (rescan)']));
+            expect(upsertCall[1]).toEqual(expect.arrayContaining(['NO_QUOTE_DATA (rescan)']));
         });
     });
 });

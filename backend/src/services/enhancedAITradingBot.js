@@ -1511,6 +1511,25 @@ const _withQuoteTimeout = (promise, fallback, ms = 10000) =>
 // default false, unchanged. Added 2026-08-31 after this CPU-only box's shared Ollama
 // queue couldn't keep up with real trading-hours concurrent demand (anilboddu1: 8
 // consecutive >4min cycle timeouts, queue waits up to 342s).
+// Fixed skip-reason taxonomy — added 2026-09-26 (extending the 2026-09-25 onSkip
+// fix from free-text-only to a real, closed set of codes). Every onSkip call below
+// leads with one of these exact codes, followed by a human-readable detail in
+// parens — e.g. "WEINSTEIN_STAGE_4 (price 343.7 vs sma200 346.47, rising=false)".
+// The leading code is what a report groups/counts by ("how many rejections today
+// were WEINSTEIN_STAGE_4 vs RISK_FLAG_HARD_SKIP"); the detail is what a human reads
+// when they need to know why THIS symbol specifically. Exported so
+// nightlyUniverseScanService.js's own two codes (UNKNOWN, RETRY_EXHAUSTED — added
+// there, not here, since they describe the retry wrapper's own state, not anything
+// analyzeStockWithAI itself observed) stay part of the same closed set.
+const SKIP_REASONS = Object.freeze({
+    NO_QUOTE_DATA:       'NO_QUOTE_DATA',
+    INSUFFICIENT_HISTORY:'INSUFFICIENT_HISTORY',
+    WEINSTEIN_STAGE_3:   'WEINSTEIN_STAGE_3',
+    WEINSTEIN_STAGE_4:   'WEINSTEIN_STAGE_4',
+    RISK_FLAG_HARD_SKIP: 'RISK_FLAG_HARD_SKIP',
+    INTERNAL_ERROR:      'INTERNAL_ERROR',
+});
+
 // Found 2026-09-25: every null-return site below collapsed into the same generic
 // "analyzeStockWithAI returned null" in the nightly scan's exclusion_reason column —
 // a real fraud-risk hard-skip (ASTS), a genuine Weinstein-Stage-4 downtrend skip
@@ -1560,7 +1579,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         _stepTimes.dataGatherMs = Date.now() - _tDataStart;
 
         if (!quote || !quote.price) {
-            if (onSkip) onSkip('no_quote_data');
+            if (onSkip) onSkip(SKIP_REASONS.NO_QUOTE_DATA);
             return null;
         }
 
@@ -1578,7 +1597,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         const lows   = quotes.map(q => q.low).filter(Boolean);
 
         if (closes.length < 50) { // require ~10 weeks of history; rejects micro-caps with 1-7 bars
-            if (onSkip) onSkip(`insufficient_history (${closes.length} bars)`);
+            if (onSkip) onSkip(`${SKIP_REASONS.INSUFFICIENT_HISTORY} (${closes.length} bars)`);
             return null;
         }
 
@@ -1618,7 +1637,10 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         if (weinSteinStage >= 3) {
             // Stage 3 = topping, Stage 4 = downtrend — PANTHEON hard skip
             logger.debug(`[Weinstein] Skipping ${symbol} — Stage ${weinSteinStage}`);
-            if (onSkip) onSkip(`weinstein_stage_${weinSteinStage} (price ${price} vs sma200 ${sma200?.toFixed(2)}, rising=${sma200Rising})`);
+            if (onSkip) {
+                const code = weinSteinStage === 3 ? SKIP_REASONS.WEINSTEIN_STAGE_3 : SKIP_REASONS.WEINSTEIN_STAGE_4;
+                onSkip(`${code} (price ${price} vs sma200 ${sma200?.toFixed(2)}, rising=${sma200Rising})`);
+            }
             return null;
         }
 
@@ -2042,7 +2064,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
                 // the soft flags instead of an absolute veto.
                 if (hasHardSkipFlag && geminiResult.source === 'gemini') {
                     logger.info(`[PULSE/RiskFlag] ${symbol} — hard skip`, { riskFlags, source: geminiResult.source });
-                    if (onSkip) onSkip(`risk_flag_hard_skip (${riskFlags.join(', ')})`);
+                    if (onSkip) onSkip(`${SKIP_REASONS.RISK_FLAG_HARD_SKIP} (${riskFlags.join(', ')})`);
                     return null;
                 }
                 if (hasHardSkipFlag) {
@@ -2530,7 +2552,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         return analysis;
     } catch (error) {
         logger.error('Error analyzing stock', { symbol, error: error.message });
-        if (onSkip) onSkip(`internal_error (${error.message.slice(0, 150)})`);
+        if (onSkip) onSkip(`${SKIP_REASONS.INTERNAL_ERROR} (${error.message.slice(0, 150)})`);
         return null;
     } finally {
         // Fires on every exit path (success, early return, or catch) — logged as a single
@@ -5653,7 +5675,8 @@ module.exports = {
     manageExistingPositions,
     getGateStats,
     getVixLevel,
-    resetOracleCycleBudget
+    resetOracleCycleBudget,
+    SKIP_REASONS
 };
 
 // Test-only exports — stripped from consideration in production because NODE_ENV !== 'test'

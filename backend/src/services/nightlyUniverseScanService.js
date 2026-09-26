@@ -19,6 +19,15 @@ const alertService           = require('./telegramAlertService');
 const precomputedSvc         = require('./precomputedUniverseService');
 const { analyzeStockWithAI, getVixLevel } = require('./enhancedAITradingBot');
 
+// This scan's own two codes, part of the same taxonomy as enhancedAITradingBot.js's
+// SKIP_REASONS but not exported from there — these describe the _analyzeWithRetry
+// wrapper's own state (never got an onSkip call at all, or every retry attempt
+// threw), not anything analyzeStockWithAI itself observed.
+const SCAN_SKIP_REASONS = Object.freeze({
+    UNKNOWN:         'UNKNOWN',
+    RETRY_EXHAUSTED: 'RETRY_EXHAUSTED',
+});
+
 // One symbol at a time with a 10-second pause — ~6 stocks/min.
 // 10s (not 6s) gives Yahoo Finance headroom after a day of heavy usage
 // and prevents 429 rate-limit cascades that produce 12-hour null loops.
@@ -49,7 +58,7 @@ let _scanStartTime = null; // exposed via getScanStartTime() — see enhancedAIS
  * now reports the real reason; this just carries it through to the DB.
  */
 async function _analyzeWithRetry(symbol, vixLevel, regime, maxRetries = 1) {
-    let lastReason = 'unknown';
+    let lastReason = SCAN_SKIP_REASONS.UNKNOWN;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
             const result = await analyzeStockWithAI(symbol, vixLevel, null, regime, false, (reason) => { lastReason = reason; });
@@ -68,7 +77,7 @@ async function _analyzeWithRetry(symbol, vixLevel, regime, maxRetries = 1) {
         } catch (err) {
             if (attempt >= maxRetries) {
                 console.warn(`[NightlyScan] ${symbol} failed after ${maxRetries + 1} attempts: ${err.message}`);
-                return { analysis: null, reason: `retry_exhausted (${err.message.slice(0, 150)})` }; // convert to null so the loop continues rather than crashing the whole scan
+                return { analysis: null, reason: `${SCAN_SKIP_REASONS.RETRY_EXHAUSTED} (${err.message.slice(0, 150)})` }; // convert to null so the loop continues rather than crashing the whole scan
             }
 
             const is429 = /429|too many requests/i.test(err.message || '');

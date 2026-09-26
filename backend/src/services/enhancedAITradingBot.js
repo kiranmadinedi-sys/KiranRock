@@ -4484,7 +4484,13 @@ async function executeAutonomousTrading(userId) {
                         deviationPct: priceCheck.deviationPct != null ? (priceCheck.deviationPct * 100).toFixed(1) + '%' : null,
                         ageMs: priceCheck.ageMs ?? null
                     });
-                    _recordRejection(opportunity, userId, 'data_quality_reject', detail);
+                    // Reason is the guard's own specific code (stale_primary_price vs
+                    // material_disagreement vs invalid_primary_price), not one generic
+                    // 'data_quality_reject' bucket — added 2026-09-26 so trade_rejection_log
+                    // (already queried per-reason in accountScorecardService) can actually
+                    // answer "how many blocks were staleness vs a real provider disagreement"
+                    // instead of lumping every guard trip together.
+                    _recordRejection(opportunity, userId, priceCheck.reason, detail);
                     alertService.sendMessage(userId,
                         `⚠️ *Data Quality Guard* — ${opportunity.symbol}\nSkipped a buy: ${detail}. Not trading on a disputed or stale price.`
                     ).catch(() => {});

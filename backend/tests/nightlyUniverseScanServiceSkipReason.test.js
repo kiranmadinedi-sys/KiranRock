@@ -135,12 +135,43 @@ describe('nightlyUniverseScanService — real skip-reason propagation', () => {
 
             const result = await getSkipReasonBreakdown('2026-09-26');
 
+            expect(result.total).toBe(2631);
             expect(result.byCode).toEqual([
                 { code: 'WEINSTEIN_STAGE_4', count: 1843 },
                 { code: 'NO_QUOTE_DATA', count: 412 },
                 { code: 'RISK_FLAG_HARD_SKIP', count: 376 },
             ]);
             expect(result.byFamily).toEqual({ STRATEGY: 1843, DATA: 412, RISK: 376 });
+        });
+
+        test('reports zero cleanly when nothing has the new skipCode field yet (pre-fix historical data)', async () => {
+            const { getSkipReasonBreakdown } = require('../src/services/nightlyUniverseScanService');
+            query.mockResolvedValue({ rows: [] });
+
+            const result = await getSkipReasonBreakdown('2026-09-20');
+
+            expect(result).toEqual({ date: '2026-09-20', total: 0, byCode: [], byFamily: {} });
+        });
+    });
+
+    describe('formatSkipReasonBreakdown', () => {
+        test('renders totals, family rollup, and per-code detail into readable text', () => {
+            const { formatSkipReasonBreakdown } = require('../src/services/nightlyUniverseScanService');
+            const text = formatSkipReasonBreakdown({
+                date: '2026-09-26',
+                total: 2631,
+                byCode: [
+                    { code: 'WEINSTEIN_STAGE_4', count: 1843 },
+                    { code: 'NO_QUOTE_DATA', count: 412 },
+                    { code: 'RISK_FLAG_HARD_SKIP', count: 376 },
+                ],
+                byFamily: { STRATEGY: 1843, DATA: 412, RISK: 376 },
+            });
+
+            expect(text).toContain('Total skipped: 2631');
+            expect(text).toContain('STRATEGY');
+            expect(text).toContain('WEINSTEIN_STAGE_4');
+            expect(text).toContain('1843');
         });
     });
 });

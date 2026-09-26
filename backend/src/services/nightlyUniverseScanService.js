@@ -769,7 +769,20 @@ async function getSkipReasonBreakdown(date = _todayET()) {
         const family = getSkipReasonFamily(code);
         byFamily[family] = (byFamily[family] || 0) + count;
     }
-    return { date, byCode, byFamily };
+    const total = byCode.reduce((s, r) => s + r.count, 0);
+    return { date, total, byCode, byFamily };
 }
 
-module.exports = { runNightlyUniverseScan, rescanSymbol, rescanFailedSymbols, isScanRunning, getScanStartTime, getSkipReasonBreakdown };
+function formatSkipReasonBreakdown({ date, total, byCode, byFamily }) {
+    const lines = [`📋 *Skip Reason Breakdown* — ${date}`, '', `Total skipped: ${total}`, ''];
+    const familyOrder = ['DATA', 'STRATEGY', 'RISK', 'SYSTEM', 'RELIABILITY'];
+    lines.push('*By family:*');
+    for (const family of familyOrder) {
+        if (byFamily[family]) lines.push(`  ${family.padEnd(11)} ${byFamily[family]}`);
+    }
+    lines.push('', '*By exact code:*');
+    for (const { code, count } of byCode) lines.push(`  ${code.padEnd(24)} ${count}`);
+    return lines.join('\n');
+}
+
+module.exports = { runNightlyUniverseScan, rescanSymbol, rescanFailedSymbols, isScanRunning, getScanStartTime, getSkipReasonBreakdown, formatSkipReasonBreakdown };

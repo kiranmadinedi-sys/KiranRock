@@ -1513,11 +1513,11 @@ const _withQuoteTimeout = (promise, fallback, ms = 10000) =>
 // consecutive >4min cycle timeouts, queue waits up to 342s).
 // Fixed skip-reason taxonomy — added 2026-09-26 (extending the 2026-09-25 onSkip
 // fix from free-text-only to a real, closed set of codes). Every onSkip call below
-// leads with one of these exact codes, followed by a human-readable detail in
-// parens — e.g. "WEINSTEIN_STAGE_4 (price 343.7 vs sma200 346.47, rising=false)".
-// The leading code is what a report groups/counts by ("how many rejections today
-// were WEINSTEIN_STAGE_4 vs RISK_FLAG_HARD_SKIP"); the detail is what a human reads
-// when they need to know why THIS symbol specifically. Exported so
+// fires with one of these exact codes plus a separate human-readable detail string
+// — kept as two values, not concatenated into one, so a caller can group/count on
+// the stable code ("how many rejections today were WEINSTEIN_STAGE_4 vs
+// RISK_FLAG_HARD_SKIP") while still keeping the full per-symbol detail ("price
+// 343.7 vs sma200 346.47, rising=false") for a human to read. Exported so
 // nightlyUniverseScanService.js's own two codes (UNKNOWN, RETRY_EXHAUSTED — added
 // there, not here, since they describe the retry wrapper's own state, not anything
 // analyzeStockWithAI itself observed) stay part of the same closed set.
@@ -1529,6 +1529,24 @@ const SKIP_REASONS = Object.freeze({
     RISK_FLAG_HARD_SKIP: 'RISK_FLAG_HARD_SKIP',
     INTERNAL_ERROR:      'INTERNAL_ERROR',
 });
+
+// Coarse family per code, for a daily rollup ("why did we miss N candidates today":
+// DATA 412, STRATEGY 1843, RISK 376, SYSTEM 19, RELIABILITY 11) without caring about
+// every individual code. Anything not in this map (including
+// nightlyUniverseScanService.js's own UNKNOWN/RETRY_EXHAUSTED codes, which aren't
+// listed here since they're not analyzeStockWithAI's to define) falls into
+// RELIABILITY by default — "something about the check itself, not the stock."
+const SKIP_REASON_FAMILIES = Object.freeze({
+    [SKIP_REASONS.NO_QUOTE_DATA]:        'DATA',
+    [SKIP_REASONS.INSUFFICIENT_HISTORY]: 'DATA',
+    [SKIP_REASONS.WEINSTEIN_STAGE_3]:    'STRATEGY',
+    [SKIP_REASONS.WEINSTEIN_STAGE_4]:    'STRATEGY',
+    [SKIP_REASONS.RISK_FLAG_HARD_SKIP]:  'RISK',
+    [SKIP_REASONS.INTERNAL_ERROR]:       'SYSTEM',
+});
+function getSkipReasonFamily(code) {
+    return SKIP_REASON_FAMILIES[code] || 'RELIABILITY';
+}
 
 // Found 2026-09-25: every null-return site below collapsed into the same generic
 // "analyzeStockWithAI returned null" in the nightly scan's exclusion_reason column —
@@ -1579,7 +1597,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         _stepTimes.dataGatherMs = Date.now() - _tDataStart;
 
         if (!quote || !quote.price) {
-            if (onSkip) onSkip(SKIP_REASONS.NO_QUOTE_DATA);
+            if (onSkip) onSkip(SKIP_REASONS.NO_QUOTE_DATA, null);
             return null;
         }
 
@@ -1597,7 +1615,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         const lows   = quotes.map(q => q.low).filter(Boolean);
 
         if (closes.length < 50) { // require ~10 weeks of history; rejects micro-caps with 1-7 bars
-            if (onSkip) onSkip(`${SKIP_REASONS.INSUFFICIENT_HISTORY} (${closes.length} bars)`);
+            if (onSkip) onSkip(SKIP_REASONS.INSUFFICIENT_HISTORY, `${closes.length} bars`);
             return null;
         }
 
@@ -1639,7 +1657,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             logger.debug(`[Weinstein] Skipping ${symbol} — Stage ${weinSteinStage}`);
             if (onSkip) {
                 const code = weinSteinStage === 3 ? SKIP_REASONS.WEINSTEIN_STAGE_3 : SKIP_REASONS.WEINSTEIN_STAGE_4;
-                onSkip(`${code} (price ${price} vs sma200 ${sma200?.toFixed(2)}, rising=${sma200Rising})`);
+                onSkip(code, `price ${price} vs sma200 ${sma200?.toFixed(2)}, rising=${sma200Rising}`);
             }
             return null;
         }
@@ -2064,7 +2082,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
                 // the soft flags instead of an absolute veto.
                 if (hasHardSkipFlag && geminiResult.source === 'gemini') {
                     logger.info(`[PULSE/RiskFlag] ${symbol} — hard skip`, { riskFlags, source: geminiResult.source });
-                    if (onSkip) onSkip(`${SKIP_REASONS.RISK_FLAG_HARD_SKIP} (${riskFlags.join(', ')})`);
+                    if (onSkip) onSkip(SKIP_REASONS.RISK_FLAG_HARD_SKIP, riskFlags.join(', '));
                     return null;
                 }
                 if (hasHardSkipFlag) {
@@ -2464,6 +2482,12 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         const analysis = {
             symbol,
             price,
+            // When the quote this price came from was actually fetched — added
+            // 2026-09-26 so the cross-provider price guard can reject a trade on a
+            // stale primary price, not just one that happens to disagree with a
+            // freshly-fetched secondary. Falls back to "now" if the provider didn't
+            // stamp one, matching the existing DataGuard staleness check's pattern.
+            priceFetchedAt: quote._fetchedAt || Date.now(),
             week52High,
             change,
             volume,
@@ -2552,7 +2576,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         return analysis;
     } catch (error) {
         logger.error('Error analyzing stock', { symbol, error: error.message });
-        if (onSkip) onSkip(`${SKIP_REASONS.INTERNAL_ERROR} (${error.message.slice(0, 150)})`);
+        if (onSkip) onSkip(SKIP_REASONS.INTERNAL_ERROR, error.message.slice(0, 150));
         return null;
     } finally {
         // Fires on every exit path (success, early return, or catch) — logged as a single
@@ -4445,19 +4469,24 @@ async function executeAutonomousTrading(userId) {
             // have on its own merits, independent of whether any specific price turns
             // out to be correct. Fails open (never blocks) when a second opinion isn't
             // available at all — only a real, present, materially different second
-            // price stops the trade.
+            // price, or a stale primary price (added 2026-09-26), stops the trade.
             {
-                const priceCheck = await dataProvider.verifyPriceCrossProvider(opportunity.symbol, opportunity.price).catch(() => ({ agree: true }));
+                const priceCheck = await dataProvider.verifyPriceCrossProvider(opportunity.symbol, opportunity.price, {
+                    primaryFetchedAt: opportunity.priceFetchedAt || null
+                }).catch(() => ({ agree: true }));
                 if (!priceCheck.agree) {
-                    logger.warn('[DataQualityGuard] Skipping buy — primary/secondary provider prices materially disagree', {
-                        userId, symbol: opportunity.symbol,
+                    const detail = priceCheck.reason === 'stale_primary_price'
+                        ? `primary price is ${Math.round(priceCheck.ageMs / 1000)}s old`
+                        : `primary $${priceCheck.primaryPrice} vs secondary $${priceCheck.secondaryPrice} (${(priceCheck.deviationPct * 100).toFixed(1)}% apart)`;
+                    logger.warn('[DataQualityGuard] Skipping buy — price failed the data-quality guard', {
+                        userId, symbol: opportunity.symbol, guardReason: priceCheck.reason,
                         primaryPrice: priceCheck.primaryPrice, secondaryPrice: priceCheck.secondaryPrice,
-                        deviationPct: priceCheck.deviationPct != null ? (priceCheck.deviationPct * 100).toFixed(1) + '%' : null
+                        deviationPct: priceCheck.deviationPct != null ? (priceCheck.deviationPct * 100).toFixed(1) + '%' : null,
+                        ageMs: priceCheck.ageMs ?? null
                     });
-                    _recordRejection(opportunity, userId, 'data_quality_reject',
-                        `primary $${priceCheck.primaryPrice} vs secondary $${priceCheck.secondaryPrice} (${(priceCheck.deviationPct * 100).toFixed(1)}% apart)`);
+                    _recordRejection(opportunity, userId, 'data_quality_reject', detail);
                     alertService.sendMessage(userId,
-                        `⚠️ *Data Quality Guard* — ${opportunity.symbol}\nSkipped a buy: primary price $${priceCheck.primaryPrice} vs secondary $${priceCheck.secondaryPrice} (${(priceCheck.deviationPct * 100).toFixed(1)}% apart). Not trading on a disputed price.`
+                        `⚠️ *Data Quality Guard* — ${opportunity.symbol}\nSkipped a buy: ${detail}. Not trading on a disputed or stale price.`
                     ).catch(() => {});
                     continue;
                 }
@@ -5676,7 +5705,9 @@ module.exports = {
     getGateStats,
     getVixLevel,
     resetOracleCycleBudget,
-    SKIP_REASONS
+    SKIP_REASONS,
+    SKIP_REASON_FAMILIES,
+    getSkipReasonFamily
 };
 
 // Test-only exports — stripped from consideration in production because NODE_ENV !== 'test'

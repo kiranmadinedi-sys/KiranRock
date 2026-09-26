@@ -88,4 +88,52 @@ describe('dataProvider.verifyPriceCrossProvider', () => {
         expect(result.reason).toBe('invalid_primary_price');
         expect(axios.get).not.toHaveBeenCalled();
     });
+
+    /**
+     * 2026-09-26: agreeing with a secondary provider only proves two prices match AT
+     * THE SAME MOMENT — a stale-but-internally-consistent primary price would sail
+     * through untouched otherwise. Unlike "no second opinion available" (fails open),
+     * staleness is something this function actually KNOWS is wrong, so it fails CLOSED.
+     */
+    describe('staleness check', () => {
+        test('rejects a primary price older than maxStalenessMs, without even checking the secondary', async () => {
+            const sixMinutesAgo = Date.now() - 6 * 60 * 1000;
+
+            const result = await dataProvider.verifyPriceCrossProvider('NFLX', 71.72, { primaryFetchedAt: sixMinutesAgo });
+
+            expect(result.agree).toBe(false);
+            expect(result.reason).toBe('stale_primary_price');
+            expect(result.ageMs).toBeGreaterThanOrEqual(6 * 60 * 1000);
+            expect(axios.get).not.toHaveBeenCalled();
+        });
+
+        test('accepts a primary price within the staleness window and still runs the normal cross-check', async () => {
+            mockPolygonQuote(71.70);
+            const thirtySecondsAgo = Date.now() - 30 * 1000;
+
+            const result = await dataProvider.verifyPriceCrossProvider('NFLX', 71.72, { primaryFetchedAt: thirtySecondsAgo });
+
+            expect(result.agree).toBe(true);
+            expect(result.reason).toBe('agree');
+        });
+
+        test('a custom maxStalenessMs is respected', async () => {
+            mockPolygonQuote(71.70);
+            const twoMinutesAgo = Date.now() - 2 * 60 * 1000;
+
+            const strict = await dataProvider.verifyPriceCrossProvider('NFLX', 71.72, { primaryFetchedAt: twoMinutesAgo, maxStalenessMs: 60 * 1000 });
+            const lenient = await dataProvider.verifyPriceCrossProvider('NFLX', 71.72, { primaryFetchedAt: twoMinutesAgo, maxStalenessMs: 5 * 60 * 1000 });
+
+            expect(strict.reason).toBe('stale_primary_price');
+            expect(lenient.reason).toBe('agree');
+        });
+
+        test('skips the staleness check entirely when no primaryFetchedAt is given (opt-in, not required)', async () => {
+            mockPolygonQuote(71.70);
+
+            const result = await dataProvider.verifyPriceCrossProvider('NFLX', 71.72);
+
+            expect(result.reason).toBe('agree');
+        });
+    });
 });

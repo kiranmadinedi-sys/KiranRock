@@ -6,6 +6,10 @@ jest.mock('../src/services/precomputedUniverseService', () => ({}));
 jest.mock('../src/services/enhancedAITradingBot', () => ({
     analyzeStockWithAI: jest.fn(),
     getVixLevel: jest.fn().mockResolvedValue(15),
+    getSkipReasonFamily: jest.fn((code) => {
+        const m = { WEINSTEIN_STAGE_3: 'STRATEGY', WEINSTEIN_STAGE_4: 'STRATEGY', RISK_FLAG_HARD_SKIP: 'RISK', NO_QUOTE_DATA: 'DATA', INSUFFICIENT_HISTORY: 'DATA', INTERNAL_ERROR: 'SYSTEM' };
+        return m[code] || 'RELIABILITY';
+    }),
 }));
 
 const { query } = require('../src/config/database');
@@ -34,7 +38,14 @@ describe('nightlyUniverseScanService — real skip-reason propagation', () => {
         jest.useFakeTimers();
         jest.clearAllMocks();
         query.mockResolvedValue({ rows: [] });
-        require('../src/services/enhancedAITradingBot').getVixLevel.mockResolvedValue(15);
+        const bot = require('../src/services/enhancedAITradingBot');
+        bot.getVixLevel.mockResolvedValue(15);
+        // jest.clearAllMocks() wipes the factory-level implementation above too, not just
+        // call history — same lesson from earlier this week (portfolioTrackingServiceCashGuard).
+        bot.getSkipReasonFamily.mockImplementation((code) => {
+            const m = { WEINSTEIN_STAGE_3: 'STRATEGY', WEINSTEIN_STAGE_4: 'STRATEGY', RISK_FLAG_HARD_SKIP: 'RISK', NO_QUOTE_DATA: 'DATA', INSUFFICIENT_HISTORY: 'DATA', INTERNAL_ERROR: 'SYSTEM' };
+            return m[code] || 'RELIABILITY';
+        });
         marketRegimeService.getMarketRegime.mockResolvedValue(null);
     });
     afterEach(() => {
@@ -50,7 +61,7 @@ describe('nightlyUniverseScanService — real skip-reason propagation', () => {
     describe('rescanSymbol', () => {
         test('a real skip reason from analyzeStockWithAI is surfaced, not the generic fallback', async () => {
             analyzeStockWithAI.mockImplementation(async (symbol, vix, yf, regime, liveMode, onSkip) => {
-                onSkip('WEINSTEIN_STAGE_4 (price 343.7 vs sma200 346.47, rising=false)');
+                onSkip('WEINSTEIN_STAGE_4', 'price 343.7 vs sma200 346.47, rising=false');
                 return null;
             });
 
@@ -65,7 +76,7 @@ describe('nightlyUniverseScanService — real skip-reason propagation', () => {
 
         test('a fraud/risk-flag hard skip is surfaced distinctly', async () => {
             analyzeStockWithAI.mockImplementation(async (symbol, vix, yf, regime, liveMode, onSkip) => {
-                onSkip('RISK_FLAG_HARD_SKIP (litigation_material, fraud_allegation)');
+                onSkip('RISK_FLAG_HARD_SKIP', 'litigation_material, fraud_allegation');
                 return null;
             });
 
@@ -96,7 +107,7 @@ describe('nightlyUniverseScanService — real skip-reason propagation', () => {
     describe('rescanFailedSymbols', () => {
         test('a real skip reason is recorded per-symbol, tagged as a rescan', async () => {
             analyzeStockWithAI.mockImplementation(async (symbol, vix, yf, regime, liveMode, onSkip) => {
-                onSkip('NO_QUOTE_DATA');
+                onSkip('NO_QUOTE_DATA', null);
                 return null;
             });
 
@@ -105,6 +116,31 @@ describe('nightlyUniverseScanService — real skip-reason propagation', () => {
             expect(result.results).toEqual([{ symbol: 'NFLX', ok: false }]);
             const upsertCall = query.mock.calls.find(c => c[0].includes('INSERT INTO daily_universe_analysis'));
             expect(upsertCall[1]).toEqual(expect.arrayContaining(['NO_QUOTE_DATA (rescan)']));
+            // The split code/detail now also lands in metadata, not just the combined exclusion_reason string.
+            const metadataArg = JSON.parse(upsertCall[1][9]);
+            expect(metadataArg).toEqual({ skipCode: 'NO_QUOTE_DATA', skipDetail: null });
+        });
+    });
+
+    describe('getSkipReasonBreakdown', () => {
+        test('groups stored skip codes by exact code and by family', async () => {
+            const { getSkipReasonBreakdown } = require('../src/services/nightlyUniverseScanService');
+            query.mockResolvedValue({
+                rows: [
+                    { code: 'WEINSTEIN_STAGE_4', n: '1843' },
+                    { code: 'NO_QUOTE_DATA', n: '412' },
+                    { code: 'RISK_FLAG_HARD_SKIP', n: '376' },
+                ],
+            });
+
+            const result = await getSkipReasonBreakdown('2026-09-26');
+
+            expect(result.byCode).toEqual([
+                { code: 'WEINSTEIN_STAGE_4', count: 1843 },
+                { code: 'NO_QUOTE_DATA', count: 412 },
+                { code: 'RISK_FLAG_HARD_SKIP', count: 376 },
+            ]);
+            expect(result.byFamily).toEqual({ STRATEGY: 1843, DATA: 412, RISK: 376 });
         });
     });
 });

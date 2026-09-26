@@ -17,7 +17,7 @@ const marketScreenerService  = require('./marketScreenerService');
 const marketRegimeService    = require('./marketRegimeService');
 const alertService           = require('./telegramAlertService');
 const precomputedSvc         = require('./precomputedUniverseService');
-const { analyzeStockWithAI, getVixLevel } = require('./enhancedAITradingBot');
+const { analyzeStockWithAI, getVixLevel, getSkipReasonFamily } = require('./enhancedAITradingBot');
 
 // This scan's own two codes, part of the same taxonomy as enhancedAITradingBot.js's
 // SKIP_REASONS but not exported from there — these describe the _analyzeWithRetry
@@ -26,6 +26,10 @@ const { analyzeStockWithAI, getVixLevel } = require('./enhancedAITradingBot');
 const SCAN_SKIP_REASONS = Object.freeze({
     UNKNOWN:         'UNKNOWN',
     RETRY_EXHAUSTED: 'RETRY_EXHAUSTED',
+    // A successful analysis came back, but something in this loop's OWN post-processing
+    // (smoothing, upsert) threw — genuinely different from analyzeStockWithAI/
+    // _analyzeWithRetry never producing a result at all.
+    SCAN_LOOP_ERROR: 'SCAN_LOOP_ERROR',
 });
 
 // One symbol at a time with a 10-second pause — ~6 stocks/min.
@@ -36,6 +40,10 @@ const BATCH_DELAY_MS = 10_000;
 
 let _scanRunning = false;
 let _scanStartTime = null; // exposed via getScanStartTime() — see enhancedAIScheduler.js's runScanHealthCheck for why
+
+function _combineReason(code, detail) {
+    return detail ? `${code} (${detail})` : code;
+}
 
 /**
  * Calls analyzeStockWithAI with retry on null result, 429 rate-limits, or any transient error.
@@ -48,36 +56,42 @@ let _scanStartTime = null; // exposed via getScanStartTime() — see enhancedAIS
  * Kept at 1 retry (not 2) so rate-limited tickers fail fast (~15-45s) rather
  * than burning 90s per ticker and causing 12-hour null loops.
  *
- * Returns { analysis: null, reason } once all retries are exhausted, instead of
- * a bare null — found 2026-09-25: every null case (a real fraud-risk hard-skip,
- * a genuine Weinstein-downtrend skip, a missing quote, and an actual internal
- * error) all collapsed into the identical generic "analyzeStockWithAI returned
- * null" exclusion_reason, with no way to tell them apart short of re-running
- * the analysis live with extra instrumentation — which is how AVGO/GOOGL/NFLX
- * were actually diagnosed that day. analyzeStockWithAI's own onSkip callback
- * now reports the real reason; this just carries it through to the DB.
+ * Returns { analysis: null, code, detail, reason } once all retries are exhausted,
+ * instead of a bare null — found 2026-09-25: every null case (a real fraud-risk
+ * hard-skip, a genuine Weinstein-downtrend skip, a missing quote, and an actual
+ * internal error) all collapsed into the identical generic "analyzeStockWithAI
+ * returned null" exclusion_reason, with no way to tell them apart short of
+ * re-running the analysis live with extra instrumentation — which is how
+ * AVGO/GOOGL/NFLX were actually diagnosed that day. analyzeStockWithAI's own
+ * onSkip callback now reports the real code + detail separately (2026-09-26,
+ * extending the initial 2026-09-25 fix which combined them into one string);
+ * `code` and `detail` are kept apart here too for storing in metadata, and
+ * `reason` is the combined display string, kept for the exclusion_reason TEXT
+ * column so existing readers of that field see no format change.
  */
 async function _analyzeWithRetry(symbol, vixLevel, regime, maxRetries = 1) {
-    let lastReason = SCAN_SKIP_REASONS.UNKNOWN;
+    let lastCode = SCAN_SKIP_REASONS.UNKNOWN, lastDetail = null;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-            const result = await analyzeStockWithAI(symbol, vixLevel, null, regime, false, (reason) => { lastReason = reason; });
+            const result = await analyzeStockWithAI(symbol, vixLevel, null, regime, false, (code, detail) => { lastCode = code; lastDetail = detail; });
 
-            if (result != null) return { analysis: result, reason: null }; // success
+            if (result != null) return { analysis: result, code: null, detail: null, reason: null }; // success
 
             // analyzeStockWithAI returned null — retry with a pause
             if (attempt < maxRetries) {
                 const waitMs = 15_000;
-                console.warn(`[NightlyScan] null result for ${symbol} (${lastReason}) — retrying in ${waitMs / 1000}s (attempt ${attempt + 1}/${maxRetries})`);
+                console.warn(`[NightlyScan] null result for ${symbol} (${_combineReason(lastCode, lastDetail)}) — retrying in ${waitMs / 1000}s (attempt ${attempt + 1}/${maxRetries})`);
                 await new Promise(r => setTimeout(r, waitMs));
                 continue;
             }
-            return { analysis: null, reason: lastReason }; // all retries exhausted
+            return { analysis: null, code: lastCode, detail: lastDetail, reason: _combineReason(lastCode, lastDetail) }; // all retries exhausted
 
         } catch (err) {
             if (attempt >= maxRetries) {
                 console.warn(`[NightlyScan] ${symbol} failed after ${maxRetries + 1} attempts: ${err.message}`);
-                return { analysis: null, reason: `${SCAN_SKIP_REASONS.RETRY_EXHAUSTED} (${err.message.slice(0, 150)})` }; // convert to null so the loop continues rather than crashing the whole scan
+                const detail = err.message.slice(0, 150);
+                // convert to null so the loop continues rather than crashing the whole scan
+                return { analysis: null, code: SCAN_SKIP_REASONS.RETRY_EXHAUSTED, detail, reason: _combineReason(SCAN_SKIP_REASONS.RETRY_EXHAUSTED, detail) };
             }
 
             const is429 = /429|too many requests/i.test(err.message || '');
@@ -87,7 +101,7 @@ async function _analyzeWithRetry(symbol, vixLevel, regime, maxRetries = 1) {
             await new Promise(r => setTimeout(r, waitMs));
         }
     }
-    return { analysis: null, reason: lastReason };
+    return { analysis: null, code: lastCode, detail: lastDetail, reason: _combineReason(lastCode, lastDetail) };
 }
 
 function _todayET() {
@@ -177,9 +191,17 @@ function _computeTier(marketCap) {
 
 /**
  * Upserts one analysis row into daily_universe_analysis.
+ *
+ * skipInfo ({ code, detail }, optional) — added 2026-09-26 alongside the
+ * code/detail split in analyzeStockWithAI's onSkip. exclusion_reason stays the
+ * existing combined display string (no format change for existing readers of
+ * that column); when there's no successful analysis, skipInfo's code/detail
+ * are additionally stored as their own metadata fields so a report can group
+ * by the stable code without re-parsing exclusion_reason's free text.
  */
-async function _upsert(symbol, date, analysis, passedPrescreen, exclusionReason) {
+async function _upsert(symbol, date, analysis, passedPrescreen, exclusionReason, skipInfo = null) {
     const tier = _computeTier(analysis?.marketCap);
+    const metadata = analysis ? analysis : (skipInfo ? { skipCode: skipInfo.code, skipDetail: skipInfo.detail } : {});
     await query(
         `INSERT INTO daily_universe_analysis
              (symbol, analysis_date, ai_score, recommendation, setup_family,
@@ -206,7 +228,7 @@ async function _upsert(symbol, date, analysis, passedPrescreen, exclusionReason)
             analysis?.marketCap   ?? null,
             passedPrescreen,
             exclusionReason,
-            analysis ? JSON.stringify(analysis) : '{}',
+            JSON.stringify(metadata),
             tier
         ]
     );
@@ -389,10 +411,10 @@ async function runNightlyUniverseScan(opts = {}) {
                     if (isNewTicker) newTickers.push(stock.symbol);
 
                     try {
-                        const { analysis, reason } = await _analyzeWithRetry(stock.symbol, vixLevel, regime);
+                        const { analysis, reason, code, detail } = await _analyzeWithRetry(stock.symbol, vixLevel, regime);
 
                         if (!analysis) {
-                            await _upsert(stock.symbol, today, null, false, reason || 'analyzeStockWithAI returned null');
+                            await _upsert(stock.symbol, today, null, false, reason || 'analyzeStockWithAI returned null', { code, detail });
                             failed++;
                             return;
                         }
@@ -429,8 +451,8 @@ async function runNightlyUniverseScan(opts = {}) {
                         if (passedPrescreen) { passed++; } else { filtered++; }
                         analyzed++;
                     } catch (err) {
-                        const reason = (err.message || 'unknown error').slice(0, 200);
-                        await _upsert(stock.symbol, today, null, false, reason).catch(() => {});
+                        const detail = (err.message || 'unknown error').slice(0, 200);
+                        await _upsert(stock.symbol, today, null, false, detail, { code: SCAN_SKIP_REASONS.SCAN_LOOP_ERROR, detail }).catch(() => {});
                         failed++;
                     }
                 })
@@ -691,9 +713,9 @@ async function rescanFailedSymbols(date, symbols) {
     for (let i = 0; i < symbols.length; i++) {
         const symbol = symbols[i];
         try {
-            const { analysis, reason } = await _analyzeWithRetry(symbol, vixLevel, regime);
+            const { analysis, reason, code, detail } = await _analyzeWithRetry(symbol, vixLevel, regime);
             if (!analysis) {
-                await _upsert(symbol, date, null, false, reason ? `${reason} (rescan)` : 'analyzeStockWithAI returned null (rescan)');
+                await _upsert(symbol, date, null, false, reason ? `${reason} (rescan)` : 'analyzeStockWithAI returned null (rescan)', { code, detail });
                 stillFailed++;
                 results.push({ symbol, ok: false });
             } else {
@@ -707,7 +729,8 @@ async function rescanFailedSymbols(date, symbols) {
                 results.push({ symbol, ok: true, score: analysis.aiScore, recommendation: analysis.recommendation });
             }
         } catch (err) {
-            await _upsert(symbol, date, null, false, (err.message || 'unknown error').slice(0, 200)).catch(() => {});
+            const detail = (err.message || 'unknown error').slice(0, 200);
+            await _upsert(symbol, date, null, false, detail, { code: SCAN_SKIP_REASONS.SCAN_LOOP_ERROR, detail }).catch(() => {});
             stillFailed++;
             results.push({ symbol, ok: false, error: err.message });
         }
@@ -721,4 +744,32 @@ async function rescanFailedSymbols(date, symbols) {
     return { date, attempted: symbols.length, analyzed, passed, filtered, stillFailed, results };
 }
 
-module.exports = { runNightlyUniverseScan, rescanSymbol, rescanFailedSymbols, isScanRunning, getScanStartTime };
+/**
+ * "Why did we miss N candidates today" — added 2026-09-26 alongside the code/detail
+ * split. Groups every filtered-out symbol's stored skip code by both the exact code
+ * and its coarser family (DATA/STRATEGY/RISK/SYSTEM/RELIABILITY), so a report can
+ * answer either "how many failed for WEINSTEIN_STAGE_4 specifically" or the higher-
+ * level "how much of today's miss rate was data problems vs. genuine strategy
+ * filtering vs. infrastructure." Reads the skipCode/skipDetail fields _upsert began
+ * writing into metadata the same day — nothing here is retroactive over older rows
+ * that only have the old combined exclusion_reason string.
+ */
+async function getSkipReasonBreakdown(date = _todayET()) {
+    const { rows } = await query(
+        `SELECT metadata->>'skipCode' AS code, COUNT(*) AS n
+         FROM daily_universe_analysis
+         WHERE analysis_date = $1 AND passed_prescreen = false AND metadata->>'skipCode' IS NOT NULL
+         GROUP BY metadata->>'skipCode'
+         ORDER BY n DESC`,
+        [date]
+    );
+    const byCode = rows.map(r => ({ code: r.code, count: parseInt(r.n, 10) }));
+    const byFamily = {};
+    for (const { code, count } of byCode) {
+        const family = getSkipReasonFamily(code);
+        byFamily[family] = (byFamily[family] || 0) + count;
+    }
+    return { date, byCode, byFamily };
+}
+
+module.exports = { runNightlyUniverseScan, rescanSymbol, rescanFailedSymbols, isScanRunning, getScanStartTime, getSkipReasonBreakdown };

@@ -1010,10 +1010,26 @@ const localProvider = (() => {
  * error — since the goal is to catch a genuine cross-provider price mismatch, not
  * to make trading impossible on anything one provider happens to be missing. Only
  * a real, present, and materially different second price blocks the trade.
+ *
+ * Staleness check added 2026-09-26: the two-provider comparison alone only proves
+ * two prices agree AT THE SAME MOMENT — a stale-but-internally-consistent primary
+ * price (fetched minutes ago, never refreshed) would sail through untouched. This
+ * fails CLOSED, unlike the "no second opinion" cases above: staleness is something
+ * this function actually KNOWS is wrong, not a case of missing information, so the
+ * same "know something's wrong -> block; don't know -> don't block" asymmetry the
+ * rest of this function already uses applies here too. Opt-in via primaryFetchedAt
+ * (a timestamp, e.g. analyzeStockWithAI's own analysis.priceFetchedAt) — omitting it
+ * skips the check entirely rather than guessing at an age.
  */
-async function verifyPriceCrossProvider(symbol, primaryPrice, { toleranceThreshold = 0.03 } = {}) {
+async function verifyPriceCrossProvider(symbol, primaryPrice, { toleranceThreshold = 0.03, primaryFetchedAt = null, maxStalenessMs = 5 * 60 * 1000 } = {}) {
     if (!Number.isFinite(primaryPrice) || primaryPrice <= 0) {
         return { agree: false, reason: 'invalid_primary_price', primaryPrice, secondaryPrice: null, deviationPct: null };
+    }
+    if (primaryFetchedAt != null) {
+        const ageMs = Date.now() - primaryFetchedAt;
+        if (ageMs > maxStalenessMs) {
+            return { agree: false, reason: 'stale_primary_price', primaryPrice, secondaryPrice: null, deviationPct: null, ageMs };
+        }
     }
     const secondaryProvider = activeProvider === polygonProvider ? alpacaProvider : polygonProvider;
     try {

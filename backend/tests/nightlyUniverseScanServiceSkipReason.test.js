@@ -10,6 +10,11 @@ jest.mock('../src/services/enhancedAITradingBot', () => ({
         const m = { WEINSTEIN_STAGE_3: 'STRATEGY', WEINSTEIN_STAGE_4: 'STRATEGY', RISK_FLAG_HARD_SKIP: 'RISK', NO_QUOTE_DATA: 'DATA', INSUFFICIENT_HISTORY: 'DATA', INTERNAL_ERROR: 'SYSTEM' };
         return m[code] || 'RELIABILITY';
     }),
+    SKIP_REASONS: {
+        NO_QUOTE_DATA: 'NO_QUOTE_DATA', INSUFFICIENT_HISTORY: 'INSUFFICIENT_HISTORY',
+        WEINSTEIN_STAGE_3: 'WEINSTEIN_STAGE_3', WEINSTEIN_STAGE_4: 'WEINSTEIN_STAGE_4',
+        RISK_FLAG_HARD_SKIP: 'RISK_FLAG_HARD_SKIP', INTERNAL_ERROR: 'INTERNAL_ERROR',
+    },
 }));
 
 const { query } = require('../src/config/database');
@@ -172,6 +177,45 @@ describe('nightlyUniverseScanService — real skip-reason propagation', () => {
             expect(text).toContain('STRATEGY');
             expect(text).toContain('WEINSTEIN_STAGE_4');
             expect(text).toContain('1843');
+        });
+    });
+
+    /**
+     * 2026-09-27 real incident: the same night the skip-reason taxonomy shipped, the
+     * "high error rate" check fired a false alarm ("261 error failures") because its
+     * old string match on 'api_rate_limit'/'error' didn't recognize any of the new
+     * exact codes and they all fell into a generic bucket. The naive fix (route every
+     * category through getSkipReasonFamily) would have created a SECOND bug: legacy
+     * labels like 'weak_signal' (a completely normal HOLD/SELL score) aren't real
+     * taxonomy codes, and getSkipReasonFamily's fallback default is 'RELIABILITY' —
+     * routing them through it would count ordinary scored-but-filtered stocks as
+     * errors too. _isErrorLikeCategory guards against both.
+     */
+    describe('_isErrorLikeCategory', () => {
+        const { _isErrorLikeCategory } = require('../src/services/nightlyUniverseScanService');
+
+        test('legacy error-ish category strings are still recognized', () => {
+            expect(_isErrorLikeCategory('error')).toBe(true);
+            expect(_isErrorLikeCategory('api_rate_limit')).toBe(true);
+        });
+
+        test('a real taxonomy code in an error-like family counts', () => {
+            expect(_isErrorLikeCategory('NO_QUOTE_DATA')).toBe(true);        // DATA
+            expect(_isErrorLikeCategory('INTERNAL_ERROR')).toBe(true);       // SYSTEM
+            expect(_isErrorLikeCategory('UNKNOWN')).toBe(true);              // RELIABILITY (this scan's own code)
+        });
+
+        test('a real taxonomy code in a non-error family (ordinary filtering) does not count', () => {
+            expect(_isErrorLikeCategory('WEINSTEIN_STAGE_4')).toBe(false);   // STRATEGY
+            expect(_isErrorLikeCategory('RISK_FLAG_HARD_SKIP')).toBe(false); // RISK
+        });
+
+        test('a legacy category LABEL that is not a real taxonomy code never goes through the family fallback', () => {
+            // Without the _KNOWN_SKIP_CODES guard, getSkipReasonFamily's default
+            // ('RELIABILITY') would wrongly make ALL of these look error-like.
+            expect(_isErrorLikeCategory('weak_signal')).toBe(false);
+            expect(_isErrorLikeCategory('score_borderline')).toBe(false);
+            expect(_isErrorLikeCategory('other')).toBe(false);
         });
     });
 });

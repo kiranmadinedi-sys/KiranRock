@@ -17,7 +17,7 @@ const marketScreenerService  = require('./marketScreenerService');
 const marketRegimeService    = require('./marketRegimeService');
 const alertService           = require('./telegramAlertService');
 const precomputedSvc         = require('./precomputedUniverseService');
-const { analyzeStockWithAI, getVixLevel, getSkipReasonFamily } = require('./enhancedAITradingBot');
+const { analyzeStockWithAI, getVixLevel, getSkipReasonFamily, SKIP_REASONS } = require('./enhancedAITradingBot');
 
 // This scan's own two codes, part of the same taxonomy as enhancedAITradingBot.js's
 // SKIP_REASONS but not exported from there — these describe the _analyzeWithRetry
@@ -31,6 +31,32 @@ const SCAN_SKIP_REASONS = Object.freeze({
     // _analyzeWithRetry never producing a result at all.
     SCAN_LOOP_ERROR: 'SCAN_LOOP_ERROR',
 });
+
+// The full set of real taxonomy codes — analyzeStockWithAI's own (imported above) plus
+// this scan's own three. Used to tell a real code apart from a legacy category LABEL
+// (e.g. 'weak_signal', 'analysis_null') that getExclusionSummary can also return for
+// pre-taxonomy rows — those aren't in this set, and getSkipReasonFamily's fallback
+// default ('RELIABILITY') must never apply to them.
+const _KNOWN_SKIP_CODES = new Set([...Object.values(SKIP_REASONS), ...Object.values(SCAN_SKIP_REASONS)]);
+
+/**
+ * Found 2026-09-27: getExclusionSummary started returning the new taxonomy's exact
+ * codes the same night it shipped (2026-09-26), and this "high error rate" check's
+ * old string match on just 'api_rate_limit'/'error' didn't recognize any of them —
+ * every one fell through to the generic fallback, producing a real false-alarm
+ * ("High error rate: 261 error failures" when most of it was ordinary
+ * WEINSTEIN_STAGE_4/RISK_FLAG_HARD_SKIP filtering, not errors). DATA/SYSTEM/
+ * RELIABILITY families are genuine provider/infrastructure problems worth flagging;
+ * STRATEGY/RISK are the system correctly filtering candidates, not a failure — and
+ * a legacy category label that isn't a real taxonomy code (e.g. 'weak_signal') must
+ * never go through the family lookup at all, since its fallback default would
+ * wrongly count completely normal HOLD/SELL scores as errors too.
+ */
+const _ERROR_LIKE_FAMILIES = new Set(['DATA', 'SYSTEM', 'RELIABILITY']);
+function _isErrorLikeCategory(category) {
+    return category === 'api_rate_limit' || category === 'error' ||
+        (_KNOWN_SKIP_CODES.has(category) && _ERROR_LIKE_FAMILIES.has(getSkipReasonFamily(category)));
+}
 
 // One symbol at a time with a 10-second pause — ~6 stocks/min.
 // 10s (not 6s) gives Yahoo Finance headroom after a day of heavy usage
@@ -483,10 +509,10 @@ async function runNightlyUniverseScan(opts = {}) {
             console.log('[NightlyScan] Exclusion breakdown:',
                 exclusionSummary.map(r => `${r.category}: ${r.count}`).join(' | ')
             );
-            // Flag if high error rate — likely a data provider issue
-            const errorRow = exclusionSummary.find(r => r.category === 'api_rate_limit' || r.category === 'error');
-            if (errorRow && errorRow.count > universe.length * 0.10) {
-                console.warn(`[NightlyScan] ⚠️ High error rate: ${errorRow.count} ${errorRow.category} failures`);
+            // Flag if high error rate — likely a data provider issue.
+            const errorCount = exclusionSummary.filter(r => _isErrorLikeCategory(r.category)).reduce((s, r) => s + r.count, 0);
+            if (errorCount > universe.length * 0.10) {
+                console.warn(`[NightlyScan] ⚠️ High error rate: ${errorCount} data/system/reliability failures`);
             }
         }
 
@@ -785,4 +811,4 @@ function formatSkipReasonBreakdown({ date, total, byCode, byFamily }) {
     return lines.join('\n');
 }
 
-module.exports = { runNightlyUniverseScan, rescanSymbol, rescanFailedSymbols, isScanRunning, getScanStartTime, getSkipReasonBreakdown, formatSkipReasonBreakdown };
+module.exports = { runNightlyUniverseScan, rescanSymbol, rescanFailedSymbols, isScanRunning, getScanStartTime, getSkipReasonBreakdown, formatSkipReasonBreakdown, _isErrorLikeCategory };

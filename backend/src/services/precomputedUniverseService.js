@@ -121,6 +121,16 @@ async function getDailyScanSummary() {
  * Groups exclusion reasons for today's filtered stocks into readable categories.
  * Helps spot systemic data gaps (e.g., "80% of stocks returned null — provider down").
  *
+ * Found 2026-09-27: this text-pattern matching predates the 2026-09-26 skip-reason
+ * taxonomy (SKIP_REASONS in enhancedAITradingBot.js) — none of the new exact codes
+ * (WEINSTEIN_STAGE_4, RISK_FLAG_HARD_SKIP, NO_QUOTE_DATA, ...) match any of the old
+ * patterns below, so every one of them fell into the generic 'error' bucket. That's
+ * exactly what triggered a real "High error rate: 261 error failures" warning the
+ * same night the taxonomy shipped — most of that 261 was ordinary Weinstein/risk-flag
+ * filtering, not errors at all. Now prefers the new taxonomy's own exact code
+ * (stored in metadata.skipCode since that fix) when present, falling back to the old
+ * text patterns only for rows that predate it.
+ *
  * @param {string} [date]  — YYYY-MM-DD, defaults to today ET
  * @returns {{ category: string, count: number }[]}
  */
@@ -132,6 +142,8 @@ async function getExclusionSummary(date) {
         const res = await query(
             `SELECT
                 CASE
+                    WHEN metadata->>'skipCode' IS NOT NULL
+                        THEN metadata->>'skipCode'
                     WHEN exclusion_reason ILIKE '%STRONG BUY%' OR exclusion_reason ILIKE '% BUY%'
                         THEN 'score_borderline'
                     WHEN exclusion_reason ILIKE '%HOLD%' OR exclusion_reason ILIKE '%SELL%'

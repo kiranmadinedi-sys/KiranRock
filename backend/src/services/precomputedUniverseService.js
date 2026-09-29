@@ -69,13 +69,26 @@ async function isAvailable(minCount = 10) {
  * @param {number} opts.limit     — max records to return (default 120)
  */
 async function loadCandidates({ minScore = 85, limit = 120 } = {}) {
+    // Found 2026-09-27, investigating a "missed opportunity" alert: ORDER BY ai_score DESC
+    // alone has no tie-breaker, so when many symbols hit the same score — 68 symbols tied
+    // at the exact maximum of 100.00 on 2026-09-24, for a LIMIT of 40 — Postgres falls back
+    // to physical row order, which is STABLE and REPEATABLE (verified: the same query run
+    // twice returns identical rows in identical order). That isn't a quality signal, it's
+    // an accident of insertion order, but it behaves exactly like one: the SAME subset of
+    // tied-for-first candidates wins every single cycle that day (ORBS, DLXY, and SOAR all
+    // hit exactly 100.00 on days they were never bought anywhere, alongside 25+ other
+    // symbols equally deserving of one of the 40 slots that day). A hash of (symbol,
+    // analysis_date) breaks ties fairly and — since it changes every day — rotates which
+    // members of a tied cluster get in, rather than freezing the same winners and losers
+    // in place indefinitely. This does not change who QUALIFIES (same WHERE clause, same
+    // LIMIT, same cost) — only which of several equally-scored candidates a tie resolves to.
     const res = await query(
         `SELECT symbol, ai_score, recommendation, setup_family, sector, market_cap, metadata
          FROM daily_universe_analysis
          WHERE analysis_date = ${LATEST_DATE_SQL}
            AND passed_prescreen = true
            AND ai_score >= $1
-         ORDER BY ai_score DESC
+         ORDER BY ai_score DESC, md5(symbol || analysis_date::text) ASC
          LIMIT $2`,
         [minScore, limit]
     );

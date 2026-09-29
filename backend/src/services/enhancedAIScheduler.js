@@ -1046,14 +1046,41 @@ async function runMorningBriefing() {
  * Nightly universe scan trigger — called every 5 min by the scheduler loop.
  *
  * Completion-driven: keeps retrying (missing tickers only) until today's
- * analysis count reaches SCAN_COMPLETE_THRESHOLD. This handles partial scans
+ * analysis count reaches a completion threshold. This handles partial scans
  * caused by backend restarts, rate-limit crashes, or any other interruption.
  *
  * Operating window: Mon–Fri, 16:15–23:00 ET.
  * Stops for the day once complete so it doesn't burn API quota overnight.
  */
-const SCAN_COMPLETE_THRESHOLD = 420; // ~92% of 455-symbol universe (allows for ETF nulls)
+// Found 2026-09-30: this was a fixed 420 ("~92% of a 455-symbol universe") from when the
+// universe really was that size. The universe has since grown roughly 5x (2,390+ some
+// recent nights) without this ever being revisited, so ANY count past 420 — less than a
+// fifth of a real night's total — got declared "complete," silently stopping the scan
+// early. Confirmed live 2026-09-28: stopped at 1,156/2,390 (48%), 1,242 symbols never
+// analyzed, only caught because a "missed opportunity" investigation led here. Now scales
+// with the REAL target size for that night (hermes_symbol_log, the same source the scan
+// itself builds its candidate list from) instead of a number that can only go stale again
+// as the universe keeps changing size. 90%, not something closer to 100%, deliberately —
+// permanent per-symbol failures (delisted tickers, no data) are normal and expected, and
+// the 2026-08-26 incident this trigger's own missingOnly-resume logic already guards
+// against was exactly an infinite retry loop chasing the last few always-failing symbols;
+// a too-strict threshold would invite the same failure mode back via this angle instead.
+const SCAN_COMPLETION_RATIO = 0.90;
+const SCAN_COMPLETE_THRESHOLD_FALLBACK = 420; // only used if hermes_symbol_log has no rows for the date yet
 let _scanCompletedDate = null;       // date string when we saw >= threshold for the day
+
+/** Real target universe size for a date, from the same source the scan itself uses to build its candidate list. */
+async function _getTargetUniverseSize(etDate) {
+    try {
+        const { rows } = await query(
+            `SELECT COUNT(*) AS n FROM hermes_symbol_log WHERE universe_date = $1 AND passed = true AND (tier != 1 OR tier IS NULL)`,
+            [etDate]
+        );
+        return parseInt(rows[0]?.n || 0, 10);
+    } catch {
+        return 0;
+    }
+}
 
 async function runNightlyScanTrigger() {
     const { day: etDay, hour: etHour, min: etMin, date: etDate } = _getETNow();
@@ -1083,7 +1110,7 @@ async function runNightlyScanTrigger() {
     let todayCount = 0;
     try {
         // COUNT(*) of all rows, not just ai_score IS NOT NULL — the latter never reached
-        // SCAN_COMPLETE_THRESHOLD on a night with any permanent failures (delisted/bad
+        // the completion threshold on a night with any permanent failures (delisted/bad
         // data symbols), since those write a row with a null score and stay null forever.
         // Paired with the same fix in nightlyUniverseScanService.js's missingOnly resume
         // set: found 2026-08-26, both together caused an infinite ~9min retry loop on the
@@ -1114,10 +1141,15 @@ async function runNightlyScanTrigger() {
         }
     } catch (_) { return; }
 
+    const targetSize = await _getTargetUniverseSize(etDate);
+    const completeThreshold = targetSize > 0
+        ? Math.round(targetSize * SCAN_COMPLETION_RATIO)
+        : SCAN_COMPLETE_THRESHOLD_FALLBACK;
+
     // Scan is complete for today — stop checking
-    if (todayCount >= SCAN_COMPLETE_THRESHOLD) {
+    if (todayCount >= completeThreshold) {
         if (_scanCompletedDate !== etDate) {
-            console.log(`[NightlyScanTrigger] ✅ Complete for ${etDate}: ${todayCount} symbols analyzed`);
+            console.log(`[NightlyScanTrigger] ✅ Complete for ${etDate}: ${todayCount}/${targetSize || '?'} symbols analyzed (threshold ${completeThreshold})`);
             _scanCompletedDate = etDate;
         }
         return;
@@ -1129,7 +1161,7 @@ async function runNightlyScanTrigger() {
 
     // Launch scan — resume mode if partial data exists, full scan if starting fresh
     const isResume = todayCount > 0;
-    console.log(`[NightlyScanTrigger] ${isResume ? `Resuming (${todayCount} done, ${SCAN_COMPLETE_THRESHOLD - todayCount}+ remaining)` : 'Starting'} nightly scan for ${etDate}`);
+    console.log(`[NightlyScanTrigger] ${isResume ? `Resuming (${todayCount} done, ${completeThreshold - todayCount}+ remaining of ~${targetSize || '?'})` : 'Starting'} nightly scan for ${etDate}`);
 
     nightlyScanSvc.runNightlyUniverseScan({ missingOnly: isResume })
         .then(r => {
@@ -1154,7 +1186,7 @@ let _deadlineAlertSentFor = null;
  *      but hasn't written a new scored symbol in 45+ minutes. Fires at most once per
  *      hour so a genuinely slow-but-alive scan doesn't spam.
  *   2. Deadline miss — checked once, in the last few minutes before market open: did
- *      today's scan actually reach SCAN_COMPLETE_THRESHOLD? If not, today's trading
+ *      today's scan actually reach its completion threshold? If not, today's trading
  *      is about to run on stale/fallback data and someone should know before 9:30,
  *      not discover it by accident hours later.
  */
@@ -1177,6 +1209,10 @@ async function runScanHealthCheck() {
             const scored        = parseInt(rows[0]?.scored ?? 0, 10);
             const totalToday    = parseInt(rows[0]?.total ?? 0, 10);
             const cooldownOk    = Date.now() - _lastStallAlertAt > 60 * 60 * 1000;
+            const targetSize    = await _getTargetUniverseSize(etDate);
+            const completeThreshold = targetSize > 0
+                ? Math.round(targetSize * SCAN_COMPLETION_RATIO)
+                : SCAN_COMPLETE_THRESHOLD_FALLBACK;
 
             // A scan that already reached completion threshold naturally goes quiet —
             // nothing left to write — and isScanRunning() can still read true for a
@@ -1189,7 +1225,7 @@ async function runScanHealthCheck() {
             // anyway, because it only ever checked isScanRunning() + time-since-write,
             // never whether the day's work was actually done. Same false-positive
             // class as the earlier "Infinity min" fix, different trigger condition.
-            if (totalToday >= SCAN_COMPLETE_THRESHOLD) return;
+            if (totalToday >= completeThreshold) return;
 
             // Was `lastWrite ? ... : Infinity` — zero rows written yet is the NORMAL
             // state for the first 1-2+ hours of a run (the HERMES universe-build pass
@@ -1222,7 +1258,7 @@ async function runScanHealthCheck() {
                     ? `Scan appears stalled — no new symbol scored in ${Math.round(staleMinutes)} min, still marked running`
                     : `Scan has been running ${Math.round(staleMinutes)} min without writing its first row — universe build may be stuck`;
                 await alertService.alertNightlyScanFailure({
-                    analyzed: scored, universe: SCAN_COMPLETE_THRESHOLD, failed: 0, reason
+                    analyzed: scored, universe: targetSize || completeThreshold, failed: 0, reason
                 });
             }
         } catch (e) {
@@ -1238,10 +1274,14 @@ async function runScanHealthCheck() {
                  FROM daily_universe_analysis WHERE analysis_date = CURRENT_DATE`
             );
             const scored = parseInt(rows[0]?.scored ?? 0, 10);
-            if (scored < SCAN_COMPLETE_THRESHOLD) {
+            const targetSize = await _getTargetUniverseSize(etDate);
+            const completeThreshold = targetSize > 0
+                ? Math.round(targetSize * SCAN_COMPLETION_RATIO)
+                : SCAN_COMPLETE_THRESHOLD_FALLBACK;
+            if (scored < completeThreshold) {
                 _deadlineAlertSentFor = etDate;
                 await alertService.alertNightlyScanFailure({
-                    analyzed: scored, universe: SCAN_COMPLETE_THRESHOLD, failed: 0,
+                    analyzed: scored, universe: targetSize || completeThreshold, failed: 0,
                     reason: `Only ${scored} symbols scored before market open — today's trading will run on stale/fallback data`
                 });
             }
@@ -1959,5 +1999,10 @@ module.exports = {
     runMorningStopVerification, // exported 2026-09-17 for the StopVerify false-alarm/silent-failure fix
     runWeeklyPnlReport,
     runCryptoWatchdog,
-    runEodCleanup // exported 2026-09-19 for the decision_phase EXIT->CLOSED auto-pause fix
+    runEodCleanup, // exported 2026-09-19 for the decision_phase EXIT->CLOSED auto-pause fix
+    // exported 2026-09-30 for the stale-completion-threshold fix (scan silently stopped at
+    // 1,156/2,390 symbols, 48%, because the threshold hadn't scaled with the universe's growth)
+    runNightlyScanTrigger,
+    runScanHealthCheck,
+    _getTargetUniverseSize
 };

@@ -1012,8 +1012,25 @@ const alpacaBroker = (() => {
             const all = await client.getOrders({ status: 'all', limit: 500 });
             return (all || []).filter(o => !TERMINAL_ORDER_STATUSES.has(o.status));
         } catch (err) {
+            // 2026-09-30: was `return []` here -- indistinguishable from "confirmed no open
+            // orders" to every caller, including enhancedAITradingBot.js's per-cycle
+            // StopRepair (no .catch() at its call site, so this was the only thing deciding
+            // its behavior). A transient failure here (tonight: a DB connection-pool timeout
+            // on the credential lookup inside getClientForUser) got read as "no stop exists"
+            // for 8 real, actively-protected positions simultaneously, triggering a scramble
+            // of duplicate stop-placement attempts -- harmless tonight only because Alpaca's
+            // own "insufficient qty available" check rejected every one of them and the real
+            // stops were never touched, but this is the same failure SHAPE as the 2026-09-24
+            // false-missing-position cascade (a different swallow site, same root pattern),
+            // and the comment a few lines up about SLAB already documents this exact
+            // "correctly 403'd, but indistinguishable in the log from one that wouldn't be"
+            // blind spot. Re-throwing lets each caller decide: several already chain
+            // `.catch(() => [])` explicitly at their own call site (unchanged), and the two
+            // that don't (cryptoBrokerService.js, intradayBrokerService.js) already have
+            // their own outer try/catch around this call, so they degrade to skipping a
+            // pre-sell order-cancel step -- never silently proceed on a false "no orders".
             logger.warn('[Broker:Alpaca] getOpenOrders failed', { symbol, err: err.message });
-            return [];
+            throw err;
         }
     }
 

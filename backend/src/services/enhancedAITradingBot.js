@@ -4948,6 +4948,15 @@ async function manageExistingPositions(userId) {
         // cause. Letting the fetch throw here routes it to the outer catch below,
         // which already does the right thing (skip verification this cycle, retry
         // next cycle) instead of pretending every stop just vanished.
+        //
+        // 2026-09-30: that fix was incomplete — it removed the swallow at THIS call
+        // site, but brokerService.getOpenOrders()'s own implementation still had its
+        // own internal `catch { return []; }`, one layer down, silently undoing the
+        // whole point: this line never actually saw a thrown error to route anywhere,
+        // because the callee had already turned it into a fake empty success. Recurred
+        // exactly as described above — same 8-position 403 storm, same non-event in
+        // terms of real exposure, this time from a DB connection-pool timeout on the
+        // Alpaca credential lookup. Fixed at the actual source this time.
         try {
             const brokerOrders = await brokerService.getOpenOrders(userId);
             // Build map: symbol → active stop order(s) on the sell side

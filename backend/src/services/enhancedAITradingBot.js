@@ -5167,9 +5167,16 @@ async function manageExistingPositions(userId) {
                 if (!currentPrice) continue;
 
                 // Keep stored price + derived fields fresh every cycle so UI always shows live value
+                // 2026-09-30: was parseInt(holding.quantity) -- for any fractional-share quantity
+                // (dollar-based sizing routinely produces these, e.g. "0.34471899"), parseInt
+                // truncates at the decimal point, so any quantity under 1 share silently became
+                // 0 -- zeroing market_value/gain_loss/gain_loss_percent completely every single
+                // cycle, and any quantity above 1 with a fractional remainder was undercounted.
+                // Confirmed live: 3 of kmadined's 6 holdings (META/NET/TMO, all <1 share) showing
+                // exactly $0.00/0.00% despite real, non-zero underlying price movement.
                 try {
-                    const costBasis   = parseFloat(holding.average_price) * parseInt(holding.quantity);
-                    const marketValue = currentPrice * parseInt(holding.quantity);
+                    const costBasis   = parseFloat(holding.average_price) * parseFloat(holding.quantity);
+                    const marketValue = currentPrice * parseFloat(holding.quantity);
                     const gainLoss    = marketValue - costBasis;
                     const gainLossPct = costBasis > 0 ? (gainLoss / costBasis) * 100 : 0;
                     await query(

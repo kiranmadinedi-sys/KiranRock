@@ -142,7 +142,7 @@ const executeBuyOrder = async (userId, symbol, quantity) => {
                 id: trade.id.toString(),
                 symbol: trade.symbol,
                 type: 'BUY',
-                quantity: parseInt(trade.quantity),
+                quantity: parseFloat(trade.quantity), // 2026-09-30: was parseInt -- truncated any fractional-share quantity to 0
                 price: parseFloat(trade.price),
                 totalCost: parseFloat(trade.totalCost),
                 timestamp: trade.timestamp
@@ -246,7 +246,7 @@ const executeSellOrder = async (userId, symbol, quantity) => {
                 id: trade.id.toString(),
                 symbol: trade.symbol,
                 type: 'SELL',
-                quantity: parseInt(trade.quantity),
+                quantity: parseFloat(trade.quantity), // 2026-09-30: was parseInt -- truncated any fractional-share quantity to 0
                 price: parseFloat(trade.price),
                 totalProceeds: parseFloat(trade.totalProceeds),
                 costBasis,

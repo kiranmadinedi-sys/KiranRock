@@ -234,7 +234,10 @@ const getPortfolioSummary = async (userId) => {
 
                         for (const t of symbolTrades) {
                             const action = (t.action || t.type || '').toUpperCase();
-                            const qty = parseInt(t.quantity || 0);
+                            // 2026-09-30: was parseInt -- truncated any fractional-share trade qty to 0,
+                            // silently dropping that lot from FIFO cost-basis matching (realized P&L,
+                            // trade attribution, weekly reports) instead of just the live dashboard display.
+                            const qty = parseFloat(t.quantity || 0);
                             const price = parseFloat(t.price || 0);
                             const total = parseFloat(t.total || 0) || (price * qty);
                             const commission = parseFloat(t.commission || 0) || 0;

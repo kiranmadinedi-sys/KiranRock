@@ -16,7 +16,7 @@ const getPortfolioByUserId = async (userId) => {
         return result.rows.map(row => ({
             id: row.id.toString(),
             symbol: row.symbol,
-            quantity: parseInt(row.quantity),
+            quantity: parseFloat(row.quantity), // 2026-09-30: was parseInt -- truncated any fractional-share quantity to 0
             purchasePrice: parseFloat(row.purchasePrice),
             addedAt: row.addedAt,
             currentPrice: row.currentPrice ? parseFloat(row.currentPrice) : null,
@@ -36,18 +36,18 @@ const addHolding = async (userId, symbol, quantity, purchasePrice) => {
             `INSERT INTO holdings (user_id, symbol, quantity, average_price, purchase_date) 
              VALUES ($1, $2, $3, $4, NOW()) 
              RETURNING id, symbol, quantity, average_price as "purchasePrice", purchase_date as "addedAt"`,
-            [userId, symbol.toUpperCase(), parseInt(quantity), parseFloat(purchasePrice)]
+            [userId, symbol.toUpperCase(), parseFloat(quantity), parseFloat(purchasePrice)]
         );
-        
+
         if (result.rows.length === 0) {
             return null;
         }
-        
+
         const holding = result.rows[0];
         return {
             id: holding.id.toString(),
             symbol: holding.symbol,
-            quantity: parseInt(holding.quantity),
+            quantity: parseFloat(holding.quantity), // 2026-09-30: was parseInt -- truncated any fractional-share quantity to 0
             purchasePrice: parseFloat(holding.purchasePrice),
             addedAt: holding.addedAt
         };

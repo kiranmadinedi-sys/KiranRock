@@ -50,50 +50,71 @@ const yahooProvider = (() => {
     // call after cooldown is a live probe: success fully closes the circuit,
     // failure re-trips it for another cooldown (no special-casing needed —
     // falls out of the normal failure-counting below).
-    const CIRCUIT_FAILURE_THRESHOLD = 5;      // consecutive failures to trip
-    const CIRCUIT_COOLDOWN_MS       = 60000;  // fail-fast window once tripped
-    let _circuitConsecutiveFailures = 0;
-    let _circuitOpenUntil           = 0;
-
-    function _circuitIsOpen() {
-        return Date.now() < _circuitOpenUntil;
-    }
-    function _circuitRecordSuccess() {
-        if (_circuitConsecutiveFailures > 0 || _circuitOpenUntil > 0) {
-            logger.info('[DataProvider:Yahoo] Circuit breaker CLOSED — call succeeded');
-        }
-        _circuitConsecutiveFailures = 0;
-        _circuitOpenUntil = 0;
-    }
-    // Only rate-limit/network failures indicate Yahoo itself is down — an
-    // ordinary 404 (symbol not covered) means Yahoo is reachable and working
-    // fine, just doesn't have that ticker, so it must never trip the breaker.
+    //
+    // 2026-09-29: split into two independent breakers before turning the options
+    // bot on for a live account. getQuote/getBars/searchSymbols (the general
+    // breaker) are what the swing bot and nightly scan depend on every cycle —
+    // getOptionsChain (options bot: a 10-symbol prewarm twice a day, market-hour
+    // scans that mostly read from the DB cache) got its own breaker so a burst of
+    // options-chain rate-limit failures can never fail-fast the swing bot's or
+    // nightly scan's Yahoo fallback, and vice versa. The options breaker also
+    // uses a longer cooldown: the options bot's Yahoo cadence is sparse enough
+    // that fast recovery doesn't matter, so backing off longer is both harmless
+    // to it and kinder to Yahoo while it's already rate-limiting.
     function _isRateLimitOrNetworkError(err) {
         const msg = String(err.message || '');
         const is429    = msg.includes('429') || err.status === 429 || err.statusCode === 429;
         const isNetwork = /ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|timeout/i.test(msg);
         return is429 || isNetwork;
     }
-    function _circuitRecordFailure(err) {
-        if (!_isRateLimitOrNetworkError(err)) return;
-        _circuitConsecutiveFailures++;
-        if (_circuitConsecutiveFailures >= CIRCUIT_FAILURE_THRESHOLD && !_circuitIsOpen()) {
-            _circuitOpenUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
-            logger.warn(`[DataProvider:Yahoo] Circuit breaker OPEN — ${_circuitConsecutiveFailures} consecutive rate-limit/network failures, pausing all Yahoo calls for ${CIRCUIT_COOLDOWN_MS / 1000}s`);
-        }
+    function _createCircuitBreaker(label, { failureThreshold, cooldownMs }) {
+        let consecutiveFailures = 0;
+        let openUntil = 0;
+        return {
+            isOpen() {
+                return Date.now() < openUntil;
+            },
+            recordSuccess() {
+                if (consecutiveFailures > 0 || openUntil > 0) {
+                    logger.info(`[DataProvider:Yahoo:${label}] Circuit breaker CLOSED — call succeeded`);
+                }
+                consecutiveFailures = 0;
+                openUntil = 0;
+            },
+            // Only rate-limit/network failures indicate Yahoo itself is down — an
+            // ordinary 404 (symbol not covered) means Yahoo is reachable and working
+            // fine, just doesn't have that ticker, so it must never trip the breaker.
+            recordFailure(err) {
+                if (!_isRateLimitOrNetworkError(err)) return;
+                consecutiveFailures++;
+                if (consecutiveFailures >= failureThreshold && Date.now() >= openUntil) {
+                    openUntil = Date.now() + cooldownMs;
+                    logger.warn(`[DataProvider:Yahoo:${label}] Circuit breaker OPEN — ${consecutiveFailures} consecutive rate-limit/network failures, pausing ${label} Yahoo calls for ${cooldownMs / 1000}s`);
+                }
+            }
+        };
     }
+
+    const _generalBreaker = _createCircuitBreaker('general', {
+        failureThreshold: 5,      // consecutive failures to trip
+        cooldownMs: 60000         // fail-fast window once tripped
+    });
+    const _optionsBreaker = _createCircuitBreaker('options', {
+        failureThreshold: 5,
+        cooldownMs: 5 * 60000     // longer: options bot's cadence is sparse, no cost to a gentler backoff
+    });
 
     // Retry helper: re-attempts fn() up to maxAttempts times when Yahoo returns 429.
     // Delays: 3 s then 8 s — Yahoo's crumb rate-limit window is ~10 s.
-    async function _withRetry(fn, symbol) {
-        if (_circuitIsOpen()) {
+    async function _withRetry(fn, symbol, breaker = _generalBreaker) {
+        if (breaker.isOpen()) {
             throw new Error(`Yahoo circuit breaker open (sustained failures) — skipping ${symbol}`);
         }
         const delays = [3000, 8000];
         for (let i = 0; i <= delays.length; i++) {
             try {
                 const result = await fn();
-                _circuitRecordSuccess();
+                breaker.recordSuccess();
                 return result;
             } catch (err) {
                 const is429 = String(err.message || '').includes('429') || err.status === 429 || err.statusCode === 429;
@@ -101,7 +122,7 @@ const yahooProvider = (() => {
                     logger.debug(`[DataProvider:Yahoo] 429 on ${symbol}, retry ${i + 1} in ${delays[i] / 1000}s`);
                     await new Promise(r => setTimeout(r, delays[i]));
                 } else {
-                    _circuitRecordFailure(err);
+                    breaker.recordFailure(err);
                     throw err;
                 }
             }
@@ -174,11 +195,12 @@ const yahooProvider = (() => {
 
     /**
      * Get options chain (basic — Yahoo has limited Greeks)
+     * Routed through the isolated options circuit breaker (see above) — never
+     * touches the general breaker that getQuote/getBars/searchSymbols rely on.
      */
     async function getOptionsChain(symbol) {
         try {
-            const result = await yf.options(symbol);
-            return result;
+            return await _withRetry(() => yf.options(symbol), symbol, _optionsBreaker);
         } catch (e) {
             logger.warn(`[DataProvider:Yahoo] Options unavailable for ${symbol}`, { error: e.message });
             return null;

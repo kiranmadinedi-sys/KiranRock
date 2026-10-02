@@ -36,6 +36,10 @@ describe('enhancedAIScheduler — dynamic scan-completion threshold', () => {
             isScanRunning: jest.fn().mockReturnValue(false),
             runNightlyUniverseScan: jest.fn().mockResolvedValue({ analyzed: 0, passed: 0, failed: 0, elapsedMin: '0.0' }),
             getScanStartTime: jest.fn().mockReturnValue(null),
+            // added 2026-10-01 for the midnight-lag fix — null means "no run tracked yet",
+            // which _effectiveScanDay falls back to the raw calendar date for, matching
+            // this file's pre-existing tests (none of them exercise the overnight-lag path).
+            getScanTargetDate: jest.fn().mockReturnValue(null),
         }));
 
         ({ runNightlyScanTrigger, runScanHealthCheck, _getTargetUniverseSize } = require('../src/services/enhancedAIScheduler'));

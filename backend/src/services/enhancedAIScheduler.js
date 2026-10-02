@@ -1069,6 +1069,45 @@ const SCAN_COMPLETION_RATIO = 0.90;
 const SCAN_COMPLETE_THRESHOLD_FALLBACK = 420; // only used if hermes_symbol_log has no rows for the date yet
 let _scanCompletedDate = null;       // date string when we saw >= threshold for the day
 
+function _addDaysToDateString(dateStr, delta) {
+    const d = new Date(dateStr + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + delta);
+    return d.toISOString().slice(0, 10);
+}
+
+// 2026-10-01 real incident: the scan's own window is documented as opening at 4:15 PM
+// ET, but it was never actually observed starting before ~11:30 PM-12:30 AM CDT
+// (~00:30-01:30 AM ET) — a ~7-8 hour lag from the intended time, night after night.
+// Root cause: a scan launched at 4:15 PM ET on day D writes its rows under day D
+// (nightlyUniverseScanService's _todayET(), captured once at launch) — correct, since
+// the downstream candidate loader finds "most recent scan <= today" regardless of the
+// exact date. But scans here regularly take 7-10+ hours (validated live this session),
+// so they routinely finish and get recognized as complete well past midnight ET, when
+// THIS scheduler's own _getETNow() has already rolled over to day D+1. _scanCompletedDate
+// then gets stamped D+1 instead of D — and that phantom D+1 completion then exactly
+// matches D+1's OWN etDate for its entire daytime and evening, permanently blocking
+// D+1's legitimate 4:15 PM launch until the calendar rolls over to D+2 at midnight —
+// which immediately repeats the same overrun-and-mislabel cycle the next night. A
+// one-day-behind lag that, once started, never self-corrects.
+//
+// Fixed by tracking progress/completion against the date the scan ACTUALLY used
+// (nightlyUniverseScanService.getScanTargetDate(), set once at that run's launch and
+// never reset), not a fresh _getETNow() call on every 5-min tick — but ONLY during the
+// 00:00-09:25 ET early-morning segment, when we're checking on a run that may still be
+// finishing last evening's delayed work. Once the 4:15 PM evening window opens, this
+// always returns the raw etDate unconditionally: that's a fresh decision point for
+// TONIGHT's own scan, and must not keep deferring to whatever an old overnight run
+// happened to target — otherwise last night's already-complete data reads as "today is
+// already done too" and blocks tonight's launch the same way the original bug did.
+function _effectiveScanDay(etHour, etDate) {
+    if (etHour >= 16) return etDate;
+    const nightlyScanSvc = require('./nightlyUniverseScanService');
+    const lastTarget = nightlyScanSvc.getScanTargetDate();
+    if (!lastTarget) return etDate;
+    const yesterday = _addDaysToDateString(etDate, -1);
+    return (lastTarget === etDate || lastTarget === yesterday) ? lastTarget : etDate;
+}
+
 /** Real target universe size for a date, from the same source the scan itself uses to build its candidate list. */
 async function _getTargetUniverseSize(etDate) {
     try {
@@ -1101,8 +1140,14 @@ async function runNightlyScanTrigger() {
                             (etHour < 16 || (etHour === 16 && etMin < 15));
     if (inDaytimeBlock) return;
 
-    // Already confirmed complete for today
-    if (_scanCompletedDate === etDate) return;
+    // The evening's logical scan day — see _effectiveScanDay above for why this isn't
+    // simply etDate. Everything below tracks/launches against this, not the raw ET
+    // calendar date, so a scan that overruns past midnight no longer blocks the
+    // FOLLOWING evening's own 4:15 PM launch.
+    const scanDay = _effectiveScanDay(etHour, etDate);
+
+    // Already confirmed complete for this scan day
+    if (_scanCompletedDate === scanDay) return;
 
     // Check current progress in DB — use most recent scan date (not CURRENT_DATE).
     // Nightly scan stores rows with the date it ran (e.g. 4:15 PM Jun 11 → analysis_date=Jun 11).
@@ -1129,28 +1174,28 @@ async function runNightlyScanTrigger() {
         const row = rows[0];
         // The window above deliberately allows yesterday's date to match (a scan
         // started before midnight still needs its in-progress count recognized).
-        // But if NOTHING has been scanned yet today, that same window still
-        // matches yesterday's already-COMPLETED scan, and its count would
-        // wrongly look like today's progress — declaring today "done" without
-        // it ever running. Found 2026-08-20/21: Aug 19's success (434 scored)
-        // sat un-superseded and got misread as complete on both following
-        // evenings, so the real scan never launched for two days straight.
-        // Only trust the count when the matched date is actually today.
-        if (row && new Date(row.analysis_date).toISOString().slice(0, 10) === etDate) {
+        // But if NOTHING has been scanned yet for this scan day, that same window
+        // still matches an already-COMPLETED older scan, and its count would wrongly
+        // look like progress — declaring this scan day "done" without it ever running.
+        // Found 2026-08-20/21: Aug 19's success (434 scored) sat un-superseded and got
+        // misread as complete on both following evenings, so the real scan never
+        // launched for two days straight. Only trust the count when the matched date
+        // is actually the scan day we're tracking right now.
+        if (row && new Date(row.analysis_date).toISOString().slice(0, 10) === scanDay) {
             todayCount = parseInt(row.cnt ?? 0);
         }
     } catch (_) { return; }
 
-    const targetSize = await _getTargetUniverseSize(etDate);
+    const targetSize = await _getTargetUniverseSize(scanDay);
     const completeThreshold = targetSize > 0
         ? Math.round(targetSize * SCAN_COMPLETION_RATIO)
         : SCAN_COMPLETE_THRESHOLD_FALLBACK;
 
-    // Scan is complete for today — stop checking
+    // Scan is complete for this scan day — stop checking
     if (todayCount >= completeThreshold) {
-        if (_scanCompletedDate !== etDate) {
-            console.log(`[NightlyScanTrigger] ✅ Complete for ${etDate}: ${todayCount}/${targetSize || '?'} symbols analyzed (threshold ${completeThreshold})`);
-            _scanCompletedDate = etDate;
+        if (_scanCompletedDate !== scanDay) {
+            console.log(`[NightlyScanTrigger] ✅ Complete for ${scanDay}: ${todayCount}/${targetSize || '?'} symbols analyzed (threshold ${completeThreshold})`);
+            _scanCompletedDate = scanDay;
         }
         return;
     }
@@ -1161,7 +1206,7 @@ async function runNightlyScanTrigger() {
 
     // Launch scan — resume mode if partial data exists, full scan if starting fresh
     const isResume = todayCount > 0;
-    console.log(`[NightlyScanTrigger] ${isResume ? `Resuming (${todayCount} done, ${completeThreshold - todayCount}+ remaining of ~${targetSize || '?'})` : 'Starting'} nightly scan for ${etDate}`);
+    console.log(`[NightlyScanTrigger] ${isResume ? `Resuming (${todayCount} done, ${completeThreshold - todayCount}+ remaining of ~${targetSize || '?'})` : 'Starting'} nightly scan for ${scanDay}`);
 
     nightlyScanSvc.runNightlyUniverseScan({ missingOnly: isResume })
         .then(r => {
@@ -1199,17 +1244,23 @@ async function runScanHealthCheck() {
     // --- Stall detection ---
     if (nightlyScanSvc.isScanRunning()) {
         try {
+            // Use the date the in-flight run actually targeted, not raw CURRENT_DATE —
+            // a run launched before midnight ET and still going after it writes rows
+            // under the earlier date (see _effectiveScanDay); querying CURRENT_DATE here
+            // would find 0 rows for a scan that's actually scoring normally.
+            const scanDay = _effectiveScanDay(etHour, etDate);
             const { rows } = await query(
                 `SELECT MAX(created_at) AS last_write,
                         COUNT(*) AS total,
                         COUNT(*) FILTER (WHERE ai_score IS NOT NULL) AS scored
-                 FROM daily_universe_analysis WHERE analysis_date = CURRENT_DATE`
+                 FROM daily_universe_analysis WHERE analysis_date = $1`,
+                [scanDay]
             );
             const lastWrite     = rows[0]?.last_write ? new Date(rows[0].last_write) : null;
             const scored        = parseInt(rows[0]?.scored ?? 0, 10);
             const totalToday    = parseInt(rows[0]?.total ?? 0, 10);
             const cooldownOk    = Date.now() - _lastStallAlertAt > 60 * 60 * 1000;
-            const targetSize    = await _getTargetUniverseSize(etDate);
+            const targetSize    = await _getTargetUniverseSize(scanDay);
             const completeThreshold = targetSize > 0
                 ? Math.round(targetSize * SCAN_COMPLETION_RATIO)
                 : SCAN_COMPLETE_THRESHOLD_FALLBACK;
@@ -1269,12 +1320,18 @@ async function runScanHealthCheck() {
     // --- Deadline miss — check once, 9:20-9:29 AM ET, right before open ---
     if (etHour === 9 && etMin >= 20 && etMin <= 29 && _deadlineAlertSentFor !== etDate) {
         try {
+            // Today's trading data may legitimately be stamped with yesterday's date if
+            // last night's scan ran past midnight (see _effectiveScanDay) — check that
+            // date, not raw CURRENT_DATE, or a perfectly healthy overnight run reads as
+            // "0 scored" here and fires a false deadline-miss alert every single morning.
+            const scanDay = _effectiveScanDay(etHour, etDate);
             const { rows } = await query(
                 `SELECT COUNT(*) FILTER (WHERE ai_score IS NOT NULL) AS scored
-                 FROM daily_universe_analysis WHERE analysis_date = CURRENT_DATE`
+                 FROM daily_universe_analysis WHERE analysis_date = $1`,
+                [scanDay]
             );
             const scored = parseInt(rows[0]?.scored ?? 0, 10);
-            const targetSize = await _getTargetUniverseSize(etDate);
+            const targetSize = await _getTargetUniverseSize(scanDay);
             const completeThreshold = targetSize > 0
                 ? Math.round(targetSize * SCAN_COMPLETION_RATIO)
                 : SCAN_COMPLETE_THRESHOLD_FALLBACK;
@@ -2004,5 +2061,11 @@ module.exports = {
     // 1,156/2,390 symbols, 48%, because the threshold hadn't scaled with the universe's growth)
     runNightlyScanTrigger,
     runScanHealthCheck,
-    _getTargetUniverseSize
+    _getTargetUniverseSize,
+    // exported 2026-10-01 for the midnight-lag fix — the scan's own window opens at
+    // 4:15 PM ET but it was never observed starting before ~midnight ET, because a long
+    // overnight run's completion got stamped with the NEXT day's date once the calendar
+    // rolled over mid-run, which then blocked that next day's own 4:15 PM launch for its
+    // entire evening (see _effectiveScanDay's own comment for the full mechanism)
+    _effectiveScanDay
 };

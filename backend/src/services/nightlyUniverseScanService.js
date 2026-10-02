@@ -66,6 +66,17 @@ const BATCH_DELAY_MS = 10_000;
 
 let _scanRunning = false;
 let _scanStartTime = null; // exposed via getScanStartTime() — see enhancedAIScheduler.js's runScanHealthCheck for why
+// 2026-10-01: the actual analysis_date a run is writing under — set once per run (like
+// _scanStartTime) but, unlike it, never reset to null on completion. The scheduler's
+// trigger/health-check need to know which date a long-running scan is using even after
+// isScanRunning() flips back to false (see enhancedAIScheduler.js's _effectiveScanDay —
+// without this, a scan that starts at 4:15 PM ET and runs past midnight gets
+// date-stamped under the evening it started, but the scheduler's own fresh _getETNow()
+// call on the next tick already reads "tomorrow", permanently losing track of which
+// date's rows to check and blocking the FOLLOWING evening's scan from starting until
+// the calendar rolls over again — the exact bug that made this run near midnight every
+// night instead of ~5 PM as intended).
+let _lastScanTargetDate = null;
 
 function _combineReason(code, detail) {
     return detail ? `${code} (${detail})` : code;
@@ -139,6 +150,16 @@ function _isMarketHours() {
     const t  = et.getHours() * 60 + et.getMinutes();
     const d  = et.getDay();
     return d >= 1 && d <= 5 && t >= 9 * 60 + 30 && t < 16 * 60;
+}
+
+function _etHourNow() {
+    return new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })).getHours();
+}
+
+function _addDaysToDateString(dateStr, delta) {
+    const d = new Date(dateStr + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + delta);
+    return d.toISOString().slice(0, 10);
 }
 
 /**
@@ -265,6 +286,7 @@ async function _upsert(symbol, date, analysis, passedPrescreen, exclusionReason,
  */
 function isScanRunning() { return _scanRunning; }
 function getScanStartTime() { return _scanStartTime; }
+function getScanTargetDate() { return _lastScanTargetDate; }
 
 /**
  * Main entry point — call from scheduler or standalone script.
@@ -291,6 +313,15 @@ async function runNightlyUniverseScan(opts = {}) {
     const startTime = Date.now();
     _scanStartTime = startTime;
     const today     = _todayET();
+    // A run launched in the 00:00-09:25 ET early-morning segment is always finishing the
+    // PREVIOUS evening's delayed work (the scheduler's 4:15 PM-midnight window that
+    // overran past midnight), not starting a fresh one for today — even though its rows
+    // are correctly stamped with today's date below (analysis_date must stay "today" for
+    // the downstream candidate loader's "most recent scan <= today" lookup to work).
+    // _lastScanTargetDate exists purely so enhancedAIScheduler.js's trigger can tell which
+    // evening's obligation this run satisfies, so that evening's completion doesn't
+    // incorrectly block TODAY's own 4:15 PM launch later tonight.
+    _lastScanTargetDate = _etHourNow() < 16 ? _addDaysToDateString(today, -1) : today;
 
     console.log(`[NightlyScan] ── ${opts.missingOnly ? 'Resuming' : 'Starting'} nightly universe scan for ${today} ──`);
 
@@ -811,4 +842,4 @@ function formatSkipReasonBreakdown({ date, total, byCode, byFamily }) {
     return lines.join('\n');
 }
 
-module.exports = { runNightlyUniverseScan, rescanSymbol, rescanFailedSymbols, isScanRunning, getScanStartTime, getSkipReasonBreakdown, formatSkipReasonBreakdown, _isErrorLikeCategory };
+module.exports = { runNightlyUniverseScan, rescanSymbol, rescanFailedSymbols, isScanRunning, getScanStartTime, getScanTargetDate, getSkipReasonBreakdown, formatSkipReasonBreakdown, _isErrorLikeCategory };

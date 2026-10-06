@@ -1701,6 +1701,7 @@ function startScheduler() {
         runScanHealthCheck();              // stall/deadline alert — catches a bad scan in hours, not days
         runWeeklyParameterHealthCheck();   // Friday 15:45 ET: health check + backtest summary
         runWeeklyPnlReport();              // Friday 16:10 ET: realized $/day per account vs target
+        runWeeklyScoreValidation();        // Saturday 10:00 ET: which score components actually predict returns
         runCryptoWatchdog();               // every tick, 24/7: alert if the crypto process went silent while positions are open
         runMorningBriefing();              // 8:00 AM ET Mon-Fri: STRONG BUY pre-market alert
         runPremarketGapBriefing();         // 8:30 AM ET Mon-Fri: gap check on tonight's setups
@@ -1743,6 +1744,27 @@ let _weeklyHealthRanDate = null;
 async function runCryptoWatchdog() {
     try { await require('./cryptoUptimeGuard').runLiveWatchdog(); }
     catch (err) { console.error('[CryptoWatchdog] Error:', err.message); }
+}
+
+// Saturday 10:00 ET (markets closed, Friday's forward returns already backfilled): re-tests
+// every AI-score component against clean 5-day forward returns and Telegrams admin which
+// to re-enable / disable — see scoreComponentValidationService.js. Report only.
+let _weeklyScoreValidationRanDate = null;
+async function runWeeklyScoreValidation() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit'
+    }).formatToParts(new Date());
+    const get = t => parts.find(p => p.type === t).value;
+    const etDate = `${get('year')}-${get('month')}-${get('day')}`;
+    if (get('weekday') !== 'Sat' || parseInt(get('hour'), 10) !== 10) return;
+    if (_weeklyScoreValidationRanDate === etDate) return;
+    _weeklyScoreValidationRanDate = etDate;
+    try {
+        await require('./scoreComponentValidationService').runWeeklyReport();
+    } catch (err) {
+        console.error('[ScoreValidation] Error:', err.message);
+    }
 }
 
 let _weeklyPnlRanDate = null;

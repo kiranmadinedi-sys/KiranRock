@@ -163,6 +163,19 @@ function deriveWeinSteinStage(price, sma50, sma150, sma200, sma200Rising) {
 const ORACLE_MAX_PER_CYCLE = Math.max(5, parseInt(process.env.ORACLE_MAX_PER_CYCLE || '15', 10));
 let _oracleCycleCount = 0;
 
+// Time budget for the live entry scan, measured from the start of the cycle (the scheduler
+// abandons waiting at 4 min — CYCLE_TIMEOUT_MS in enhancedAIScheduler.js). The call-count
+// budget above caps HOW MANY ORACLE calls run, but on this single-lane CPU-bound Ollama
+// (~60s per generation) even a handful serialize into minutes: 2026-10-05, a 5-symbol batch's
+// ORACLE calls waited 20s/78s/114s/175s/235s in the queue, and the zero-holdings account
+// (Parvataneni — the only one that ever reaches the full scan) timed out 24 of 25 cycles,
+// ~90% every trading day since 2026-09-18, zero trades. Past LIVE_ORACLE_CUTOFF_MS a candidate
+// is scored without ORACLE (same degrade as an exhausted budget); an ORACLE call already
+// waiting gives up at that same cutoff; past LIVE_SCAN_CUTOFF_MS no new batches start. The
+// remaining ~60-90s covers one in-flight generation plus order placement.
+const LIVE_ORACLE_CUTOFF_MS = parseInt(process.env.LIVE_ORACLE_CUTOFF_MS || '120000', 10);
+const LIVE_SCAN_CUTOFF_MS   = parseInt(process.env.LIVE_SCAN_CUTOFF_MS   || '150000', 10);
+
 /** Call once per scheduler tick, before dispatching to users — see ORACLE_MAX_PER_CYCLE comment. */
 function resetOracleCycleBudget() {
     _oracleCycleCount = 0;
@@ -1557,7 +1570,8 @@ function getSkipReasonFamily(code) {
 // closure-scoped per call (unlike a module-level variable, safe under the nightly
 // scan's concurrent per-symbol batches) — existing callers that don't pass it see no
 // behavior change at all.
-async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null, regime = null, liveMode = false, onSkip = null) {
+// oracleDeadline (optional epoch ms): live entry scan only — see LIVE_ORACLE_CUTOFF_MS.
+async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null, regime = null, liveMode = false, onSkip = null, oracleDeadline = null) {
     // Diagnostic timing — added 2026-08-21 to find why per-symbol nightly-scan time grew
     // steadily over a run (9 min/symbol early, 45+ min/symbol late) with no process-wide
     // leak (handles/memory/DB-pool all stayed flat, scheduler ticks stayed perfectly
@@ -2386,7 +2400,15 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         // Cached results (1-hour window per symbol) are free and don't count.
         // HERMES RS sort means the best momentum stocks consume the budget first.
         let oracleVerdict = null;
-        if (aiScore >= 55 && oracleService.isEnabled() && _oracleCycleCount < ORACLE_MAX_PER_CYCLE) {
+        // Deadline-limited results are flagged so the cross-user analysis cache drops them
+        // (see analyzeStockWithAICached) — the next cycle gets a real ORACLE attempt.
+        let oracleDeadlineLimited = false;
+        const oracleTimeLeftMs = oracleDeadline != null ? oracleDeadline - Date.now() : null;
+        const oracleWanted = aiScore >= 55 && oracleService.isEnabled() && _oracleCycleCount < ORACLE_MAX_PER_CYCLE;
+        if (oracleWanted && oracleTimeLeftMs != null && oracleTimeLeftMs <= 0) {
+            oracleDeadlineLimited = true;
+            scoringLog.push('ORACLE: skipped (live scan time budget spent)');
+        } else if (oracleWanted) {
             _oracleCycleCount++;
             agentHealth.recordHeartbeat('ORACLE', 'START', { symbol });
             oracleVerdict = await oracleService.getVerdict({
@@ -2410,9 +2432,14 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
                 stop:           price - (atr * 1.5),
                 target:         price + Math.max(week52High > price ? week52High - price : atr * 3, atr * 3),
                 regime:         regime?.regime || 'UNKNOWN',
-                fast:           liveMode
+                fast:           liveMode,
+                maxWaitMs:      oracleTimeLeftMs
             }).catch(() => null);
 
+            // Only a give-up at the deadline counts — a fast failure (Ollama down, queue full)
+            // keeps the old behavior (scored without ORACLE, result usable), so an Ollama outage
+            // can't stall the score-decay exits that skip deadline-limited results.
+            if (!oracleVerdict && oracleDeadline != null && Date.now() >= oracleDeadline) oracleDeadlineLimited = true;
             agentHealth.recordHeartbeat('ORACLE', oracleVerdict ? 'OK' : 'ERROR', { symbol });
             if (oracleVerdict) {
                 const oAdj = oracleService.verdictToAdj(oracleVerdict.verdict, oracleVerdict.confidence);
@@ -2554,6 +2581,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             oracleThesis:     oracleVerdict?.thesis    || null,
             oracleBearCase:   oracleVerdict?.bearCase  || null,
             masterAlignment:  oracleVerdict?.masterAlignment || [],
+            oracleDeadlineLimited,
             // ATLAS — global macro context at time of scoring
             atlasLabel:       globalSentiment?.label      || null,
             atlasScore:       globalSentiment?.globalScore ?? null,
@@ -2600,15 +2628,19 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
 const _analysisCache = new Map(); // symbol -> { promise, expiresAt }
 const ANALYSIS_CACHE_TTL_MS = 4 * 60 * 1000; // just under the 5-min scheduler interval
 
-function analyzeStockWithAICached(symbol, vixLevel, regime) {
+function analyzeStockWithAICached(symbol, vixLevel, regime, oracleDeadline = null) {
     const cached = _analysisCache.get(symbol);
     if (cached && Date.now() < cached.expiresAt) {
         return cached.promise;
     }
-    const promise = analyzeStockWithAI(symbol, vixLevel, null, regime, true); // liveMode — real-time entry scan
-    _analysisCache.set(symbol, { promise, expiresAt: Date.now() + ANALYSIS_CACHE_TTL_MS });
+    const promise = analyzeStockWithAI(symbol, vixLevel, null, regime, true, null, oracleDeadline); // liveMode — real-time entry scan
+    const entry = { promise, expiresAt: Date.now() + ANALYSIS_CACHE_TTL_MS };
+    _analysisCache.set(symbol, entry);
     // A failed analysis shouldn't poison the cache for the full TTL — let the next caller retry fresh.
-    promise.catch(() => { _analysisCache.delete(symbol); });
+    // Same for one scored without ORACLE only because this cycle ran out of time: callers already
+    // awaiting it share it, but the next cycle should get a real ORACLE attempt, not a 4-min reuse.
+    const evict = () => { if (_analysisCache.get(symbol) === entry) _analysisCache.delete(symbol); };
+    promise.then(r => { if (r?.oracleDeadlineLimited) evict(); }, evict);
     return promise;
 }
 
@@ -2618,7 +2650,9 @@ function analyzeStockWithAICached(symbol, vixLevel, regime) {
  * @param {number} limit - max results to return
  * @param {number} [overrideMinScore] - optional regime-adjusted min score
  */
-async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore = null) {
+async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore = null, cycleStartedAt = Date.now()) {
+    const oracleDeadline = cycleStartedAt + LIVE_ORACLE_CUTOFF_MS;
+    const scanStopAt     = cycleStartedAt + LIVE_SCAN_CUTOFF_MS;
     // Budget reset moved to resetOracleCycleBudget(), called once per scheduler tick —
     // see ORACLE_MAX_PER_CYCLE's comment for why resetting it here (once per USER, when
     // all users' scans run concurrently) never actually enforced anything.
@@ -2756,9 +2790,18 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
     const batchSize = 5;  // Reduced from 20 to 5 to respect rate limits
 
     for (let i = 0; i < scanList.length; i += batchSize) {
+        // See LIVE_SCAN_CUTOFF_MS — act on what's already scored rather than let the
+        // scheduler's 4-min timeout throw the whole cycle's work away.
+        if (Date.now() >= scanStopAt) {
+            logger.warn('[LiveScanBudget] Scan time budget spent — evaluating candidates scored so far', {
+                userId, analyzed: i, total: scanList.length,
+                elapsedSec: Math.round((Date.now() - cycleStartedAt) / 1000)
+            });
+            break;
+        }
         const batch = scanList.slice(i, i + batchSize);
         const results = await Promise.allSettled(
-            batch.map(stock => analyzeStockWithAICached(stock.symbol, vixLevel, regime))
+            batch.map(stock => analyzeStockWithAICached(stock.symbol, vixLevel, regime, oracleDeadline))
         );
 
         results.forEach((result, index) => {
@@ -2827,7 +2870,9 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
         candidatesAnalyzed: allAnalyzed.length,
         opportunitiesFound: opportunities.length,
         topScore: _topScore,
-        minBuyScore
+        minBuyScore,
+        oracleSkippedForTime: allAnalyzed.filter(a => a.oracleDeadlineLimited).length,
+        elapsedSec: Math.round((Date.now() - cycleStartedAt) / 1000)
     });
 
     // Refresh sector rotation cache from this scan (applied as boost/penalty in the next cycle)
@@ -2947,6 +2992,7 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
  * Execute autonomous trading for a user
  */
 async function executeAutonomousTrading(userId) {
+    const cycleStartedAt = Date.now(); // live scan's time budget is measured from here
     agentHealth.recordHeartbeat('ARROW', 'START', { userId });
     try {
         logger.info('Starting autonomous trading', { userId });
@@ -3586,7 +3632,7 @@ async function executeAutonomousTrading(userId) {
         }
 
         // Scan market for best opportunities (pass regime minBuyScore so scan filters correctly)
-        const opportunities = await scanMarketForOpportunities(userId, 100, sessionRiskConfig.minBuyScore);
+        const opportunities = await scanMarketForOpportunities(userId, 100, sessionRiskConfig.minBuyScore, cycleStartedAt);
 
         if (opportunities.length === 0) {
             logger.info('No qualifying opportunities found', { userId, vixLevel });
@@ -4858,6 +4904,9 @@ function getDynamicTrailingStop(changePercent, atr, peakPrice) {
  * Manage existing positions (stop-loss, take-profit, trailing stops)
  */
 async function manageExistingPositions(userId) {
+    // Score-decay re-scores below share the live scan's ORACLE time budget — see the
+    // [ScoreDecay] deferral comment further down.
+    const rescoreOracleDeadline = Date.now() + LIVE_ORACLE_CUTOFF_MS;
     try {
         const holdings = await holdingsDb.getUserHoldings(userId);
         
@@ -5216,10 +5265,23 @@ async function manageExistingPositions(userId) {
                 const _rescoreAgeHrs = holding.last_rescore_at
                     ? (Date.now() - new Date(holding.last_rescore_at).getTime()) / 3600000
                     : Infinity;
-                if (_rescoreAgeHrs >= 20) {
+                // Deferral (2026-10-05): every holding comes due at once on the first cycle of the
+                // day, each needing a ~60s ORACLE call on the single-lane local LLM — 8 holdings
+                // alone blow the scheduler's 4-min timeout (kmadined/anilboddu1 timed out through
+                // the first hour that morning). A re-score that can't get ORACLE in time is NOT
+                // saved: this score feeds the <65-twice → exit rule, so a partial score must never
+                // count toward it. last_rescore_at stays stale, so it simply retries next cycle,
+                // spreading the day's re-scores over the first few cycles.
+                if (_rescoreAgeHrs >= 20 && Date.now() >= rescoreOracleDeadline) {
+                    logger.debug('[ScoreDecay] Re-score deferred to next cycle (time budget spent)', { userId, symbol: holding.symbol });
+                } else if (_rescoreAgeHrs >= 20) {
                     try {
-                        const _reAnalysis = await analyzeStockWithAI(holding.symbol, null, null, null, true); // liveMode — decay re-score
-                        if (_reAnalysis && typeof _reAnalysis.aiScore === 'number') {
+                        const _reAnalysis = await analyzeStockWithAI(holding.symbol, null, null, null, true, null, rescoreOracleDeadline); // liveMode — decay re-score
+                        if (_reAnalysis?.oracleDeadlineLimited) {
+                            logger.info('[ScoreDecay] Re-score deferred to next cycle (ORACLE ran out of time — partial score not saved)', {
+                                userId, symbol: holding.symbol
+                            });
+                        } else if (_reAnalysis && typeof _reAnalysis.aiScore === 'number') {
                             decayScore = _reAnalysis.aiScore;
                             lowScoreStreak = decayScore < 65 ? lowScoreStreak + 1 : 0;
                             await holdingsDb.updateRescoreState(userId, holding.symbol, decayScore, lowScoreStreak);

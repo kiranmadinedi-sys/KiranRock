@@ -120,7 +120,14 @@ const MAX_OLLAMA_QUEUE_DEPTH = 5;
 let _activeOllamaRequests = 0;
 const _ollamaQueue = [];
 
-async function _acquireOllamaSlot(priority = 'batch') {
+// maxWaitMs (optional): give up if no slot frees up within this long. Added 2026-10-05:
+// depth-5 fail-fast bounds HOW MANY requests wait, not how LONG — at ~60s per CPU-bound
+// generation, a live ORACLE call sitting 4th in line still waited 235s, and a zero-holdings
+// account (Parvataneni) timed out 24 of 25 cycles that day, ~90% every day since 2026-09-18,
+// zero trades. A caller with a hard deadline (the live scan, 4-min scheduler timeout) passes
+// what it can actually afford; the entry is pulled from the queue and the call throws into
+// the caller's existing null/neutral fallback instead of holding a doomed spot in line.
+async function _acquireOllamaSlot(priority = 'batch', maxWaitMs = null) {
     if (_activeOllamaRequests < MAX_CONCURRENT_OLLAMA) {
         _activeOllamaRequests++;
         return;
@@ -128,8 +135,23 @@ async function _acquireOllamaSlot(priority = 'batch') {
     if (_ollamaQueue.length >= MAX_OLLAMA_QUEUE_DEPTH) {
         throw new Error(`Ollama queue full (${_ollamaQueue.length} already waiting) — failing fast instead of piling on`);
     }
+    if (maxWaitMs != null && maxWaitMs <= 0) {
+        throw new Error('Ollama slot busy and caller has no time left to wait');
+    }
     const queuedAt = Date.now();
-    await new Promise(resolve => _ollamaQueue.push({ resolve, priority, queuedAt }));
+    await new Promise((resolve, reject) => {
+        const entry = { resolve, priority, queuedAt };
+        if (maxWaitMs != null) {
+            const timer = setTimeout(() => {
+                const idx = _ollamaQueue.indexOf(entry);
+                if (idx === -1) return; // already dequeued — slot was handed over, resolve wins
+                _ollamaQueue.splice(idx, 1);
+                reject(new Error(`gave up after ${(maxWaitMs / 1000).toFixed(1)}s in Ollama queue (caller deadline)`));
+            }, maxWaitMs);
+            entry.resolve = () => { clearTimeout(timer); resolve(); };
+        }
+        _ollamaQueue.push(entry);
+    });
     _activeOllamaRequests++;
     const waitedMs = Date.now() - queuedAt;
     if (waitedMs > 2000) {
@@ -147,8 +169,8 @@ function _releaseOllamaSlot() {
 }
 
 // ─── HTTP helper (native — no extra npm packages) ────────────────────────────
-async function _post(path, body, priority = 'batch') {
-    await _acquireOllamaSlot(priority);
+async function _post(path, body, priority = 'batch', maxWaitMs = null) {
+    await _acquireOllamaSlot(priority, maxWaitMs);
     try {
         return await _rawPost(path, body);
     } finally {
@@ -314,7 +336,7 @@ async function getVerdict(data) {
                 { role: 'user',   content: userPrompt },
             ],
             options: { temperature: 0.1, num_predict: 450 },
-        }, data.fast ? 'live' : 'batch');
+        }, data.fast ? 'live' : 'batch', data.maxWaitMs ?? null);
 
         const raw    = res?.message?.content || '';
         const parsed = _extractJSON(raw);

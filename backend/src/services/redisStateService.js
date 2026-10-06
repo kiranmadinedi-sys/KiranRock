@@ -17,14 +17,20 @@
  *   - All methods are safe to call when Redis is unavailable — they log a
  *     warning and return sensible defaults so trading is never blocked.
  *   - Connection is lazy: the client connects on first use, not on import.
- *   - Environment variable REDIS_URL controls connection (default: localhost).
+ *   - Environment variable REDIS_URL controls connection (unset = Redis disabled).
  */
 
 const { createClient } = require('redis');
 const { logger } = require('../utils/logger');
 const { query }  = require('../config/database');
 
-const REDIS_URL  = process.env.REDIS_URL || 'redis://localhost:6379';
+// Opt-in: Redis is only used when REDIS_URL is set. This box has never run Redis, so the old
+// localhost default just failed every startup and then logged "Cannot reach Redis" on every
+// HALT_ALL check (~1,000/day, burying real warnings — 2026-10-05). Every caller already
+// fails open / falls back to the DB copy when getClient() returns null, so leaving it unset
+// changes no behavior.
+const REDIS_URL  = process.env.REDIS_URL || null;
+let _disabledLogged = false;
 const KEY_PREFIX = 'pantheon:';
 
 // TTLs (seconds)
@@ -48,6 +54,13 @@ let _connectAttempted = false;
  * Returns the client on success, null on failure.
  */
 async function getClient() {
+    if (!REDIS_URL) {
+        if (!_disabledLogged) {
+            _disabledLogged = true;
+            logger.info('[Redis] Disabled (REDIS_URL not set) — HALT_ALL uses the DB copy, other state keys no-op');
+        }
+        return null;
+    }
     if (_connected && _client) return _client;
     if (_connectAttempted) return null; // already tried and failed — don't retry on every call
 

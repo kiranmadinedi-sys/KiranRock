@@ -2991,6 +2991,46 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
 /**
  * Execute autonomous trading for a user
  */
+// ── Cross-cycle position-slot guard ───────────────────────────────────────────
+// The buy loop's position cap compares the holdings snapshot taken when THIS cycle started
+// against THIS cycle's own buys — blind to another cycle for the same user buying at the
+// same time. Cycles do overlap: enhancedAIScheduler.js force-clears a per-user lock older
+// than 15 min, and morning cycles ran 30-97 min on 2026-10-05, so three kmadined cycles
+// were placing buys at once around 11:00 and took the account from 4 to 8 positions
+// against a max of 6. Right before each order, re-count from live sources — DB holdings,
+// broker pending buy orders, and slots reserved in-process by any cycle in the last few
+// minutes — then check-and-reserve synchronously (no await in between), so two cycles
+// can't both pass. Reservations simply expire: by then the order is visible at the broker
+// or in holdings, so no explicit release (which could open a gap) is needed.
+const _pendingBuySlots = new Map(); // userId -> Map(symbol -> expiresAt)
+const PENDING_BUY_SLOT_TTL_MS = 3 * 60 * 1000;
+
+async function _reservePositionSlot(userId, symbol, maxPositions) {
+    const held = ((await holdingsDb.getUserHoldings(userId)) || []).map(h => String(h.symbol).toUpperCase());
+    let brokerPendingBuys = [];
+    try {
+        const orders = await brokerService.getOpenOrders(userId);
+        brokerPendingBuys = orders
+            .filter(o => o.side === 'buy' && !String(o.symbol).includes('/')) // crypto has its own book
+            .map(o => String(o.symbol).toUpperCase());
+    } catch (err) {
+        logger.warn('[SlotGuard] Could not read open orders — counting holdings + in-process reservations only', {
+            userId, error: err.message
+        });
+    }
+    // Synchronous from here on — the count and the reservation are one atomic step.
+    const now = Date.now();
+    const reserved = _pendingBuySlots.get(userId) || new Map();
+    for (const [s, expiresAt] of reserved) if (expiresAt <= now) reserved.delete(s);
+    const sym = String(symbol).toUpperCase();
+    const occupied = new Set([...held, ...brokerPendingBuys, ...reserved.keys()]);
+    if (occupied.has(sym)) return { ok: false, duplicate: true, count: occupied.size };
+    if (occupied.size >= maxPositions) return { ok: false, duplicate: false, count: occupied.size };
+    reserved.set(sym, now + PENDING_BUY_SLOT_TTL_MS);
+    _pendingBuySlots.set(userId, reserved);
+    return { ok: true, count: occupied.size + 1 };
+}
+
 async function executeAutonomousTrading(userId) {
     const cycleStartedAt = Date.now(); // live scan's time budget is measured from here
     agentHealth.recordHeartbeat('ARROW', 'START', { userId });
@@ -4544,6 +4584,25 @@ async function executeAutonomousTrading(userId) {
                 }
             }
 
+            // Fresh, cross-cycle position count — see _reservePositionSlot. Last gate before
+            // an order can be placed, so a reserved slot is (almost) always a real buy.
+            const _slot = await _reservePositionSlot(userId, opportunity.symbol, regimeMaxPositions);
+            if (!_slot.ok && _slot.duplicate) {
+                logger.warn('[SlotGuard] Skipping — symbol already held, pending, or being bought by another cycle', {
+                    userId, symbol: opportunity.symbol
+                });
+                _recordRejection(opportunity, userId, 'duplicate_inflight', 'held/pending/reserved by a concurrent cycle');
+                continue;
+            }
+            if (!_slot.ok) {
+                logger.warn('[SlotGuard] Position limit reached on a fresh count — a concurrent cycle filled the slots', {
+                    userId, symbol: opportunity.symbol, freshCount: _slot.count, maxPositions: regimeMaxPositions,
+                    snapshotCount: currentHoldings.length + trades.length
+                });
+                _recordRejectionForRemaining(_oppIdx, 'position_cap', `fresh ${_slot.count}/${regimeMaxPositions}`);
+                break;
+            }
+
             let shares = Math.floor(positionSize / opportunity.price);
 
             // Small-account floor: Kelly rounds to 0 for stocks > Kelly positionSize.
@@ -5789,6 +5848,7 @@ module.exports = {
     getGateStats,
     getVixLevel,
     resetOracleCycleBudget,
+    _reservePositionSlot, // exported for tests
     SKIP_REASONS,
     SKIP_REASON_FAMILIES,
     getSkipReasonFamily

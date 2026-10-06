@@ -522,14 +522,39 @@ if ($pm2CmdEarly) {
     # pm2 kill uses the named pipe to send a shutdown signal — if the pipe is already
     # in EPERM state (crashed daemon), pm2 kill itself fails and the pipe handle stays
     # open. Killing the node.exe process directly releases the pipe handle immediately.
+    #
+    # 2026-10-06: killing ONLY the daemon orphaned every app it managed. On Windows,
+    # force-killing a parent never kills its children, and PM2 runs each app as
+    # `node ...\pm2\lib\ProcessContainerFork.js` (the real script path is passed via
+    # env, not the command line), so none of the app.js/worker.js/cryptoWorker.js
+    # command-line matchers below could see the orphans either. Result on every PM2
+    # restart: the OLD worker kept running old code and held the leadership lock (the
+    # new worker exits as "secondary" and PM2 restart-loops it), and two crypto bots
+    # traded side by side (no leader election there). Now: graceful `pm2 kill` first
+    # (lets apps run their shutdown handlers / release leadership), bounded so an
+    # EPERM'd pipe can't hang the script; then kill each daemon's whole process TREE;
+    # then sweep any ProcessContainerFork orphans left from earlier runs.
+    $pm2KillJob = Start-Job -ScriptBlock { & pm2 kill 2>$null | Out-Null }
+    if (-not (Wait-Job $pm2KillJob -Timeout 20)) {
+        Write-Host "      pm2 kill did not finish in 20s (EPERM pipe?) — forcing" -ForegroundColor DarkYellow
+    }
+    Remove-Job $pm2KillJob -Force -ErrorAction SilentlyContinue
+
     Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -match 'pm2[\\/]lib[\\/]Daemon\.js' } |
         ForEach-Object {
-            Write-Host "      Killing PM2 daemon (PID $($_.ProcessId))..." -ForegroundColor DarkGray
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            Write-Host "      Killing PM2 daemon + its apps (PID $($_.ProcessId), tree)..." -ForegroundColor DarkGray
+            & taskkill.exe /PID $_.ProcessId /T /F 2>$null | Out-Null
         }
     Start-Sleep -Milliseconds 800
-    try { & pm2 kill 2>$null | Out-Null } catch {}
+
+    Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'pm2[\\/]lib[\\/]ProcessContainer(Fork)?\.js' } |
+        ForEach-Object {
+            Write-Host "      Killing orphaned PM2 app process (PID $($_.ProcessId))..." -ForegroundColor DarkGray
+            & taskkill.exe /PID $_.ProcessId /T /F 2>$null | Out-Null
+        }
+    Start-Sleep -Milliseconds 800
     $pm2Home = "$env:USERPROFILE\.pm2"
     Remove-Item "$pm2Home\rpc.sock" -Force -ErrorAction SilentlyContinue
     Remove-Item "$pm2Home\pub.sock" -Force -ErrorAction SilentlyContinue

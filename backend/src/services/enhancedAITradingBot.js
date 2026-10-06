@@ -1517,6 +1517,30 @@ function getWeeklySignalFromDailyBars(bars) {
 const _withQuoteTimeout = (promise, fallback, ms = 10000) =>
     Promise.race([promise, new Promise(resolve => setTimeout(() => resolve(fallback), ms))]);
 
+// ── Validated component weights (2026-10-06) ─────────────────────────────────
+// Each score component was tested against clean 5-day forward returns (scan-day close
+// → 5th close after, date-demeaned, ~15k scanned symbols, Jul 15 - Oct 5, split into two
+// halves to check stability). These five components' BONUSES predicted equal or WORSE
+// returns in both halves, so they no longer add points — their penalties still apply.
+// In simulation this improved ranking in both halves and cut score saturation at 100
+// from 12.3% to 4.7%. Their log lines are kept (with the original signal value plus an
+// "[unscored]" marker) so the weekly component-validation report can keep measuring
+// them and any can be re-enabled — via SCORE_UNSCORED_BONUSES, no code change — if it
+// starts predicting. Set SCORE_UNSCORED_BONUSES="" to restore the old scoring.
+const UNSCORED_BONUSES = new Set(
+    (process.env.SCORE_UNSCORED_BONUSES ?? 'News,Gemini,RelStrength5d,WeeklyAlign,SmartMoney')
+        .split(',').map(s => s.trim()).filter(Boolean)
+);
+const UNSCORED_MARKER = '[unscored]';
+/** Points a component actually adds: 0 for a disabled bonus, unchanged otherwise. */
+function _scoredPts(component, pts) {
+    return pts > 0 && UNSCORED_BONUSES.has(component) ? 0 : pts;
+}
+/** Log-line suffix marking a bonus that was logged but not added to the score. */
+function _unscoredNote(component, pts) {
+    return pts > 0 && UNSCORED_BONUSES.has(component) ? ` ${UNSCORED_MARKER}` : '';
+}
+
 // liveMode: true from a live per-user trading cycle (real-time entry scan or an open
 // position's decay re-score) — routes PULSE/ORACLE's Ollama calls to the smaller/faster
 // model (see ollamaService.js FAST_MODEL) instead of the nightly batch scan's thorough
@@ -1845,8 +1869,8 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
 
             // 5-day confirmation: +3 if both timeframes agree bullish, -3 if 5d diverging bearish
             if (relativeStrength > 3 && relativeStrength5d > 2) {
-                rsAdj += 3;
-                scoringLog.push(`RelStrength5d: +3 (momentum confirming, 5d RS +${relativeStrength5d.toFixed(1)}pp)`);
+                rsAdj += _scoredPts('RelStrength5d', 3);
+                scoringLog.push(`RelStrength5d: +3 (momentum confirming, 5d RS +${relativeStrength5d.toFixed(1)}pp)${_unscoredNote('RelStrength5d', 3)}`);
             } else if (relativeStrength > 0 && relativeStrength5d < -3) {
                 rsAdj -= 3;
                 scoringLog.push(`RelStrength5d: -3 (momentum decelerating, 5d RS ${relativeStrength5d.toFixed(1)}pp)`);
@@ -1897,8 +1921,8 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             if (Number.isFinite(parsedSentiment)) {
                 newsSentiment = Math.max(-100, Math.min(100, parsedSentiment));
                 newsScoreAdjustment = (newsSentiment / 100) * AI_NEWS_MAX_IMPACT * AI_NEWS_SCORE_WEIGHT;
-                aiScore += newsScoreAdjustment;
-                scoringLog.push(`News: ${newsScoreAdjustment >= 0 ? '+' : ''}${newsScoreAdjustment.toFixed(2)} (sentiment ${newsSentiment.toFixed(1)}, sources ${newsSourceCount}${xPostCount ? `, X ${xPostCount}` : ''})`);
+                aiScore += _scoredPts('News', newsScoreAdjustment);
+                scoringLog.push(`News: ${newsScoreAdjustment >= 0 ? '+' : ''}${newsScoreAdjustment.toFixed(2)} (sentiment ${newsSentiment.toFixed(1)}, sources ${newsSourceCount}${xPostCount ? `, X ${xPostCount}` : ''})${_unscoredNote('News', newsScoreAdjustment)}`);
             }
         }
 
@@ -2006,10 +2030,10 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         // smartMoneyScore is 0–1 from institutionalOwnership + insider transactions.
         {
             let smAdj = 0;
-            if (smartMoneyScore > 0.70)      { smAdj = +8; scoringLog.push(`SmartMoney: +8 (strong institutional ${(smartMoneyScore * 100).toFixed(0)}%)`); }
-            else if (smartMoneyScore > 0.55) { smAdj = +4; scoringLog.push(`SmartMoney: +4 (moderate institutional)`); }
+            if (smartMoneyScore > 0.70)      { smAdj = +8; scoringLog.push(`SmartMoney: +8 (strong institutional ${(smartMoneyScore * 100).toFixed(0)}%)${_unscoredNote('SmartMoney', 8)}`); }
+            else if (smartMoneyScore > 0.55) { smAdj = +4; scoringLog.push(`SmartMoney: +4 (moderate institutional)${_unscoredNote('SmartMoney', 4)}`); }
             else if (smartMoneyScore < 0.35) { smAdj = -4; scoringLog.push(`SmartMoney: -4 (low institutional interest)`); }
-            aiScore += smAdj;
+            aiScore += _scoredPts('SmartMoney', smAdj);
         }
 
         // 12b. SHORT FLOAT / SQUEEZE POTENTIAL (±8)
@@ -2067,8 +2091,8 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         if (geminiResult) {
             const gemAdj = Math.round((geminiResult.score - 50) / 10); // maps 0-100 → -5..+5
             if (gemAdj !== 0) {
-                aiScore += gemAdj;
-                scoringLog.push(`Gemini: ${gemAdj >= 0 ? '+' : ''}${gemAdj} (${geminiResult.label})`);
+                aiScore += _scoredPts('Gemini', gemAdj);
+                scoringLog.push(`Gemini: ${gemAdj >= 0 ? '+' : ''}${gemAdj} (${geminiResult.label})${_unscoredNote('Gemini', gemAdj)}`);
             }
 
             // 15b. PULSE Risk Flags — hard skip / heavy penalty, distinct from ordinary
@@ -2236,8 +2260,8 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             if (ws) {
                 let wtAdj = 0;
                 if (ws.bullish) {
-                    wtAdj = +8;
-                    scoringLog.push(`WeeklyAlign: +8 (above WMA20, 4w return +${ws.return4w.toFixed(1)}%)`);
+                    wtAdj = _scoredPts('WeeklyAlign', 8);
+                    scoringLog.push(`WeeklyAlign: +8 (above WMA20, 4w return +${ws.return4w.toFixed(1)}%)${_unscoredNote('WeeklyAlign', 8)}`);
                 } else if (ws.bearish) {
                     wtAdj = -8;
                     scoringLog.push(`WeeklyAlign: -8 (below WMA20, 4w return ${ws.return4w.toFixed(1)}% — higher TF bearish)`);
@@ -4308,6 +4332,7 @@ async function executeAutonomousTrading(userId) {
             if (Array.isArray(opportunity.scoringLog) && opportunity.scoringLog.length > 0) {
                 let grossBull = 0, grossBear = 0;
                 for (const line of opportunity.scoringLog) {
+                    if (line.includes(UNSCORED_MARKER)) continue; // logged for monitoring, not part of the score
                     const m = line.match(/([+-]\d+)/);
                     if (!m) continue;
                     const pts = parseInt(m[1]);
@@ -5849,6 +5874,7 @@ module.exports = {
     getVixLevel,
     resetOracleCycleBudget,
     _reservePositionSlot, // exported for tests
+    UNSCORED_BONUSES,     // read by scoreComponentValidationService's weekly report
     SKIP_REASONS,
     SKIP_REASON_FAMILIES,
     getSkipReasonFamily

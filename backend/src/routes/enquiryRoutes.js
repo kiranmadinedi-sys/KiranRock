@@ -1033,6 +1033,9 @@ function buildInvestmentExample(tickers, amount) {
 function parseFactors(scoringLog) {
     const bullish = [], bearish = [];
     for (const line of (scoringLog || [])) {
+        // '[unscored]' = logged for monitoring but not added to the score (UNSCORED_BONUSES
+        // in enhancedAITradingBot.js) — counting it here would misstate the attribution.
+        if (line.includes('[unscored]')) continue;
         const m = line.match(/([+-]\d+)/);
         if (!m) continue;
         const pts = parseInt(m[1]);

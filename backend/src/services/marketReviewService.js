@@ -72,16 +72,41 @@ async function captureDailySnapshot() {
     return { captured };
 }
 
+// Forward returns are measured from base_close — the last daily close on or before
+// scan_date — not from price_at_scan. Found 2026-10-06: price_at_scan is the quote the
+// nightly analysis happened to see, and in a 3,000-row sample only 8% matched the scan
+// day's close (23% were the PREVIOUS day's close, 64% neither, e.g. intraday/stale
+// quotes). Forward bars start the day after scan_date, so part of the scan day's own move
+// leaked into every "forward" return — it made DayChange look like the single strongest
+// predictor in the score (t=+16) when on clean close-to-close returns it's negative.
+// price_at_scan is kept as the record of what the scan saw. Rows with no base_close are
+// (re)computed, which also rebuilt all pre-fix history.
+let _baseCloseColumnReady = false;
+
 async function backfillForwardReturns() {
+    if (!_baseCloseColumnReady) {
+        await query(`ALTER TABLE market_review_snapshots ADD COLUMN IF NOT EXISTS base_close NUMERIC`);
+        _baseCloseColumnReady = true;
+    }
+    // The 21-day window stops rows that can never complete (delisted symbols, no bars)
+    // from being re-picked forever — ORDER BY scan_date ASC + LIMIT would otherwise let
+    // enough of them permanently starve newer rows.
     const pending = await query(`
-        SELECT id, scan_date, symbol, price_at_scan
+        SELECT id, scan_date, symbol, price_at_scan, (scan_date <= CURRENT_DATE - 21) AS expired
         FROM market_review_snapshots
         WHERE scan_date < CURRENT_DATE
           AND price_at_scan IS NOT NULL
-          AND (return_1d_pct IS NULL OR return_3d_pct IS NULL OR return_5d_pct IS NULL)
+          AND (
+                base_close IS NULL
+             OR ((return_1d_pct IS NULL OR return_3d_pct IS NULL OR return_5d_pct IS NULL)
+                 AND scan_date > CURRENT_DATE - 21)
+          )
         ORDER BY scan_date ASC
-        LIMIT 2000
+        LIMIT 20000
     `);
+    // 20000 (was 2000): ~1,700 new rows per scan day each need several passes as 1d/3d/5d
+    // bars arrive, so 2000/run fell behind permanently — the newest rows never got a turn.
+    // Each row is three small indexed queries (~1ms), so a full batch is seconds.
 
     let updated = 0;
     for (const row of pending.rows) {
@@ -99,12 +124,26 @@ async function backfillForwardReturns() {
                 LIMIT 5
             `, [row.symbol, row.scan_date]);
 
-            if (bars.rows.length === 0) continue;
+            // Last close on or before scan_date (a weekend/holiday-stamped scan used the
+            // prior session's data, so that close is its true starting point).
+            const baseRes = await query(`
+                SELECT close FROM daily_bars
+                WHERE symbol = $1 AND timestamp::date <= $2::date
+                ORDER BY timestamp DESC LIMIT 1
+            `, [row.symbol, row.scan_date]);
+            const baseClose = baseRes.rows[0] ? parseFloat(baseRes.rows[0].close) : null;
+            if (!(baseClose > 0)) {
+                // No price history for this symbol. Retried within the 21-day window; after
+                // that, base_close = 0 marks it unresolvable so it's never re-picked.
+                if (row.expired) {
+                    await query(`UPDATE market_review_snapshots SET base_close = 0, updated_at = NOW() WHERE id = $1`, [row.id]);
+                }
+                continue;
+            }
 
-            const priceAtScan = parseFloat(row.price_at_scan);
             const closeAt = (idx) => bars.rows[idx] ? parseFloat(bars.rows[idx].close) : null;
-            const pct = (c) => (c != null && priceAtScan > 0)
-                ? Number((((c - priceAtScan) / priceAtScan) * 100).toFixed(3))
+            const pct = (c) => c != null
+                ? Number((((c - baseClose) / baseClose) * 100).toFixed(3))
                 : null;
 
             const c1 = closeAt(0), c3 = closeAt(2), c5 = closeAt(4);
@@ -114,9 +153,10 @@ async function backfillForwardReturns() {
                 SET close_1d = $1, return_1d_pct = $2,
                     close_3d = $3, return_3d_pct = $4,
                     close_5d = $5, return_5d_pct = $6,
+                    base_close = $7,
                     updated_at = NOW()
-                WHERE id = $7
-            `, [c1, pct(c1), c3, pct(c3), c5, pct(c5), row.id]);
+                WHERE id = $8
+            `, [c1, pct(c1), c3, pct(c3), c5, pct(c5), baseClose, row.id]);
             updated++;
         } catch (err) {
             logger.warn('[MarketReview] Backfill failed for row', { symbol: row.symbol, error: err.message });

@@ -412,6 +412,52 @@ async function checkRegimeBlocking(userId) {
 
 // ─── Main cycle ───────────────────────────────────────────────────────────────
 
+/**
+ * Check J — DB connection pool saturation.
+ * Fires during market hours if the pool has waiters, signalling the same
+ * timeout storm that killed autonomous trading on Oct-2 at market open.
+ */
+function checkDbPool() {
+    const { pool: dbPool } = require('../config/database');
+    const waiting = dbPool.waitingCount ?? 0;
+    const idle    = dbPool.idleCount    ?? dbPool.totalCount;
+    const total   = dbPool.totalCount   ?? 0;
+    if (waiting > 2) {
+        return `WARNING: DB pool saturated — ${waiting} queries waiting, ${idle}/${total} connections idle. Autonomous trading may be stalling.`;
+    }
+    return null;
+}
+
+/**
+ * Check K — Pre-market position reconciliation (9:15–9:25 AM ET, once per day).
+ * Catches any drift that accumulated overnight before the first bot cycle fires.
+ */
+const _premarketReconcileDone = new Set();
+async function maybeRunPremarketReconciliation(activeUserIds) {
+    const et    = etNow();
+    const hour  = et.getHours();
+    const min   = et.getMinutes();
+    const today = et.toDateString();
+    // 9:15–9:25 AM ET window, once per calendar day
+    if (!(hour === 9 && min >= 15 && min <= 25)) return null;
+    if (_premarketReconcileDone.has(today)) return null;
+    _premarketReconcileDone.add(today);
+
+    const results = [];
+    for (const uid of activeUserIds) {
+        try {
+            const reconcile = require('./positionReconciliationService');
+            const res = await reconcile.reconcilePositions(uid, { trigger: 'PRE_MARKET' });
+            const issues = (res?.phantoms?.length || 0) + (res?.shadows?.length || 0) + (res?.drifts?.length || 0);
+            if (issues > 0) results.push(`user ${uid.slice(0,8)}: ${issues} issue(s) fixed`);
+        } catch (e) {
+            logger.error('[HealthMonitor] Pre-market reconciliation failed', { uid, error: e.message });
+        }
+    }
+    logger.info('[HealthMonitor] Pre-market reconciliation complete', { fixed: results.length > 0 ? results : 'clean' });
+    return results.length > 0 ? `Pre-market reconciliation fixed: ${results.join(', ')}` : null;
+}
+
 async function runHealthCheck() {
     try {
         const issues = [], fixes = [];
@@ -443,6 +489,14 @@ async function runHealthCheck() {
         // (bad credentials, Alpaca error, etc.) can't skip the rest.
         if (isMarketOpen()) {
             const activeUserIds = await getActiveTradingUserIds();
+
+            // J — DB pool saturation check (system-wide, not per-user)
+            const poolIssue = checkDbPool();
+            if (poolIssue) issues.push({ key: 'db_pool_saturation', msg: poolIssue });
+
+            // K — Pre-market reconciliation (9:15–9:25 AM ET only, once per day)
+            const premarketFixed = await maybeRunPremarketReconciliation(activeUserIds);
+            if (premarketFixed) fixes.push({ msg: premarketFixed, userId: KMADINED });
 
             for (const uid of activeUserIds) {
                 const tag = activeUserIds.length > 1 ? ` [user ${uid.slice(0, 8)}]` : '';

@@ -9,9 +9,9 @@ const pool = new Pool({
     database: process.env.DB_NAME     || 'kiranrock_trading', // Corrected back to DB_NAME
     user:     process.env.DB_USER     || 'postgres',
     password: process.env.DB_PASSWORD || 'admin',
-    max: 20,
+    max: 30,                      // raised from 20: market-open burst saturated the pool
     idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 10000,
+    connectionTimeoutMillis: 5000, // fail fast so waiters retry quickly instead of piling up
 });
 
 // Event listeners for pool events

@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node --max-old-space-size=512 src/app.js",
     "start:worker": "node --max-old-space-size=512 src/worker.js",
+    "start:crypto": "node --max-old-space-size=512 src/cryptoWorker.js",
     "dev": "nodemon --exec 'node --max-old-space-size=512' src/app.js",
     "dev:worker": "nodemon --exec 'node --max-old-space-size=512' src/worker.js",
     "test": "jest",

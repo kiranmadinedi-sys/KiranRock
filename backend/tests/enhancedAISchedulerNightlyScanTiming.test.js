@@ -66,9 +66,18 @@ describe('enhancedAIScheduler — nightly scan no longer waits for midnight to s
             expect(_effectiveScanDay(2, '2026-10-02')).toBe('2026-10-02');
         });
 
-        test('early morning with no tracked run falls back to the raw calendar date', () => {
+        // 2026-10-07: was "falls back to the raw calendar date" — but no tracked run in the
+        // early morning means the process restarted, and then the only scan that can be
+        // owed is the previous trading day's evening scan. The raw date made every
+        // early-morning restart launch a brand-new scan stamped with today's date.
+        test('early morning with no tracked run (process restarted) checks the previous trading day', () => {
             nightlyScanSvc.getScanTargetDate.mockReturnValue(null);
-            expect(_effectiveScanDay(2, '2026-10-02')).toBe('2026-10-02');
+            expect(_effectiveScanDay(2, '2026-10-07')).toBe('2026-10-06');
+        });
+
+        test('a Monday early-morning restart checks Friday, not Sunday', () => {
+            nightlyScanSvc.getScanTargetDate.mockReturnValue(null);
+            expect(_effectiveScanDay(2, '2026-10-05')).toBe('2026-10-02');
         });
 
         test('early morning with a stale (multi-day-old) target falls back to the raw calendar date', () => {
@@ -106,6 +115,33 @@ describe('enhancedAIScheduler — nightly scan no longer waits for midnight to s
             // blocked (old behavior: _scanCompletedDate wrongly held '2026-10-02' from
             // step 1, matching today's etDate and silently skipping the whole evening).
             expect(nightlyScanSvc.runNightlyUniverseScan).toHaveBeenCalledWith({ missingOnly: false });
+        });
+    });
+
+    describe('runNightlyScanTrigger — early-morning restart (2026-10-07 incident)', () => {
+        test('a restart after a COMPLETE evening scan does not launch a new scan', async () => {
+            jest.setSystemTime(new Date('2026-10-07T07:03:00.000Z')); // 3:03 AM EDT, Wed
+            nightlyScanSvc.getScanTargetDate.mockReturnValue(null);   // in-memory target wiped by the restart
+            query
+                .mockResolvedValueOnce({ rows: [{ cnt: '2630' }] })   // rows for 2026-10-06
+                .mockResolvedValueOnce({ rows: [{ n: '2630' }] });    // hermes target for 2026-10-06 → threshold 2367
+
+            await runNightlyScanTrigger();
+
+            expect(query.mock.calls[0][1]).toEqual(['2026-10-06']);
+            expect(nightlyScanSvc.runNightlyUniverseScan).not.toHaveBeenCalled();
+        });
+
+        test('a restart after an INCOMPLETE evening scan still finishes the job', async () => {
+            jest.setSystemTime(new Date('2026-10-07T07:03:00.000Z'));
+            nightlyScanSvc.getScanTargetDate.mockReturnValue(null);
+            query
+                .mockResolvedValueOnce({ rows: [{ cnt: '900' }] })    // evening scan cut short
+                .mockResolvedValueOnce({ rows: [{ n: '2630' }] });
+
+            await runNightlyScanTrigger();
+
+            expect(nightlyScanSvc.runNightlyUniverseScan).toHaveBeenCalled();
         });
     });
 

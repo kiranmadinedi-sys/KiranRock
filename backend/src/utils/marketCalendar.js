@@ -59,8 +59,20 @@ function isMarketOpen(date = new Date()) {
     return etTime >= 9.5 && etTime < 16;
 }
 
+/**
+ * The NYSE trading day before `dateStr` (YYYY-MM-DD), skipping weekends and listed
+ * holidays. Pure date-string arithmetic (noon UTC) so no timezone can shift the day.
+ */
+function previousTradingDay(dateStr) {
+    const d = new Date(`${dateStr}T12:00:00Z`);
+    do {
+        d.setUTCDate(d.getUTCDate() - 1);
+    } while (d.getUTCDay() === 0 || d.getUTCDay() === 6 || NYSE_HOLIDAYS.has(d.toISOString().slice(0, 10)));
+    return d.toISOString().slice(0, 10);
+}
+
 if (isTradingHoliday()) {
     logger.info('[MarketCalendar] Today is a listed NYSE holiday — isMarketOpen() will return false all day');
 }
 
-module.exports = { isMarketOpen, isTradingHoliday, NYSE_HOLIDAYS };
+module.exports = { isMarketOpen, isTradingHoliday, previousTradingDay, NYSE_HOLIDAYS };

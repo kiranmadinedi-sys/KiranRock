@@ -1103,7 +1103,16 @@ function _effectiveScanDay(etHour, etDate) {
     if (etHour >= 16) return etDate;
     const nightlyScanSvc = require('./nightlyUniverseScanService');
     const lastTarget = nightlyScanSvc.getScanTargetDate();
-    if (!lastTarget) return etDate;
+    // No in-memory target = the process restarted since the last scan (getScanTargetDate()
+    // lives in module memory). In this 00:00-09:25 ET segment the only scan that can be
+    // owed is the PREVIOUS trading day's evening scan — returning etDate here made every
+    // early-morning restart see "no rows for today" and launch a brand-new full scan
+    // stamped with today's date, even when last evening's scan was complete. Found
+    // 2026-10-07: a 02:03 CT restart started a fresh 10/07 scan despite 10/06 holding
+    // 2,630 rows (threshold 2,367), and on 10/06 the same thing left the morning
+    // candidate loader trading from a partial 979-row scan. previousTradingDay (not
+    // just "yesterday") so a Monday-morning restart checks Friday's scan, not Sunday's.
+    if (!lastTarget) return require('../utils/marketCalendar').previousTradingDay(etDate);
     const yesterday = _addDaysToDateString(etDate, -1);
     return (lastTarget === etDate || lastTarget === yesterday) ? lastTarget : etDate;
 }
@@ -1160,30 +1169,17 @@ async function runNightlyScanTrigger() {
         // Paired with the same fix in nightlyUniverseScanService.js's missingOnly resume
         // set: found 2026-08-26, both together caused an infinite ~9min retry loop on the
         // same 17 permanently-failing symbols, all day, every day a batch had failures.
+        // Count exactly the scan day's own rows. This keeps the 2026-08-20/21 guarantee
+        // (an older COMPLETED scan must never be misread as progress on the scan day —
+        // Aug 19's 434 rows once blocked two real launches) by construction, and unlike
+        // the old "MAX(analysis_date) within the last 1 day" lookup it still works when
+        // the scan day is further back — e.g. Friday, checked on a Monday early-morning
+        // restart (see _effectiveScanDay).
         const { rows } = await query(
-            `SELECT analysis_date, COUNT(*) AS cnt
-             FROM daily_universe_analysis
-             WHERE analysis_date = (
-                 SELECT MAX(analysis_date)
-                 FROM daily_universe_analysis
-                 WHERE analysis_date >= CURRENT_DATE - INTERVAL '1 day'
-                   AND analysis_date <= CURRENT_DATE
-             )
-             GROUP BY analysis_date`
+            `SELECT COUNT(*) AS cnt FROM daily_universe_analysis WHERE analysis_date = $1::date`,
+            [scanDay]
         );
-        const row = rows[0];
-        // The window above deliberately allows yesterday's date to match (a scan
-        // started before midnight still needs its in-progress count recognized).
-        // But if NOTHING has been scanned yet for this scan day, that same window
-        // still matches an already-COMPLETED older scan, and its count would wrongly
-        // look like progress — declaring this scan day "done" without it ever running.
-        // Found 2026-08-20/21: Aug 19's success (434 scored) sat un-superseded and got
-        // misread as complete on both following evenings, so the real scan never
-        // launched for two days straight. Only trust the count when the matched date
-        // is actually the scan day we're tracking right now.
-        if (row && new Date(row.analysis_date).toISOString().slice(0, 10) === scanDay) {
-            todayCount = parseInt(row.cnt ?? 0);
-        }
+        todayCount = parseInt(rows[0]?.cnt ?? 0, 10);
     } catch (_) { return; }
 
     const targetSize = await _getTargetUniverseSize(scanDay);

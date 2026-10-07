@@ -161,9 +161,18 @@ async function scanExtendedHoursForUser(user) {
 
     const enhancedAITradingBot = require('./enhancedAITradingBot');
     const riskConfig = await enhancedAITradingBot.getUserRiskConfig(userId);
-    const opportunities = await enhancedAITradingBot.scanMarketForOpportunities(userId, 50, riskConfig.minBuyScore);
 
+    // Position cap — this path had none: only the per-day count above, never the account's
+    // total. Found 2026-10-06: the paper account (max_open_positions 4, already holding 7)
+    // bought SNOW after hours to reach 8, and ran ~65 full pre-market scans (each with
+    // live ORACLE calls) while it could never legally buy. Checked BEFORE the scan so a
+    // full account costs nothing; the per-order slot guard below covers the race with
+    // regular-hours cycles.
     const holdings = await holdingsDb.getUserHoldings(userId);
+    const maxPositions = riskConfig.maxOpenPositions;
+    if (maxPositions && holdings.length >= maxPositions) return;
+
+    const opportunities = await enhancedAITradingBot.scanMarketForOpportunities(userId, 50, riskConfig.minBuyScore);
     const owned = new Set(holdings.map(h => h.symbol));
 
     const candidates = opportunities
@@ -184,6 +193,18 @@ async function scanExtendedHoursForUser(user) {
         // Alpaca does not accept notional/fractional orders in extended sessions —
         // whole shares only. Skip rather than round up into an oversized position.
         if (shares < 1) continue;
+
+        // Same fresh, cross-cycle slot check the regular-hours buy loop uses.
+        if (maxPositions) {
+            const slot = await enhancedAITradingBot._reservePositionSlot(userId, opp.symbol, maxPositions);
+            if (!slot.ok && slot.duplicate) continue;
+            if (!slot.ok) {
+                logger.info('[ExtendedHours] Position limit reached on a fresh count — no more entries', {
+                    userId, symbol: opp.symbol, freshCount: slot.count, maxPositions
+                });
+                break;
+            }
+        }
 
         try {
             const result = await brokerService.buyLimitExtendedHours(userId, opp.symbol, shares, {
@@ -210,4 +231,4 @@ async function scanExtendedHoursForUser(user) {
     }
 }
 
-module.exports = { isExtendedHoursSession, runExtendedHoursCycle, getEligibleUsers, manageOpenPositionsDuringExtendedHours };
+module.exports = { isExtendedHoursSession, runExtendedHoursCycle, getEligibleUsers, manageOpenPositionsDuringExtendedHours, scanExtendedHoursForUser };

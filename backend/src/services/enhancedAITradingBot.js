@@ -5873,7 +5873,7 @@ module.exports = {
     getGateStats,
     getVixLevel,
     resetOracleCycleBudget,
-    _reservePositionSlot, // exported for tests
+    _reservePositionSlot, // also used by extendedHoursTradingService's entry loop
     UNSCORED_BONUSES,     // read by scoreComponentValidationService's weekly report
     SKIP_REASONS,
     SKIP_REASON_FAMILIES,

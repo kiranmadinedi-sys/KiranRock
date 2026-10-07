@@ -53,8 +53,24 @@ function scoreCandidate(quote) {
     return Math.round(Math.max(0, Math.min(100, score)));
 }
 
+// No new entries from 15:45 ET for accounts that flatten at end of day. scanForUser had no
+// time check at all and kept opening positions until the 16:00 close — after the 15:50
+// flatten had already run — so those were held overnight on ANY day. Found 2026-10-06: a
+// fresh 102-share NOK entry at 15:59 ET. 15:45 leaves the 15:50 flatten window to close
+// whatever's left.
+const ENTRY_CUTOFF_ET_MIN = 15 * 60 + 45;
+function _pastEntryCutoff(now = new Date()) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hour12: false
+    }).formatToParts(now);
+    const h = parseInt(parts.find(p => p.type === 'hour').value, 10);
+    const m = parseInt(parts.find(p => p.type === 'minute').value, 10);
+    return h * 60 + m >= ENTRY_CUTOFF_ET_MIN;
+}
+
 async function scanForUser(user) {
     const config = user; // getActiveUsers() already joins intraday_config columns onto the user row
+    if (config.force_flat_eod && _pastEntryCutoff()) return { opportunities: 0, trades: 0 };
     const openPositions = await intradayDb.getPositions(user.id);
 
     if (openPositions.length >= config.max_open_positions) return { opportunities: 0, trades: 0 };

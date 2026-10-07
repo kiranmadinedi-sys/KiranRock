@@ -87,11 +87,16 @@ function startScheduler() {
     }
 
     tickJob = cron.schedule('* * * * 1-5', runTick, { timezone: 'America/New_York' });
-    // 15:50 ET — 10 minutes before close, force-flatten anyone with force_flat_eod set.
-    flattenJob = cron.schedule('50 15 * * 1-5', runForceFlatten, { timezone: 'America/New_York' });
+    // 15:50-15:58 ET, every minute — force-flatten anyone with force_flat_eod set. Was a
+    // single 15:50 run with no retry: on 2026-10-06 a DB connect stall hit exactly then
+    // ("Could not load active users for EOD flatten") and the paper account's Blitz
+    // positions were held overnight. Repeats are safe: forceFlattenUser only sells what's
+    // still open, sellIntraday re-checks the real broker position and cancels resting
+    // sells first, and each sell runs under the per-user lock — once flat, later runs no-op.
+    flattenJob = cron.schedule('50-58 15 * * 1-5', runForceFlatten, { timezone: 'America/New_York' });
 
     schedulerActive = true;
-    logger.info('[Blitz] Scheduler started — 1-min cycle during market hours, EOD flatten at 15:50 ET');
+    logger.info('[Blitz] Scheduler started — 1-min cycle during market hours, EOD flatten 15:50-15:58 ET (retries each minute)');
 }
 
 function stopScheduler() {

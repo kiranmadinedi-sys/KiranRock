@@ -579,11 +579,23 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
         }
 
         try {
-            // 1. Delete the phantom holding (Alpaca is source of truth)
-            await query(
-                `DELETE FROM holdings WHERE user_id = $1 AND UPPER(symbol) = $2`,
+            // 1. Delete the phantom holding (Alpaca is source of truth) — and use the delete
+            //    itself as the claim on this exit. Found 2026-10-06: two reconcile runs for the
+            //    same user (different triggers) both saw anilboddu1's AEHR phantom and both
+            //    wrote a SELL in the same millisecond, doubling the realized loss. The
+            //    recentSell check above can't stop that (both runs check before either
+            //    inserts). Postgres row-locks the DELETE, so exactly one run removes the row;
+            //    a run whose DELETE removed nothing lost the race and must not record a sale.
+            const claim = await query(
+                `DELETE FROM holdings WHERE user_id = $1 AND UPPER(symbol) = $2 RETURNING id`,
                 [userId, symbol]
             );
+            if (claim.rowCount === 0) {
+                logger.info('[Reconcile] PHANTOM already handled by a concurrent reconcile run — not logging a second SELL', {
+                    userId, symbol, dbQty
+                });
+                continue;
+            }
 
             // 2. Write a SELL to the trades table so transaction history stays complete.
             //    Marks the exit as reconciler-detected so analysts know the price is estimated.
@@ -622,18 +634,31 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
                 // lines below in this file (and the crypto stale_skip fix from 2026-09-12) —
                 // cast+AT TIME ZONE for the same `timestamp without time zone` round-trip
                 // reason documented on tradesDatabaseService.recordTrade's tradeDate param.
-                await query(
+                // broker_order_id = the fill's real order id (exitOrderId, when the activities
+                // lookup found it). Without it these rows sat outside the partial
+                // UNIQUE(user_id, broker_order_id) index from 2026-09-19, so nothing stopped a
+                // second recording of the same fill by another code path. ON CONFLICT: that
+                // fill is already recorded — skip, and skip the journal close below with it.
+                const _ins = await query(
                     `INSERT INTO trades
                          (user_id, symbol, action, quantity, price, total, trade_date,
                           executed_by, notes, pnl, pnl_percent, status,
-                          ai_score, sector, entry_regime, hold_hours)
+                          ai_score, sector, entry_regime, hold_hours, broker_order_id)
                      VALUES ($1, $2, 'SELL', $3, $4, $5,
                              COALESCE($13::timestamptz AT TIME ZONE 'America/Chicago', NOW()),
-                             'reconciler', $8, $6, $7, 'CLOSED', $9, $10, $11, $12)`,
+                             'reconciler', $8, $6, $7, 'CLOSED', $9, $10, $11, $12, $14)
+                     ON CONFLICT (user_id, broker_order_id) WHERE broker_order_id IS NOT NULL DO NOTHING
+                     RETURNING id`,
                     [userId, symbol, dbQty, fillPrice, total, pnl, pnlPct,
                      `Alpaca stop/exit detected by position reconciler — price source: ${priceSource}, exit type: ${exitReasonTag}`,
-                     entryScore, entrySector, entryRegime, holdHours, exitTime]
+                     entryScore, entrySector, entryRegime, holdHours, exitTime, exitOrderId]
                 );
+                const _alreadyRecorded = _ins.rowCount === 0;
+                if (_alreadyRecorded) {
+                    logger.info('[Reconcile] Exit fill already recorded under the same broker order id — not logging a duplicate SELL', {
+                        userId, symbol, exitOrderId
+                    });
+                }
 
                 // Stop-loss cooldown — added 2026-09-15. enhancedAITradingBot.js's own
                 // live-detected hard-stop path (isHardStop) has always set a 5-day
@@ -672,7 +697,7 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
                 // real mechanism (stop/trailing-stop/target/partial) instead of one generic
                 // "reconciler_detected" bucket that told analytics nothing about why the
                 // position closed (raised in the same follow-up review).
-                try {
+                if (!_alreadyRecorded) try { // the path that recorded this fill closed its own journal row
                     const _outcome = pnlPct > 0.5 ? 'win' : pnlPct < -0.5 ? 'loss' : 'breakeven';
                     await tradeIntelligenceService.closeLatestOpenExecution(userId, {
                         botType: 'stock', symbol, exitPrice: fillPrice, pnl, pnlPercent: pnlPct,

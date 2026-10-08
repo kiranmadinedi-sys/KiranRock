@@ -214,35 +214,57 @@ async function runNightlyUniverseScanJob() {
 }
 
 // ── Morning catch-up scan (8:00 AM ET Mon–Fri) ───────────────────────────────
-// Safety net: if the 4:30 PM nightly scan was incomplete or missed (server
+// Safety net: if the 4:15 PM nightly scan was incomplete or missed (server
 // restart, crash), this fills the gap before the 9:30 AM market open.
-// Checks TODAY's date specifically — does NOT count yesterday's data as "done".
-const CATCHUP_THRESHOLD = 420; // ~92% of 455 symbols
+//
+// Checks the PREVIOUS TRADING DAY's scan (2026-10-08). It used to check TODAY's date, written
+// when overnight scans were stamped with the next day. Since 2026-10-01 (2c639c9) the nightly
+// scan starts at 4:15 PM and its rows carry that evening's date, so at 8 AM "today" never
+// had rows and this launched a partial rescan nearly every weekday morning (09-23, 09-29,
+// 09-30, 10-06, 10-07 — up to ~1,000 rows). That partial set then became the morning
+// candidate loader's newest date, displacing the complete evening scan (10-07: 747 rows used
+// instead of 2,630), and the rescan ran on into market hours. Threshold: 90% of that day's
+// real HERMES target, same rule as enhancedAIScheduler's nightly trigger (the old fixed 420
+// was a stale ~455-symbol-universe number).
+const CATCHUP_COMPLETION_RATIO = 0.90;
+const CATCHUP_THRESHOLD_FALLBACK = 420; // only if hermes_symbol_log has no target for that date
+
+/** Rows needed for a scan date to count as complete: 90% of that day's HERMES target. */
+async function _scanCompleteThreshold(scanDate) {
+    const { query } = require('../config/database');
+    const target = parseInt((await query(
+        `SELECT COUNT(*) AS n FROM hermes_symbol_log WHERE universe_date = $1 AND passed = true AND (tier != 1 OR tier IS NULL)`,
+        [scanDate]
+    ).catch(() => ({ rows: [{ n: 0 }] }))).rows[0]?.n || 0, 10);
+    return target > 0 ? Math.round(target * CATCHUP_COMPLETION_RATIO) : CATCHUP_THRESHOLD_FALLBACK;
+}
 
 async function runMorningCatchupScan() {
     const { query } = require('../config/database');
     try {
         const todayET = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+        const scanDay = require('../utils/marketCalendar').previousTradingDay(todayET);
 
-        // Check how many symbols have been scored for TODAY specifically.
-        // Using today's date (not the most recent scan date) ensures yesterday's
-        // complete data does not mask a missing today scan.
         const { rows } = await query(
-            `SELECT COUNT(*) AS cnt
-             FROM daily_universe_analysis
-             WHERE analysis_date = $1::date AND ai_score IS NOT NULL`,
-            [todayET]
+            `SELECT COUNT(*) AS cnt FROM daily_universe_analysis WHERE analysis_date = $1::date`,
+            [scanDay]
         );
-        const todayCount = parseInt(rows[0]?.cnt ?? 0);
+        const scanDayCount = parseInt(rows[0]?.cnt ?? 0, 10);
+        const threshold = await _scanCompleteThreshold(scanDay);
 
-        if (todayCount >= CATCHUP_THRESHOLD) {
-            logger.info('[AssetUniverseScheduler] Morning catch-up: today scan already complete', { count: todayCount, date: todayET });
+        if (scanDayCount >= threshold) {
+            logger.info('[AssetUniverseScheduler] Morning catch-up: last evening\'s scan is complete — nothing to do', {
+                scanDay, count: scanDayCount, threshold
+            });
             return;
         }
 
-        logger.info('[AssetUniverseScheduler] Morning catch-up: today scan incomplete — resuming', {
-            done: todayCount, remaining: CATCHUP_THRESHOLD - todayCount, date: todayET
+        logger.info('[AssetUniverseScheduler] Morning catch-up: last evening\'s scan incomplete — scanning before the open', {
+            scanDay, done: scanDayCount, threshold, date: todayET
         });
+        const todayCount = parseInt((await query(
+            `SELECT COUNT(*) AS cnt FROM daily_universe_analysis WHERE analysis_date = $1::date`, [todayET]
+        )).rows[0]?.cnt ?? 0, 10);
 
         const nightlyScanSvc = require('./nightlyUniverseScanService');
         if (nightlyScanSvc.isScanRunning()) {
@@ -378,9 +400,10 @@ function startAssetUniverseScheduler() {
                 return;
             }
 
-            if (todayCount < CATCHUP_THRESHOLD && !nightlyScanSvc.isScanRunning()) {
+            const resumeThreshold = await _scanCompleteThreshold(todayET);
+            if (todayCount < resumeThreshold && !nightlyScanSvc.isScanRunning()) {
                 logger.info('[AssetUniverseScheduler] Nightly scan incomplete for today on startup — resuming now', {
-                    done: todayCount, remaining: CATCHUP_THRESHOLD - todayCount
+                    done: todayCount, remaining: resumeThreshold - todayCount
                 });
                 nightlyScanSvc.runNightlyUniverseScan({ missingOnly: todayCount > 0 }).catch(err =>
                     logger.error('[AssetUniverseScheduler] Nightly scan resume failed', { error: err.message })
@@ -419,6 +442,7 @@ function getSchedulerStatus() {
 // ── Manual triggers (for admin routes / testing) ──────────────────────────────
 
 module.exports = {
+    runMorningCatchupScan, // exported for tests
     startAssetUniverseScheduler,
     stopAssetUniverseScheduler,
     getSchedulerStatus,

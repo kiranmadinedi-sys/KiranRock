@@ -9,9 +9,21 @@ const pool = new Pool({
     database: process.env.DB_NAME     || 'kiranrock_trading', // Corrected back to DB_NAME
     user:     process.env.DB_USER     || 'postgres',
     password: process.env.DB_PASSWORD || 'admin',
-    max: 30,                      // raised from 20: market-open burst saturated the pool
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 5000, // fail fast so waiters retry quickly instead of piling up
+    // Pool tuning from a day of Postgres connection logging (2026-10-07):
+    // - The app opened 4,367 new connections in ~13h; 70% lived only 10-35s, because a 30s
+    //   idle timeout closed them between the 5-minute scheduler ticks and every tick rebuilt
+    //   them (bursts of 30-46/min). On Windows each new connection is a new postgres.exe
+    //   process, and at intermittent moments the machine couldn't start them in time
+    //   (06:05: 9 connections received, 0 authorized) — that was the chronic
+    //   "timeout exceeded when trying to connect" errors, 40-300/day since at least 9/25.
+    //   Keeping connections warm across ticks removes almost all of that churn.
+    // - max 30 x ~4 node processes (backend, worker, crypto, backfill) could open 120
+    //   connections against Postgres max_connections = 100; 20 keeps the total under it
+    //   now that connections are held instead of churned.
+    // - 10s connect timeout (was 5s) rides out a brief machine-level stall instead of failing.
+    max: 20,
+    idleTimeoutMillis: 10 * 60 * 1000,
+    connectionTimeoutMillis: 10000,
 });
 
 // Event listeners for pool events

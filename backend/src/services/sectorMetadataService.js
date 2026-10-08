@@ -429,15 +429,26 @@ const fs   = require('fs');
 
 const LEARNED_PATH = path.join(__dirname, 'sectorLearnedCache.json');
 
+// Bulk Finnhub sector backfill (backend/scripts/backfillSectors.js) writes its own file so it never
+// races this process's own writes of the learned cache; merged in underneath it at load.
+const FINNHUB_CACHE_PATH = path.join(__dirname, 'sectorFinnhubCache.json');
+
 let _learned = {};
 try {
     if (fs.existsSync(LEARNED_PATH)) {
         _learned = JSON.parse(fs.readFileSync(LEARNED_PATH, 'utf8'));
     }
 } catch { _learned = {}; }
+try {
+    if (fs.existsSync(FINNHUB_CACHE_PATH)) {
+        const fh = JSON.parse(fs.readFileSync(FINNHUB_CACHE_PATH, 'utf8'));
+        for (const [sym, sec] of Object.entries(fh)) if (!_learned[sym] && sec) _learned[sym] = sec;
+    }
+} catch { /* non-fatal: falls back to the learned cache + live lookups */ }
 
 let _savePending = false;
 function _persistLearned() {
+    if (process.env.NODE_ENV === 'test') return; // Jest sets this — tests must never write the real cache
     if (_savePending) return;
     _savePending = true;
     setImmediate(() => {
@@ -446,17 +457,118 @@ function _persistLearned() {
     });
 }
 
+// ── Canonical sector names ────────────────────────────────────────────────────
+// SECTOR_MAP uses the 11 GICS-style names below; the learned cache was filled from Yahoo,
+// which uses different names for 4 of them — so "Financial Services" and "Financials" were
+// counted as two different sectors by the per-sector caps (2026-10-08).
+const SECTOR_ALIASES = {
+    'Financial Services': 'Financials', 'Consumer Defensive': 'Consumer Staples',
+    'Consumer Cyclical': 'Consumer Discretionary', 'Basic Materials': 'Materials',
+    'Information Technology': 'Technology', 'Health Care': 'Healthcare',
+};
+function canonicalSector(sector) {
+    return SECTOR_ALIASES[sector] || sector;
+}
+
 /**
  * Called by analyzeStockWithAI() when Yahoo returns a valid sector.
  * Teaches the cache so future scans don't fall back to 'Unknown'.
  */
 function learnSector(symbol, sector) {
     if (!symbol || !sector || sector === 'Unknown' || sector === '') return;
+    sector = canonicalSector(sector);
     const key = symbol.toUpperCase();
     if (_learned[key] !== sector) {
         _learned[key] = sector;
         _persistLearned();
     }
+}
+
+// ── Finnhub sector lookup (2026-10-08) ────────────────────────────────────────
+// The live quote feed (Alpaca) carries no sector and Yahoo quotes mostly fail now, so the
+// learned cache had only 66 entries against a ~2,636-symbol scan universe: 1,821 of the
+// 10-07 scan's rows were 'Unknown'. That broke the per-sector caps — every Unknown stock
+// shared ONE "Unknown" bucket (default 1 position per sector), so kmadined logged "sector
+// position count at limit" 14 times in one cycle on good candidates. Finnhub's free
+// /stock/profile2 returns an industry for nearly every listed company; mapped here to the
+// canonical sectors. ETFs/funds return no industry and stay Unknown.
+const FINNHUB_INDUSTRY_TO_SECTOR = {
+    'technology': 'Technology', 'semiconductors': 'Technology', 'communications': 'Technology',
+    'electronic equipment': 'Technology', 'it services': 'Technology', 'software': 'Technology',
+    'media': 'Communication Services', 'telecommunication': 'Communication Services',
+    'entertainment': 'Communication Services', 'interactive media': 'Communication Services',
+    'retail': 'Consumer Discretionary', 'automobiles': 'Consumer Discretionary', 'auto components': 'Consumer Discretionary',
+    'hotels restaurants & leisure': 'Consumer Discretionary', 'leisure products': 'Consumer Discretionary',
+    'textiles apparel & luxury goods': 'Consumer Discretionary', 'diversified consumer services': 'Consumer Discretionary',
+    'distributors': 'Consumer Discretionary', 'household durables': 'Consumer Discretionary',
+    'beverages': 'Consumer Staples', 'food products': 'Consumer Staples', 'tobacco': 'Consumer Staples',
+    'consumer products': 'Consumer Staples', 'personal products': 'Consumer Staples', 'household products': 'Consumer Staples',
+    'food & staples retailing': 'Consumer Staples',
+    'biotechnology': 'Healthcare', 'pharmaceuticals': 'Healthcare', 'health care': 'Healthcare',
+    'life sciences tools & services': 'Healthcare', 'health care providers & services': 'Healthcare',
+    'medical devices': 'Healthcare', 'health care equipment & supplies': 'Healthcare',
+    'banking': 'Financials', 'financial services': 'Financials', 'insurance': 'Financials',
+    'capital markets': 'Financials', 'diversified financial services': 'Financials',
+    'energy': 'Energy', 'oil & gas': 'Energy', 'oil gas & consumable fuels': 'Energy',
+    'aerospace & defense': 'Industrials', 'airlines': 'Industrials', 'building': 'Industrials',
+    'construction': 'Industrials', 'commercial services & supplies': 'Industrials',
+    'electrical equipment': 'Industrials', 'industrial conglomerates': 'Industrials',
+    'logistics & transportation': 'Industrials', 'machinery': 'Industrials', 'marine': 'Industrials',
+    'professional services': 'Industrials', 'road & rail': 'Industrials',
+    'trading companies & distributors': 'Industrials', 'transportation infrastructure': 'Industrials',
+    'chemicals': 'Materials', 'metals & mining': 'Materials', 'packaging': 'Materials',
+    'paper & forest': 'Materials', 'construction materials': 'Materials',
+    'real estate': 'Real Estate', 'utilities': 'Utilities',
+};
+function mapFinnhubIndustry(industry) {
+    if (!industry) return null;
+    const k = String(industry).toLowerCase().replace(/,/g, '').replace(/\band\b/g, '&').replace(/\s+/g, ' ').trim();
+    return FINNHUB_INDUSTRY_TO_SECTOR[k] || null;
+}
+
+/** Fetch + map one symbol's sector from Finnhub. Returns { sector|null, industry|null }. */
+async function lookupSectorFromFinnhub(symbol, deps = {}) {
+    const token = process.env.FINNHUB_API_KEY || process.env.FINNHUB_KEY;
+    if (!token) return { sector: null, industry: null };
+    const axios = deps.axios || require('axios');
+    const res = await axios.get('https://finnhub.io/api/v1/stock/profile2', {
+        params: { symbol: String(symbol).toUpperCase(), token }, timeout: 10000
+    });
+    const industry = res.data?.finnhubIndustry || null;
+    return { sector: mapFinnhubIndustry(industry), industry };
+}
+
+// Background queue: resolveSector() stays synchronous and never waits on the network; an
+// Unknown symbol is queued, looked up at <= ~1 call/1.1s (Finnhub free tier is 60/min), and
+// learned for every later call. Misses are remembered for this process so they aren't
+// re-queried every cycle.
+const _lookupQueue = [];
+const _queued = new Set();
+const _noSector = new Set();
+let _lookupRunning = false;
+function _queueSectorLookup(key) {
+    if (!key || _queued.has(key) || _noSector.has(key)) return;
+    if (!(process.env.FINNHUB_API_KEY || process.env.FINNHUB_KEY)) return;
+    _queued.add(key);
+    _lookupQueue.push(key);
+    if (_lookupRunning) return;
+    _lookupRunning = true;
+    (async () => {
+        while (_lookupQueue.length) {
+            const sym = _lookupQueue.shift();
+            try {
+                const { sector } = await lookupSectorFromFinnhub(sym);
+                if (sector) learnSector(sym, sector); else _noSector.add(sym);
+            } catch (err) {
+                if (err.response?.status === 429) { _lookupQueue.unshift(sym); await new Promise(r => setTimeout(r, 60000)); continue; }
+                _noSector.add(sym);
+            } finally {
+                _queued.delete(sym);
+            }
+            await new Promise(r => setTimeout(r, 1100));
+        }
+        _lookupRunning = false;
+    })();
 }
 
 /**
@@ -469,13 +581,23 @@ function learnSector(symbol, sector) {
  * @param {string|null} quoteSector
  * @returns {string}
  */
+/** Known sector from the static map or learned cache, or null — no network, no side effects. */
+function knownSector(symbol) {
+    const key = symbol ? symbol.toUpperCase() : '';
+    const s = SECTOR_MAP[key] || _learned[key];
+    return s ? canonicalSector(s) : null;
+}
+
 function resolveSector(symbol, quoteSector) {
     if (quoteSector && quoteSector !== 'Unknown' && quoteSector !== '') {
         learnSector(symbol, quoteSector);   // teach cache for next time
-        return quoteSector;
+        return canonicalSector(quoteSector);
     }
     const key = symbol ? symbol.toUpperCase() : '';
-    return SECTOR_MAP[key] || _learned[key] || 'Unknown';
+    const known = SECTOR_MAP[key] || _learned[key];
+    if (known) return canonicalSector(known);
+    _queueSectorLookup(key); // learned in the background for the next call
+    return 'Unknown';
 }
 
 /**
@@ -493,4 +615,7 @@ function resolveIndustry(symbol, quoteIndustry) {
     return getIndustry(symbol) || null;
 }
 
-module.exports = { getSector, getIndustry, resolveSector, resolveIndustry, learnSector, MAX_POSITIONS_PER_INDUSTRY };
+module.exports = {
+    getSector, getIndustry, resolveSector, resolveIndustry, learnSector, MAX_POSITIONS_PER_INDUSTRY,
+    canonicalSector, knownSector, mapFinnhubIndustry, lookupSectorFromFinnhub,
+};

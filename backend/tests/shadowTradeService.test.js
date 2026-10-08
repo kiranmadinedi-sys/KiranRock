@@ -86,7 +86,7 @@ describe('shadowTradeService — Gate Alpha Attribution', () => {
             };
             const message = shadowTradeService.formatGateAlphaAttribution(data, 90);
             // 3.1 - 2.0 = +1.1pp -- sector cap's rejects outperformed what was bought
-            expect(message).toContain('Gate Value vs Actual BUY: +1.1pp 5D');
+            expect(message).toContain('Blocked minus bought: +1.1pp 5D');
         });
 
         test('omits the Gate Value line when the two sides do not share a matured checkpoint', () => {

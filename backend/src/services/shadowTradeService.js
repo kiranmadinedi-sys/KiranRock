@@ -304,11 +304,12 @@ function formatGateAlphaAttribution({ actualBuy, rejectedByGate }, days) {
             }
             lines.push(`*Rejected — ${g.rejection_reason}* — ${g.n} tracked, ${parts.join(' / ')}`);
 
-            // Gate Value: this gate's rejected population minus Actual BUY, per
-            // checkpoint where BOTH sides have data. Positive means the gate is
-            // rejecting candidates that would have UNDERPERFORMED what actually
-            // got bought (working as intended); negative means it's rejecting
-            // candidates that would have OUTPERFORMED (costing real upside).
+            // Blocked minus bought: this gate's rejected population's return minus
+            // Actual BUY's, per checkpoint where BOTH sides have data. NEGATIVE means
+            // the rejected candidates UNDERPERFORMED what actually got bought (the gate
+            // is working); POSITIVE means they OUTPERFORMED (the gate is costing upside).
+            // (This comment and the report text had the sign reading inverted until
+            // 2026-10-08; the arithmetic was always rejected - bought.)
             const deltaParts = [];
             for (const w of [5, 10, 20]) {
                 const gateAvg = g[`avg_return_${w}d_pct`];
@@ -320,14 +321,16 @@ function formatGateAlphaAttribution({ actualBuy, rejectedByGate }, days) {
                 deltaParts.push(`${delta >= 0 ? '+' : ''}${delta}pp ${w}D`);
             }
             if (deltaParts.length > 0) {
-                lines.push(`   Gate Value vs Actual BUY: ${deltaParts.join(' / ')}`);
+                lines.push(`   Blocked minus bought: ${deltaParts.join(' / ')}`);
             }
         }
         lines.push('');
         lines.push(
-            '_Gate Value = this gate\'s rejected candidates\' return minus Actual BUY\'s. Positive means the ' +
-            'gate is correctly filtering out weaker setups; negative means it\'s blocking candidates that would ' +
-            'have outperformed what was actually bought — worth a closer look, not an immediate change. Early ' +
+            // Interpretation was inverted until 2026-10-08 (it called a positive value "correctly
+            // filtering"), which would have led to keeping gates that block the better trades.
+            '_Blocked minus bought = this gate\'s rejected candidates\' return minus Actual BUY\'s. NEGATIVE means ' +
+            'the gate is correctly filtering out weaker setups; POSITIVE means the blocked candidates did BETTER ' +
+            'than what was actually bought — worth a closer look, not an immediate change. Early ' +
             'checkpoints (5D/10D) are preliminary; treat 20D as the more reliable read once it has a real sample._'
         );
     }

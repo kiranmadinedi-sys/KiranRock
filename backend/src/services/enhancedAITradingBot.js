@@ -3759,7 +3759,9 @@ async function executeAutonomousTrading(userId) {
         const sectorCounts      = {};
         const industryCounts    = {};
         currentHoldings.forEach(h => {
-            const sec = h.sector || 'Unknown';
+            // Resolved + canonical, so holdings compare equal to candidates' sectors (the stored
+            // value can be a Yahoo name like "Financial Services", or 'Unknown' from buy time).
+            const sec = sectorMetadata.resolveSector(h.symbol, h.sector);
             sectorAllocations[sec] = (sectorAllocations[sec] || 0) + (h.marketValue || 0);
             sectorCounts[sec]      = (sectorCounts[sec]      || 0) + 1;
             const ind = sectorMetadata.getIndustry(h.symbol);
@@ -4233,7 +4235,12 @@ async function executeAutonomousTrading(userId) {
             const sectorLimit        = totalPortfolioValue * sectorAllocPct;
             const maxPositionsPerSector = sessionRiskConfig.maxPositionsPerSector ?? 1;
 
-            if (sectorPositionCount >= maxPositionsPerSector) {
+            // 'Unknown' is the absence of data, not a sector: lumping every unresolved stock into
+            // one bucket meant they all shared a single sector slot (2026-10-08, see
+            // sectorMetadataService's Finnhub lookup). Unknown entries are still gated by the
+            // score ≥ 88 rule above; the per-sector count and dollar caps apply to real sectors.
+            const isKnownSector = sector !== 'Unknown';
+            if (isKnownSector && sectorPositionCount >= maxPositionsPerSector) {
                 logger.info('Skipping stock — sector position count at limit', {
                     userId, symbol: opportunity.symbol, sector,
                     count: sectorPositionCount, max: maxPositionsPerSector
@@ -4259,7 +4266,7 @@ async function executeAutonomousTrading(userId) {
             }
 
             // Also block overconcentrated sectors (dollar cap)
-            if (sectorCurrent >= sectorLimit || overconcentratedSectors.includes(sector)) {
+            if (isKnownSector && (sectorCurrent >= sectorLimit || overconcentratedSectors.includes(sector))) {
                 logger.info('Skipping stock - sector dollar limit reached', {
                     userId,
                     symbol: opportunity.symbol,
@@ -4670,6 +4677,7 @@ async function executeAutonomousTrading(userId) {
                         atr:           opportunity.atr || null,
                         regime:        regime?.regime || null,
                         oraclePattern: opportunity.oraclePattern || null,
+                        entryExtensionPct: opportunity.distFromSma20Pct ?? null,
                     });
                     _incrementOrderCount(userId, opportunity.symbol);
                     const fracShares = fracResult.filledQty || 0;
@@ -4760,6 +4768,7 @@ async function executeAutonomousTrading(userId) {
                             atr:            opportunity.atr || null,  // stored in holdings for ATR-aware trailing stops
                             regime:         regime?.regime || null,
                             oraclePattern:  opportunity.oraclePattern || null,
+                            entryExtensionPct:  opportunity.distFromSma20Pct ?? null,
                             earningsSetup:  _isEarningsSetup || undefined,
                             daysToEarnings: _isEarningsSetup ? opportunity.daysToEarnings : undefined,
                         }
@@ -5225,16 +5234,24 @@ async function manageExistingPositions(userId) {
                             // it — same rounding-mismatch reasoning as the "missing stop" branch
                             // above (NUMERIC(18,8) snapshot can round up past the true live qty).
                             let placeQty = qty;
-                            try {
-                                await brokerService.cancelOrder(userId, existing.orderId);
-                                for (let attempt = 0; attempt < 4 && !released; attempt++) {
-                                    await new Promise(r => setTimeout(r, 1500));
+                            // Poll until Alpaca releases the shares held by the canceled stop.
+                            // Was 4 x 1.5s = 6s: on 2026-10-07 anilboddu1's live LRCX cancel took
+                            // longer, so the raise AND the restore both hit 403 (shares still
+                            // held) and the position sat without a stop for ~5 min until the next
+                            // cycle. ~20s covers the slow cancels seen live.
+                            const waitForRelease = async (attempts = 10, delayMs = 2000) => {
+                                for (let attempt = 0; attempt < attempts && !released; attempt++) {
+                                    await new Promise(r => setTimeout(r, delayMs));
                                     const live = await brokerService.getPosition(userId, sym).catch(() => null);
                                     if (live && parseFloat(live.qty_available ?? live.qty) >= neededQty - 1e-6) {
                                         released = true;
                                         placeQty = String(live.qty);
                                     }
                                 }
+                            };
+                            try {
+                                await brokerService.cancelOrder(userId, existing.orderId);
+                                await waitForRelease();
                                 await brokerService.placeStopOrder(userId, sym, placeQty, expectedStop);
                                 logger.info('[StopRepair] Stale stop raised', {
                                     userId, sym, was: existing.stopPrice, now: expectedStop, drift: (drift * 100).toFixed(2) + '%', sharesReleased: released
@@ -5242,17 +5259,17 @@ async function manageExistingPositions(userId) {
                             } catch (updateErr) {
                                 logger.warn('[StopRepair] Stop update failed — restoring previous stop price', { userId, sym, err: updateErr.message, sharesReleased: released });
                                 try {
-                                    if (!released) {
-                                        for (let attempt = 0; attempt < 4 && !released; attempt++) {
-                                            await new Promise(r => setTimeout(r, 1500));
-                                            const live = await brokerService.getPosition(userId, sym).catch(() => null);
-                                            if (live && parseFloat(live.qty_available ?? live.qty) >= neededQty - 1e-6) {
-                                                released = true;
-                                                placeQty = String(live.qty);
-                                            }
-                                        }
+                                    if (!released) await waitForRelease();
+                                    try {
+                                        await brokerService.placeStopOrder(userId, sym, placeQty, existing.stopPrice);
+                                    } catch (firstRestoreErr) {
+                                        // One more try after another wait before declaring the
+                                        // position unprotected — a slow cancel is the common cause.
+                                        logger.warn('[StopRepair] Restore attempt failed — waiting and retrying once', { userId, sym, err: firstRestoreErr.message });
+                                        released = false;
+                                        await waitForRelease(5, 3000);
+                                        await brokerService.placeStopOrder(userId, sym, placeQty, existing.stopPrice);
                                     }
-                                    await brokerService.placeStopOrder(userId, sym, placeQty, existing.stopPrice);
                                     logger.info('[StopRepair] Previous stop restored after raise failure', { userId, sym, restoredPrice: existing.stopPrice });
                                 } catch (restoreErr) {
                                     logger.error('[StopRepair] CRITICAL — position left with no stop after failed raise+restore', {

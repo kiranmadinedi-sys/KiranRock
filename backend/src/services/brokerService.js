@@ -72,18 +72,78 @@ async function isOrderAlreadySubmitted(idempotencyKey) {
 // submitted 0.3s apart, both real fills on Alpaca. Relies on a partial unique index on
 // (idempotency_key) WHERE state='CREATED' (initDatabase.js) — the database enforces the
 // race, not application code, so it holds regardless of timing.
+//
+// Returns the key the caller must use for the rest of this order's audit trail, or null
+// when the order must be blocked as a duplicate.
+//
+// Retry after a failure (2026-10-07): the key is per symbol/day/reason, and a FAILED or
+// REJECTED attempt left its CREATED claim in place — so one broker rejection blocked every
+// retry for the rest of the day. Found live: the paper account's NVDA exit was rejected
+// once at 08:35 (403, shares held by the resting stop) and then refused as a "duplicate"
+// every 30 minutes all day. A retry is now allowed under a numbered key (`<key>#retryN`)
+// ONLY if no attempt under this key ever reached the broker (every row is a pre-broker
+// state) AND the latest attempt either ended FAILED/REJECTED or has sat at CREATED/
+// VALIDATED for 2+ minutes (a crashed attempt). Anything that reached the broker stays
+// blocked, and a concurrent duplicate seconds later is still blocked because the live
+// attempt is neither failed nor stale — the 2026-08-07 double-buy protection is intact.
+const PRE_BROKER_STATES = new Set(['CREATED', 'VALIDATED', 'FAILED', 'REJECTED']);
+const STALE_CLAIM_MS = 2 * 60 * 1000;
+const MAX_CLAIM_RETRIES = 5;
+
 async function claimIdempotencyKey(idemKey, userId, symbol, meta = {}) {
+    const insertClaim = key => query(
+        `INSERT INTO order_audit_log (idempotency_key, user_id, symbol, state, previous_state, quantity, metadata)
+         VALUES ($1,$2,$3,'CREATED',NULL,$4,$5)`,
+        [key, String(userId), symbol, meta.quantity != null ? parseFloat(meta.quantity) : null, JSON.stringify(meta.extra || {})]
+    );
     try {
-        await query(
-            `INSERT INTO order_audit_log (idempotency_key, user_id, symbol, state, previous_state, quantity, metadata)
-             VALUES ($1,$2,$3,'CREATED',NULL,$4,$5)`,
-            [idemKey, String(userId), symbol, meta.quantity != null ? parseFloat(meta.quantity) : null, JSON.stringify(meta.extra || {})]
-        );
-        return true;
+        await insertClaim(idemKey);
+        return idemKey;
     } catch (err) {
-        if (err.code === '23505') return false; // unique violation — another call already claimed this key
-        logger.warn('[ARROW] claimIdempotencyKey failed — failing open', { idemKey, symbol, err: err.message });
-        return true; // fail open on unexpected DB errors, same posture as the rest of the audit log
+        if (err.code !== '23505') {
+            logger.warn('[ARROW] claimIdempotencyKey failed — failing open', { idemKey, symbol, err: err.message });
+            return idemKey; // fail open on unexpected DB errors, same posture as the rest of the audit log
+        }
+    }
+
+    // Key already claimed — decide whether this is a duplicate or a legitimate retry.
+    let rows;
+    try {
+        rows = (await query(
+            `SELECT idempotency_key, state, created_at FROM order_audit_log
+             WHERE idempotency_key = $1 OR idempotency_key LIKE $2`,
+            [idemKey, `${idemKey}#retry%`]
+        )).rows;
+    } catch {
+        return null; // can't tell — block, the conservative choice for a possible duplicate
+    }
+    if (rows.some(r => !PRE_BROKER_STATES.has(r.state))) return null; // an attempt reached the broker
+
+    const attemptKeys = [...new Set(rows.map(r => r.idempotency_key))];
+    const claimedAt = k => Math.max(...rows.filter(r => r.idempotency_key === k && r.state === 'CREATED')
+        .map(r => new Date(r.created_at).getTime()), 0);
+    // Latest attempt = highest retry number (base key = 0). By number, not timestamp: two
+    // claims can share a timestamp, and picking the older (failed) one would wrongly allow
+    // a retry while the newer attempt is still in flight.
+    const retryNum = k => (k === idemKey ? 0 : parseInt(k.slice(idemKey.length + '#retry'.length), 10) || 0);
+    const latestKey = attemptKeys.reduce((a, b) => (retryNum(b) > retryNum(a) ? b : a), attemptKeys[0]);
+    const latestFailed = rows.some(r => r.idempotency_key === latestKey && (r.state === 'FAILED' || r.state === 'REJECTED'));
+    const latestStale = Date.now() - claimedAt(latestKey) > STALE_CLAIM_MS;
+    if (!latestFailed && !latestStale) return null; // a live attempt is still in flight
+    if (attemptKeys.length > MAX_CLAIM_RETRIES) {
+        logger.warn('[ARROW] Retry limit reached for idempotency key — blocking', { idemKey, symbol, attempts: attemptKeys.length });
+        return null;
+    }
+
+    const retryKey = `${idemKey}#retry${attemptKeys.length}`;
+    try {
+        await insertClaim(retryKey);
+        logger.info('[ARROW] Previous attempt never reached the broker — retrying under a new key', {
+            idemKey, retryKey, symbol, previousFailed: latestFailed, previousStale: latestStale
+        });
+        return retryKey;
+    } catch (err) {
+        return err.code === '23505' ? null : retryKey; // a concurrent retry won the same suffix
     }
 }
 
@@ -344,12 +404,14 @@ const alpacaBroker = (() => {
     // position was opened in (getOpenOrders has no session filter), so no new protection
     // mechanism is needed here — the gap is real but already covered by existing code.
     async function buyLimitExtendedHours(userId, symbol, quantity, meta = {}) {
-        const idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:${userId}:ext`;
+        let idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:${userId}:ext`;
 
-        if (!(await claimIdempotencyKey(idemKey, userId, symbol, { quantity }))) {
+        const _claimedKey = await claimIdempotencyKey(idemKey, userId, symbol, { quantity });
+        if (!_claimedKey) {
             logger.warn('[ARROW-ExtHours] Duplicate submission blocked', { idemKey, symbol });
             throw new Error(`Duplicate order blocked: ${idemKey}`);
         }
+        idemKey = _claimedKey; // may be a #retryN key - see claimIdempotencyKey
 
         const dataProvider = require('./dataProvider');
         const quote = await dataProvider.getQuote(symbol);
@@ -492,13 +554,15 @@ const alpacaBroker = (() => {
         // Key is stable for the full trading day per user+symbol — aiScore must NOT be
         // included because it changes each bot cycle, which caused the order-storm bug
         // where hundreds of re-submissions bypassed the idempotency gate.
-        const idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:${userId}:buy`;
+        let idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:${userId}:buy`;
 
         // ARROW idempotency gate — never re-submit an already-submitted order
-        if (!(await claimIdempotencyKey(idemKey, userId, symbol, { quantity }))) {
+        const _claimedKey = await claimIdempotencyKey(idemKey, userId, symbol, { quantity });
+        if (!_claimedKey) {
             logger.warn('[ARROW] Duplicate submission blocked', { idemKey, symbol });
             throw new Error(`Duplicate order blocked: ${idemKey}`);
         }
+        idemKey = _claimedKey; // may be a #retryN key - see claimIdempotencyKey
 
         const dataProvider = require('./dataProvider');
         const quote = await dataProvider.getQuote(symbol);
@@ -610,6 +674,7 @@ const alpacaBroker = (() => {
                     signalPrice:   meta.signalPrice   || entryLimit,
                     regime:        meta.regime        || null,
                     oraclePattern: meta.oraclePattern || null,
+                    entryExtensionPct: meta.entryExtensionPct ?? null, // % above SMA20 at entry — extension shadow test (2026-10-08)
                     stopPrice,
                     targetPrice,
                     bracketOrder: true
@@ -670,12 +735,14 @@ const alpacaBroker = (() => {
         // itself fails. Previously this comment claimed "no extra handling needed" — that
         // was wrong and caused real naked shorts (EAT, then EXC/CL) before the fix above
         // existed (corrected 2026-07-11).
-        const idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:${userId}:frac`;
+        let idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:${userId}:frac`;
 
-        if (!(await claimIdempotencyKey(idemKey, userId, symbol, { extra: { notionalAmount, fractional: true } }))) {
+        const _claimedKey = await claimIdempotencyKey(idemKey, userId, symbol, { extra: { notionalAmount, fractional: true } });
+        if (!_claimedKey) {
             logger.warn('[ARROW] Duplicate fractional submission blocked', { idemKey, symbol });
             throw new Error(`Duplicate order blocked: ${idemKey}`);
         }
+        idemKey = _claimedKey; // may be a #retryN key - see claimIdempotencyKey
 
         const { client, isPaper } = await getClientForUser(userId);
         const brokerLabel = isPaper ? 'alpaca-paper' : 'alpaca-live';
@@ -763,6 +830,7 @@ const alpacaBroker = (() => {
                     signalPrice:   meta.signalPrice   || fillPrice,
                     regime:        meta.regime        || null,
                     oraclePattern: meta.oraclePattern || null,
+                    entryExtensionPct: meta.entryExtensionPct ?? null, // % above SMA20 at entry — extension shadow test (2026-10-08)
                     stopPrice:     effectiveStop,
                     targetPrice:   effectiveTarget,
                     fractional:    true
@@ -798,11 +866,13 @@ const alpacaBroker = (() => {
         // different users selling the same symbol for the same reason on the same day shared
         // one idempotency key — harmless under the old racy check, but would incorrectly block
         // one of them outright once the key is atomically enforced below.
-        const idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:${userId}:sell:${meta.reason?.slice(0,20) || 'exit'}`;
-        if (!(await claimIdempotencyKey(idemKey, userId, symbol, { quantity }))) {
+        let idemKey = meta.idempotencyKey || `${symbol}:${new Date().toISOString().slice(0,10)}:${userId}:sell:${meta.reason?.slice(0,20) || 'exit'}`;
+        const _claimedKey = await claimIdempotencyKey(idemKey, userId, symbol, { quantity });
+        if (!_claimedKey) {
             logger.warn('[ARROW] Duplicate sell submission blocked', { idemKey, symbol });
             throw new Error(`Duplicate order blocked: ${idemKey}`);
         }
+        idemKey = _claimedKey; // may be a #retryN key - see claimIdempotencyKey
 
         const { client, isPaper } = await getClientForUser(userId);
 
@@ -1255,6 +1325,7 @@ async function executeManualSellOrder(userId, symbol, quantity) {
 }
 
 module.exports = {
+    claimIdempotencyKey, // exported for tests
     executeManualBuyOrder,
     executeManualSellOrder,
 

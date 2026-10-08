@@ -4235,12 +4235,13 @@ async function executeAutonomousTrading(userId) {
             const sectorLimit        = totalPortfolioValue * sectorAllocPct;
             const maxPositionsPerSector = sessionRiskConfig.maxPositionsPerSector ?? 1;
 
-            // 'Unknown' is the absence of data, not a sector: lumping every unresolved stock into
-            // one bucket meant they all shared a single sector slot (2026-10-08, see
-            // sectorMetadataService's Finnhub lookup). Unknown entries are still gated by the
-            // score ≥ 88 rule above; the per-sector count and dollar caps apply to real sectors.
-            const isKnownSector = sector !== 'Unknown';
-            if (isKnownSector && sectorPositionCount >= maxPositionsPerSector) {
+            // 'Unknown' deliberately stays ONE shared bucket for the per-sector caps. Real stocks
+            // now resolve via Finnhub (sectorMetadataService), so what's left as Unknown is almost
+            // entirely ETFs/funds — on 2026-10-08 the Unknown candidates were country/sector funds
+            // and GLL (2x leveraged inverse gold). Exempting Unknown from the caps (briefly done the
+            // same night) would have let kmadined hold several of those at once; the shared bucket
+            // limits it to one, plus the score ≥ 88 rule above.
+            if (sectorPositionCount >= maxPositionsPerSector) {
                 logger.info('Skipping stock — sector position count at limit', {
                     userId, symbol: opportunity.symbol, sector,
                     count: sectorPositionCount, max: maxPositionsPerSector
@@ -4266,7 +4267,7 @@ async function executeAutonomousTrading(userId) {
             }
 
             // Also block overconcentrated sectors (dollar cap)
-            if (isKnownSector && (sectorCurrent >= sectorLimit || overconcentratedSectors.includes(sector))) {
+            if (sectorCurrent >= sectorLimit || overconcentratedSectors.includes(sector)) {
                 logger.info('Skipping stock - sector dollar limit reached', {
                     userId,
                     symbol: opportunity.symbol,

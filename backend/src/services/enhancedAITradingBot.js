@@ -3657,16 +3657,19 @@ async function executeAutonomousTrading(userId) {
             maxInvestment - currentInvestment
         );
 
+        // Count unique symbols — partial fills create multiple rows for the same symbol
+        const uniqueHeldSymbols = new Set(currentHoldings.map(h => h.symbol));
         logger.info('Investment capacity calculated', {
             userId,
             availableToInvest: availableToInvest.toFixed(2),
             maxPositions: sessionRiskConfig.maxOpenPositions,
-            currentPositions: currentHoldings.length,
+            currentPositions: uniqueHeldSymbols.size,
+            holdingRows: currentHoldings.length,
             regime: regime.regime
         });
 
-        if (availableToInvest < 50 || currentHoldings.length >= sessionRiskConfig.maxOpenPositions) {
-            logger.info('Portfolio at capacity', { userId, availableToInvest, currentHoldings: currentHoldings.length });
+        if (availableToInvest < 50 || uniqueHeldSymbols.size >= sessionRiskConfig.maxOpenPositions) {
+            logger.info('Portfolio at capacity', { userId, availableToInvest, uniqueSymbols: uniqueHeldSymbols.size });
             return { success: true, message: 'Portfolio at capacity' };
         }
 
@@ -3910,8 +3913,8 @@ async function executeAutonomousTrading(userId) {
                 _recordRejectionForRemaining(_oppIdx, 'capital_exhausted', `remaining $${remainingCapital.toFixed(2)}`);
                 break;
             }
-            if (currentHoldings.length + trades.length >= regimeMaxPositions) {
-                _recordRejectionForRemaining(_oppIdx, 'position_cap', `${currentHoldings.length + trades.length}/${regimeMaxPositions}`);
+            if (uniqueHeldSymbols.size + trades.length >= regimeMaxPositions) {
+                _recordRejectionForRemaining(_oppIdx, 'position_cap', `${uniqueHeldSymbols.size + trades.length}/${regimeMaxPositions}`);
                 break;
             }
             if (trades.length >= regimeNewPosCap) { // regime cap: BEAR=1, NEUTRAL/CHOPPY=2, BULL=breadth

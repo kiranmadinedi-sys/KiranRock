@@ -393,6 +393,22 @@ function startAssetUniverseScheduler() {
             const etParts = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit' });
             const [etHour, etMin] = etParts.split(':').map(Number);
             const inDeadZone = etHour < 9 || (etHour === 9 && etMin < 30);
+            // 2026-10-12: the "todayCount > 0 is always safe to resume" assumption above no
+            // longer holds. In the dead zone, rows dated TODAY can only come from an
+            // after-midnight launch, which is never wanted — at 23:36 and 23:39 CT on
+            // 2026-10-11 this resumed a Monday-dated scan (started 00:04 ET by a since-fixed
+            // trigger bug) on each restart, to run on into market hours. The previous
+            // evening's scan is owned by enhancedAIScheduler's trigger and the 8 AM catch-up
+            // (both check the previous trading day). Also never on a weekend/holiday: a
+            // Saturday-evening restart with 0 rows would otherwise launch a full weekend scan.
+            const _etDow = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short' }).format(new Date());
+            const _nonTradingDay = _etDow === 'Sat' || _etDow === 'Sun' || require('../utils/marketCalendar').isTradingHoliday();
+            if (inDeadZone || _nonTradingDay) {
+                logger.info('[AssetUniverseScheduler] Startup scan resume skipped — before 9:30 AM ET or not a trading day; the nightly trigger / 8 AM catch-up own the previous evening\'s scan', {
+                    etHour, etMin, todayCount, etDow: _etDow
+                });
+                return;
+            }
             if (todayCount === 0 && inDeadZone) {
                 logger.debug('[AssetUniverseScheduler] Nightly scan resume skipped — too early for a fresh start today, letting the 8 AM catch-up or 4:30 PM main run handle it', {
                     etHour, etMin

@@ -39,7 +39,9 @@ describe('enhancedAIScheduler.runEodCleanup — trade-flow anomaly detector (202
         jest.useFakeTimers();
         // 20:50 UTC in September = 15:50 ET (EDT, UTC-5 during Sept DST... actually UTC-4).
         // 15:50 ET = 19:50 UTC. Inside the 15:44-15:59 ET run window.
-        jest.setSystemTime(new Date('2026-09-19T19:50:00Z'));
+        // Friday 2026-09-18 (was Saturday 09-19 — it only passed because runEodCleanup didn't
+        // check for a trading day, the bug that launched weekend scans; fixed 2026-10-11).
+        jest.setSystemTime(new Date('2026-09-18T19:50:00Z'));
 
         jest.doMock('../src/config/database', () => ({ query: jest.fn() }));
         jest.doMock('../src/services/userDatabaseService', () => ({
@@ -68,6 +70,16 @@ describe('enhancedAIScheduler.runEodCleanup — trade-flow anomaly detector (202
         userDb = require('../src/services/userDatabaseService');
 
         userDb.getUsersWithAITradingEnabled.mockResolvedValue([{ id: 'user-1' }]);
+    });
+
+    // 2026-10-11: runEodCleanup only checked the clock, so it ran on Saturday and Sunday too —
+    // launching a weekend-stamped nightly scan that displaced Friday's as Monday's candidates.
+    test('does nothing on a weekend — no EOD cancel, no digest, no scan launch', async () => {
+        jest.setSystemTime(new Date('2026-10-10T19:50:00Z')); // Saturday 15:50 ET
+        query.mockResolvedValue({ rows: [] });
+        await runEodCleanup();
+        expect(require('../src/services/brokerService').eodCancelPartialFills).not.toHaveBeenCalled();
+        expect(require('../src/services/nightlyUniverseScanService').runNightlyUniverseScan).not.toHaveBeenCalled();
     });
 
     afterEach(() => {

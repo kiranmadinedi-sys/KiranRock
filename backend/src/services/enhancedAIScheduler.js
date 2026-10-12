@@ -308,6 +308,12 @@ async function runEodCleanup() {
 
     // Run only once, at 15:44–15:59 ET
     if (etHour !== 15 || etMinute < 44) return;
+    // Trading days only (2026-10-11): this only checked the clock, so on Saturday and
+    // Sunday it still ran — sending "0 trades" digests and, at the end, launching a full
+    // nightly scan stamped with the weekend date (10-10: 769 rows, 10-11: 770). Those
+    // weekend partial scans then out-ranked Friday's complete scan as Monday's candidates.
+    const _etDow = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short' }).format(new Date());
+    if (_etDow === 'Sat' || _etDow === 'Sun' || require('../utils/marketCalendar').isTradingHoliday()) return;
     if (_eodRanDate === etDate) return;
     _eodRanDate = etDate;
 
@@ -1069,11 +1075,6 @@ const SCAN_COMPLETION_RATIO = 0.90;
 const SCAN_COMPLETE_THRESHOLD_FALLBACK = 420; // only used if hermes_symbol_log has no rows for the date yet
 let _scanCompletedDate = null;       // date string when we saw >= threshold for the day
 
-function _addDaysToDateString(dateStr, delta) {
-    const d = new Date(dateStr + 'T00:00:00Z');
-    d.setUTCDate(d.getUTCDate() + delta);
-    return d.toISOString().slice(0, 10);
-}
 
 // 2026-10-01 real incident: the scan's own window is documented as opening at 4:15 PM
 // ET, but it was never actually observed starting before ~11:30 PM-12:30 AM CDT
@@ -1101,20 +1102,19 @@ function _addDaysToDateString(dateStr, delta) {
 // already done too" and blocks tonight's launch the same way the original bug did.
 function _effectiveScanDay(etHour, etDate) {
     if (etHour >= 16) return etDate;
-    const nightlyScanSvc = require('./nightlyUniverseScanService');
-    const lastTarget = nightlyScanSvc.getScanTargetDate();
-    // No in-memory target = the process restarted since the last scan (getScanTargetDate()
-    // lives in module memory). In this 00:00-09:25 ET segment the only scan that can be
-    // owed is the PREVIOUS trading day's evening scan — returning etDate here made every
-    // early-morning restart see "no rows for today" and launch a brand-new full scan
-    // stamped with today's date, even when last evening's scan was complete. Found
-    // 2026-10-07: a 02:03 CT restart started a fresh 10/07 scan despite 10/06 holding
-    // 2,630 rows (threshold 2,367), and on 10/06 the same thing left the morning
-    // candidate loader trading from a partial 979-row scan. previousTradingDay (not
-    // just "yesterday") so a Monday-morning restart checks Friday's scan, not Sunday's.
-    if (!lastTarget) return require('../utils/marketCalendar').previousTradingDay(etDate);
-    const yesterday = _addDaysToDateString(etDate, -1);
-    return (lastTarget === etDate || lastTarget === yesterday) ? lastTarget : etDate;
+    // In this 00:00-09:25 ET segment the only scan that can be owed is the PREVIOUS
+    // trading day's evening scan — always. previousTradingDay (not "yesterday") so a
+    // Monday morning checks Friday's scan, not Sunday's.
+    //
+    // History: this used to trust the in-memory getScanTargetDate() and fall back to etDate
+    // when it was missing or not today/yesterday. Both paths launched brand-new scans
+    // stamped with today's date after midnight: missing after a restart (2026-10-06/07 —
+    // fixed by de6835d), and STALE on 2026-10-12 — the last remembered target was a weekend
+    // scan's (Saturday), so at 00:04 ET Monday it fell back to etDate, found no Monday rows
+    // and launched a full scan that would have run into market hours. An evening run always
+    // targets that evening's own date, so the previous trading day is the right answer in
+    // every case and the remembered target adds nothing.
+    return require('../utils/marketCalendar').previousTradingDay(etDate);
 }
 
 /** Real target universe size for a date, from the same source the scan itself uses to build its candidate list. */
@@ -1477,18 +1477,12 @@ async function runSundayGlobalScout() {
     }
     console.log(`[SundayScout] Global sentiment: ${sentiment} (${marketData.length} markets tracked)`);
 
-    // ── 3. Trigger full nightly universe scan (Monday candidates) ─────────────
-    try {
-        const nightlyScanSvc = require('./nightlyUniverseScanService');
-        nightlyScanSvc.runNightlyUniverseScan()
-            .then(r => {
-                if (r) console.log(`[SundayScout] Monday scan done: ${r.passed} passed / ${r.analyzed} analyzed`);
-            })
-            .catch(err => console.error('[SundayScout] Scan error:', err.message));
-        console.log('[SundayScout] Monday nightly scan launched in background');
-    } catch (scanErr) {
-        console.error('[SundayScout] Failed to launch scan:', scanErr.message);
-    }
+    // ── 3. (removed 2026-10-11) No Sunday scan launch ──────────────────────────
+    // This used to launch a full nightly scan here "for Monday candidates", stamped with
+    // Sunday's date. Friday's evening scan (complete, after Friday's close) already IS
+    // Monday's candidate source — nothing trades over the weekend to change it — and a
+    // Sunday-dated partial scan displaced it (10-11: 770 rows vs Friday's 2,638). The Monday
+    // preview below reads the existing scan data, as it always did.
 
     // ── 4. Send Telegram Monday Morning Preview ────────────────────────────────
     try {

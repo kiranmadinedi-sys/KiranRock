@@ -61,9 +61,12 @@ describe('enhancedAIScheduler — nightly scan no longer waits for midnight to s
             expect(_effectiveScanDay(2, '2026-10-02')).toBe('2026-10-01');
         });
 
-        test('early morning defers to a run that already targeted today', () => {
+        // A run "targeting today" can't exist at 2 AM — runNightlyUniverseScan targets the
+        // previous day for any launch before 16:00 ET — so the remembered target is ignored
+        // in the early-morning segment (2026-10-12) and it's always the previous trading day.
+        test('early morning ignores the remembered target and checks the previous trading day', () => {
             nightlyScanSvc.getScanTargetDate.mockReturnValue('2026-10-02');
-            expect(_effectiveScanDay(2, '2026-10-02')).toBe('2026-10-02');
+            expect(_effectiveScanDay(2, '2026-10-02')).toBe('2026-10-01');
         });
 
         // 2026-10-07: was "falls back to the raw calendar date" — but no tracked run in the
@@ -80,9 +83,16 @@ describe('enhancedAIScheduler — nightly scan no longer waits for midnight to s
             expect(_effectiveScanDay(2, '2026-10-05')).toBe('2026-10-02');
         });
 
-        test('early morning with a stale (multi-day-old) target falls back to the raw calendar date', () => {
+        // 2026-10-12: a STALE remembered target (a weekend scan's) used to fall back to the raw
+        // calendar date and launch a fresh Monday-dated scan at 00:04 ET. Always the previous trading day now.
+        test('early morning with a stale (multi-day-old) target checks the previous trading day', () => {
             nightlyScanSvc.getScanTargetDate.mockReturnValue('2026-09-28');
-            expect(_effectiveScanDay(2, '2026-10-02')).toBe('2026-10-02');
+            expect(_effectiveScanDay(2, '2026-10-02')).toBe('2026-10-01');
+        });
+
+        test('Monday 00:04 ET with a stale Saturday target checks Friday (the 2026-10-12 incident)', () => {
+            nightlyScanSvc.getScanTargetDate.mockReturnValue('2026-10-10');
+            expect(_effectiveScanDay(0, '2026-10-12')).toBe('2026-10-09');
         });
     });
 

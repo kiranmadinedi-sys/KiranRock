@@ -164,25 +164,67 @@ async function checkBotCycles(userId) {
     return null;
 }
 
+// userId:symbol → when this sweep first saw the position without a stop. Cleared as
+// soon as a sweep sees it protected again.
+const _noStopFirstSeen = new Map();
+// A position must be stop-less on two consecutive 5-min sweeps before this check acts.
+// Upper bound guards against a stale entry from long ago (e.g. across a market close).
+const NO_STOP_CONFIRM_MAX_GAP_MS = 15 * 60 * 1000;
+
 async function checkAndFixStops(userId) {
     const { base, headers } = await getAlpacaClient(userId);
-    const [posRes, ordRes] = await Promise.all([
+    // Open orders via brokerService.getOpenOrders, not `status=open`: Alpaca's open
+    // filter leaves out "held" bracket stop legs, so a bracket-protected position looked
+    // naked here. It also throws on failure instead of returning [] (a failed fetch must
+    // never read as "nothing is protected").
+    const [posRes, openOrders] = await Promise.all([
         axios.get(`${base}/v2/positions`, { headers }),
-        axios.get(`${base}/v2/orders`,    { headers, params: { status: 'open', limit: 200 } })
+        require('./brokerService').getOpenOrders(userId)
     ]);
 
-    const protectedSyms  = new Set(
-        ordRes.data
-            .filter(o => o.side === 'sell' && (o.type==='stop'||o.type==='stop_limit'||o.type==='trailing_stop'||o.type==='market'))
-            .map(o => o.symbol)
-    );
+    // ANY resting sell order commits the shares (a bracket take-profit limit leg, a
+    // pending market sell) — a new stop would only be rejected, so it counts as covered.
+    const protectedSyms = new Set(openOrders.filter(o => o.side === 'sell').map(o => o.symbol));
     const positions = posRes.data.filter(p => parseFloat(p.qty) > 0);
-    const noStop    = positions.filter(p => !protectedSyms.has(p.symbol));
+
+    // 2026-10-12: this check and the bot's StopRepair both manage the same stops. When
+    // StopRepair was mid cancel→place (raising a stop), this saw "no stop" and placed
+    // its own 7%-below-entry stop into the gap — which moved the stop DOWN and made
+    // StopRepair's raise fail with a false CRITICAL (2026-10-09 GME 24.07→23.78,
+    // kmadined BUG 46.52→44.98). Now: skip symbols StopRepair has marked as mid-swap,
+    // and only act on a position that is still stop-less on the NEXT sweep too —
+    // StopRepair runs every cycle and fixes a genuinely missing stop itself, so this is
+    // the backstop for when it doesn't, not a competitor.
+    const stopOrderLock = require('../utils/stopOrderLock');
+    const now = Date.now();
+    const heldSyms = new Set(positions.map(p => p.symbol));
+    for (const key of _noStopFirstSeen.keys()) {
+        const [uid, sym] = key.split(':');
+        if (uid === userId && (!heldSyms.has(sym) || protectedSyms.has(sym))) _noStopFirstSeen.delete(key);
+    }
+
+    const noStop = [];
+    for (const p of positions) {
+        if (protectedSyms.has(p.symbol)) continue;
+        if (stopOrderLock.isStopChangeInProgress(userId, p.symbol)) {
+            logger.info('[HealthMonitor] No stop seen but StopRepair is mid-update — leaving it alone', { userId, symbol: p.symbol });
+            continue;
+        }
+        const key = `${userId}:${p.symbol}`;
+        const firstSeen = _noStopFirstSeen.get(key);
+        if (!firstSeen || now - firstSeen > NO_STOP_CONFIRM_MAX_GAP_MS) {
+            _noStopFirstSeen.set(key, now);
+            logger.info('[HealthMonitor] No stop seen — will act if still missing next sweep', { userId, symbol: p.symbol });
+            continue;
+        }
+        noStop.push(p);
+    }
 
     if (noStop.length === 0) return { issue: null, fixed: null };
 
     const placed = [], failed = [];
     for (const pos of noStop) {
+        _noStopFirstSeen.delete(`${userId}:${pos.symbol}`);
         const qty     = parseFloat(pos.qty);
         const entry   = parseFloat(pos.avg_entry_price);
         const current = parseFloat(pos.current_price);
@@ -242,16 +284,26 @@ async function checkAndFixStops(userId) {
  */
 async function upgradeTrailingStops(userId) {
     const { base, headers } = await getAlpacaClient(userId);
-    const [posRes, ordRes] = await Promise.all([
+    // Same order source as checkAndFixStops (includes "held" bracket legs; throws on failure).
+    const [posRes, openOrders] = await Promise.all([
         axios.get(`${base}/v2/positions`, { headers }),
-        axios.get(`${base}/v2/orders`,    { headers, params: { status: 'open', limit: 200 } })
+        require('./brokerService').getOpenOrders(userId)
     ]);
+    const stopOrderLock = require('../utils/stopOrderLock');
 
     // Build maps
     const fixedStopOrders   = {};  // symbol → { id, stopPrice }
     const trailStopSyms     = new Set();
-    for (const o of ordRes.data) {
+    const bracketSyms       = new Set();  // shares committed to a bracket/OCO leg — leave alone
+    for (const o of openOrders) {
         if (o.side !== 'sell') continue;
+        // A "held" bracket leg is now visible here (it wasn't with status=open). Never
+        // cancel a bracket's leg to swap in a trailing stop — before, these positions
+        // simply got a 403 on the new order; skipping keeps that outcome minus the error.
+        if (o.status === 'held' || (o.order_class && o.order_class !== 'simple')) {
+            bracketSyms.add(o.symbol);
+            continue;
+        }
         if (o.type === 'trailing_stop') trailStopSyms.add(o.symbol);
         if (o.type === 'stop' || o.type === 'stop_limit') {
             fixedStopOrders[o.symbol] = { id: o.id, stopPrice: parseFloat(o.stop_price) };
@@ -268,7 +320,9 @@ async function upgradeTrailingStops(userId) {
         const isFrac  = qty !== Math.floor(qty);
 
         // Only upgrade positions that are >5% profitable and not already trailing
-        if (plPct <= 0.05 || trailStopSyms.has(pos.symbol)) continue;
+        if (plPct <= 0.05 || trailStopSyms.has(pos.symbol) || bracketSyms.has(pos.symbol)) continue;
+        // StopRepair is mid cancel→place on this symbol — don't swap underneath it.
+        if (stopOrderLock.isStopChangeInProgress(userId, pos.symbol)) continue;
 
         const existingStop = fixedStopOrders[pos.symbol];
 
@@ -280,6 +334,8 @@ async function upgradeTrailingStops(userId) {
             // Only upgrade if the trailing floor is above the current fixed stop (better protection)
             if (existingStop && parseFloat(newFloor) <= existingStop.stopPrice) continue;
 
+            // Mark our own cancel→place so StopRepair doesn't fill the gap with a stop of its own.
+            stopOrderLock.markStopChange(userId, pos.symbol, 60 * 1000);
             try {
                 if (existingStop) {
                     await axios.delete(`${base}/v2/orders/${existingStop.id}`, { headers });
@@ -294,12 +350,15 @@ async function upgradeTrailingStops(userId) {
                 await sleep(300);
             } catch (e) {
                 failed.push(`${pos.symbol}: ${e.response?.data?.message || e.message}`);
+            } finally {
+                stopOrderLock.clearStopChange(userId, pos.symbol);
             }
         } else {
             // Fractional: refresh DAY stop to 5% below current (tighter than 7%-below-entry)
             const newStop = parseFloat((current * 0.95).toFixed(2));
             if (existingStop && existingStop.stopPrice >= newStop) continue; // already tight enough
 
+            stopOrderLock.markStopChange(userId, pos.symbol, 60 * 1000);
             try {
                 if (existingStop) {
                     await axios.delete(`${base}/v2/orders/${existingStop.id}`, { headers });
@@ -314,6 +373,8 @@ async function upgradeTrailingStops(userId) {
                 await sleep(300);
             } catch (e) {
                 failed.push(`${pos.symbol}: ${e.response?.data?.message || e.message}`);
+            } finally {
+                stopOrderLock.clearStopChange(userId, pos.symbol);
             }
         }
     }
@@ -589,4 +650,4 @@ function stopSystemHealthMonitor() {
     }
 }
 
-module.exports = { startSystemHealthMonitor, stopSystemHealthMonitor };
+module.exports = { startSystemHealthMonitor, stopSystemHealthMonitor, checkAndFixStops, upgradeTrailingStops };

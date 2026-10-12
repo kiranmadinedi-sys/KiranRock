@@ -38,6 +38,7 @@ const tradeIntelligenceService = require('./tradeIntelligenceService');
 const cacheService = require('./cacheService');
 // Broker + data abstraction — switch provider/broker via .env without code changes
 const brokerService = require('./brokerService');
+const stopOrderLock = require('../utils/stopOrderLock');
 const dataProvider  = require('./dataProvider');
 const { ensurePhase0Schema, getGlobalTradingControl, getUserTradingControls } = require('./tradingControlService');
 const { evaluateGates }   = require('./activationGateService');
@@ -5156,6 +5157,12 @@ async function manageExistingPositions(userId) {
                     continue;
                 }
 
+                if (!existing && stopOrderLock.isStopChangeInProgress(userId, sym)) {
+                    // The health monitor's trailing-stop upgrade is mid cancel→place on this
+                    // symbol — the "missing" stop is that swap's gap, not a naked position.
+                    continue;
+                }
+
                 if (!existing) {
                     // MISSING stop — but first confirm the position is actually still live at the
                     // broker. `holdings` is a snapshot taken at the top of this function; if the
@@ -5253,6 +5260,10 @@ async function manageExistingPositions(userId) {
                                     }
                                 }
                             };
+                            // Tell the health monitor's independent stop check this symbol is
+                            // mid-swap, so it doesn't drop its own lower stop into the gap
+                            // (see utils/stopOrderLock.js — 2026-10-09 GME/BUG).
+                            stopOrderLock.markStopChange(userId, sym);
                             try {
                                 await brokerService.cancelOrder(userId, existing.orderId);
                                 await waitForRelease();
@@ -5276,13 +5287,28 @@ async function manageExistingPositions(userId) {
                                     }
                                     logger.info('[StopRepair] Previous stop restored after raise failure', { userId, sym, restoredPrice: existing.stopPrice });
                                 } catch (restoreErr) {
-                                    logger.error('[StopRepair] CRITICAL — position left with no stop after failed raise+restore', {
-                                        userId, sym, err: restoreErr.message
-                                    });
-                                    alertService.sendMessage(userId,
-                                        `⚠️ *Stop Protection Failed* — ${sym}\nCould not update or restore protective stop. Please check this position manually.`
-                                    ).catch(() => {});
+                                    // A 403 here usually means some OTHER order already holds the
+                                    // shares — i.e. the position IS protected, just not by us. Only
+                                    // call it CRITICAL when the broker really shows no stop.
+                                    const otherStop = await brokerService.getOpenOrders(userId)
+                                        .then(orders => orders.find(o => o.symbol === sym && o.side === 'sell' &&
+                                            (o.type === 'stop' || o.type === 'stop_limit' || o.type === 'trailing_stop')))
+                                        .catch(() => null);
+                                    if (otherStop) {
+                                        logger.warn('[StopRepair] Raise/restore blocked — another stop already protects the position; next cycle will raise it', {
+                                            userId, sym, otherStopPrice: parseFloat(otherStop.stop_price || 0) || null, otherType: otherStop.type
+                                        });
+                                    } else {
+                                        logger.error('[StopRepair] CRITICAL — position left with no stop after failed raise+restore', {
+                                            userId, sym, err: restoreErr.message
+                                        });
+                                        alertService.sendMessage(userId,
+                                            `⚠️ *Stop Protection Failed* — ${sym}\nCould not update or restore protective stop. Please check this position manually.`
+                                        ).catch(() => {});
+                                    }
                                 }
+                            } finally {
+                                stopOrderLock.clearStopChange(userId, sym);
                             }
                         }
                     }

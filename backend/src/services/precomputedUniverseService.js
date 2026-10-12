@@ -44,13 +44,18 @@ function buildLatestTradingScanDateSql(todayExpr = 'CURRENT_DATE') {
                     AND analysis_date <= ${todayExpr}
                     AND EXTRACT(ISODOW FROM analysis_date) BETWEEN 1 AND 5
                   GROUP BY analysis_date) d
-           LEFT JOIN (SELECT universe_date,
-                             COUNT(*) FILTER (WHERE passed AND (tier != 1 OR tier IS NULL)) AS target
-                        FROM hermes_symbol_log
-                       WHERE universe_date >= ${todayExpr} - INTERVAL '4 days'
-                       GROUP BY universe_date) h ON h.universe_date = d.analysis_date
+           CROSS JOIN (SELECT MAX(target) AS ref
+                         FROM (SELECT COUNT(*) FILTER (WHERE passed AND (tier != 1 OR tier IS NULL)) AS target
+                                 FROM hermes_symbol_log
+                                WHERE universe_date >= ${todayExpr} - INTERVAL '10 days'
+                                  AND universe_date <= ${todayExpr}
+                                GROUP BY universe_date) t) h
           WHERE d.p > 0
-            AND d.n >= 0.9 * COALESCE(NULLIF(h.target, 0), 1000)
+            -- Reference = the LARGEST daily HERMES target of the last 10 days (a full
+            -- weekday universe, ~2,600), not the scan date's own target: a date's own
+            -- universe can itself be partial — 2026-10-12's was mid-build (110 of 135) and
+            -- weekend universes are ~770 — which made a 104-row scan look "complete".
+            AND d.n >= 0.9 * COALESCE(NULLIF(h.ref, 0), 1000)
           ORDER BY d.analysis_date DESC
           LIMIT 1),
         (SELECT MAX(analysis_date)

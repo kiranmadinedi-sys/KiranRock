@@ -19,17 +19,50 @@
 const { query } = require('../config/database');
 
 /**
- * Most recent date with ≥1 passed record — used by isAvailable() and loadCandidates().
+ * Scan date the trading bot should use — isAvailable() and loadCandidates().
  * Thursday evening scan (stored 2026-05-29) is found by Friday's (2026-05-30) bot.
  * Friday scan is found by Monday's bot (covers the weekend gap).
+ *
+ * The latest WEEKDAY scan that is COMPLETE (rows >= 90% of that date's HERMES target, or
+ * >= 900 rows when no target was recorded); only if none in the window is complete, the
+ * latest weekday date with passed rows. Was simply MAX(analysis_date) with any passed row,
+ * so whatever scan wrote most recently won — found 2026-10-11: weekend scans (769/770 rows,
+ * launched by the EOD job and Sunday scout with no weekday check) and a 57-row Monday scan
+ * started 00:04 ET would all have displaced Friday's complete 2,638-row scan as Monday's
+ * candidate source. Same failure class as the partial morning rescans (2026-10-08). This
+ * makes the loader immune to it regardless of what launches a scan.
  */
-const LATEST_DATE_SQL = `(
-    SELECT MAX(analysis_date)
-    FROM   daily_universe_analysis
-    WHERE  analysis_date >= CURRENT_DATE - INTERVAL '4 days'
-      AND  analysis_date <= CURRENT_DATE
-      AND  passed_prescreen = true
+function buildLatestTradingScanDateSql(todayExpr = 'CURRENT_DATE') {
+    return `(
+    SELECT COALESCE(
+        (SELECT d.analysis_date
+           FROM (SELECT analysis_date,
+                        COUNT(*) AS n,
+                        COUNT(*) FILTER (WHERE passed_prescreen) AS p
+                   FROM daily_universe_analysis
+                  WHERE analysis_date >= ${todayExpr} - INTERVAL '4 days'
+                    AND analysis_date <= ${todayExpr}
+                    AND EXTRACT(ISODOW FROM analysis_date) BETWEEN 1 AND 5
+                  GROUP BY analysis_date) d
+           LEFT JOIN (SELECT universe_date,
+                             COUNT(*) FILTER (WHERE passed AND (tier != 1 OR tier IS NULL)) AS target
+                        FROM hermes_symbol_log
+                       WHERE universe_date >= ${todayExpr} - INTERVAL '4 days'
+                       GROUP BY universe_date) h ON h.universe_date = d.analysis_date
+          WHERE d.p > 0
+            AND d.n >= 0.9 * COALESCE(NULLIF(h.target, 0), 1000)
+          ORDER BY d.analysis_date DESC
+          LIMIT 1),
+        (SELECT MAX(analysis_date)
+           FROM daily_universe_analysis
+          WHERE analysis_date >= ${todayExpr} - INTERVAL '4 days'
+            AND analysis_date <= ${todayExpr}
+            AND EXTRACT(ISODOW FROM analysis_date) BETWEEN 1 AND 5
+            AND passed_prescreen = true)
+    )
 )`;
+}
+const LATEST_DATE_SQL = buildLatestTradingScanDateSql();
 
 /**
  * Most recent date with ANY scan records — used by analytics (summary, exclusions, new tickers).
@@ -315,5 +348,6 @@ module.exports = {
     getExclusionSummary,
     getNewTickers,
     checkPrescreenDrift,
-    getSymbolScanRecord
+    getSymbolScanRecord,
+    buildLatestTradingScanDateSql, // exported for tests
 };

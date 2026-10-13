@@ -1698,6 +1698,9 @@ function startScheduler() {
         runMorningReconciliationTick();    // 9:00 AM ET Mon-Fri: DB vs Alpaca position sync
         runMorningStopVerification();      // 9:31 AM ET Mon-Fri: ensure every position has an active stop
         runMorningDigest();                // 9:25 AM ET Mon-Fri: portfolio digest via Telegram
+        require('./selectionExperimentService').runDailyPickLog().catch(err =>
+            console.warn('[SelectionExperiment] Pick log tick failed:', err.message)
+        );                                 // 9:35 AM ET trading days: Phase 1 control-vs-oversold picks
         runSundayGlobalScout();            // 8:00 PM ET Sunday: global markets + Monday preview
         extendedHoursTradingService.runExtendedHoursCycle().catch(err =>
             console.error('[ExtendedHours] Cycle error:', err.message)

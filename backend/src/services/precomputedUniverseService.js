@@ -106,7 +106,50 @@ async function isAvailable(minCount = 10) {
  * @param {number} opts.minScore  — minimum ai_score to include (default 85, matches bot minBuyScore)
  * @param {number} opts.limit     — max records to return (default 120)
  */
-async function loadCandidates({ minScore = 85, limit = 120 } = {}) {
+function _toCandidate(row, oversoldScore) {
+    return {
+        symbol:    row.symbol,
+        marketCap: parseFloat(row.market_cap) || 2_000_000_000,
+        sector:    row.sector || 'Unknown',
+        // Tells the scan loop to skip passesQuickFilter — already applied overnight
+        _preScreened: true,
+        // overnight score kept for logging/analytics — live analyzeStockWithAI overwrites it
+        _precomputedScore:  parseFloat(row.ai_score),
+        _precomputedRec:    row.recommendation,
+        _precomputedFamily: row.setup_family,
+        ...(oversoldScore != null ? { _oversoldScore: oversoldScore } : {}),
+    };
+}
+
+/**
+ * rankBy 'oversold' (Phase 1 selection experiment, paper only — see
+ * selectionExperimentService.js): same qualifying pool, but the `limit` kept are the
+ * highest oversold scores rather than the highest AI scores. `onPool` receives the
+ * whole pool (in the default AI-score order) so both orderings can be logged.
+ */
+async function loadCandidates({ minScore = 85, limit = 120, rankBy = 'score', onPool = null } = {}) {
+    if (rankBy === 'oversold') {
+        const exp = require('./selectionExperimentService');
+        const res = await query(
+            `SELECT symbol, ai_score, recommendation, setup_family, sector, market_cap,
+                    analysis_date::text AS scan_date, metadata->'scoringLog' AS scoring_log
+             FROM daily_universe_analysis
+             WHERE analysis_date = ${LATEST_DATE_SQL}
+               AND passed_prescreen = true
+               AND ai_score >= $1
+             ORDER BY ai_score DESC, md5(symbol || analysis_date::text) ASC`,
+            [minScore]
+        );
+        const pool = res.rows.map(row => ({
+            row, symbol: row.symbol, scanDate: row.scan_date,
+            aiScore: parseFloat(row.ai_score), oversoldScore: exp.oversoldScore(row.scoring_log),
+        }));
+        if (onPool) {
+            try { await onPool(pool); } catch (_) { /* logging must never block candidate loading */ }
+        }
+        return [...pool].sort(exp.compareOversold).slice(0, limit).map(p => _toCandidate(p.row, p.oversoldScore));
+    }
+
     // Found 2026-09-27, investigating a "missed opportunity" alert: ORDER BY ai_score DESC
     // alone has no tie-breaker, so when many symbols hit the same score — 68 symbols tied
     // at the exact maximum of 100.00 on 2026-09-24, for a LIMIT of 40 — Postgres falls back
@@ -131,17 +174,7 @@ async function loadCandidates({ minScore = 85, limit = 120 } = {}) {
         [minScore, limit]
     );
 
-    return res.rows.map(row => ({
-        symbol:    row.symbol,
-        marketCap: parseFloat(row.market_cap) || 2_000_000_000,
-        sector:    row.sector || 'Unknown',
-        // Tells the scan loop to skip passesQuickFilter — already applied overnight
-        _preScreened: true,
-        // overnight score kept for logging/analytics — live analyzeStockWithAI overwrites it
-        _precomputedScore:  parseFloat(row.ai_score),
-        _precomputedRec:    row.recommendation,
-        _precomputedFamily: row.setup_family,
-    }));
+    return res.rows.map(row => _toCandidate(row));
 }
 
 /**

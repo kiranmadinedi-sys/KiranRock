@@ -39,6 +39,7 @@ const cacheService = require('./cacheService');
 // Broker + data abstraction — switch provider/broker via .env without code changes
 const brokerService = require('./brokerService');
 const stopOrderLock = require('../utils/stopOrderLock');
+const selectionExperiment = require('./selectionExperimentService');
 const dataProvider  = require('./dataProvider');
 const { ensurePhase0Schema, getGlobalTradingControl, getUserTradingControls } = require('./tradingControlService');
 const { evaluateGates }   = require('./activationGateService');
@@ -2708,7 +2709,12 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
     try {
         const precomputedReady = await precomputedUniverseService.isAvailable();
         if (precomputedReady) {
+            // Phase 1 selection experiment (paper only, SELECTION_EXPERIMENT_USER_IDS): keep
+            // the highest "oversold" scores instead of the highest AI scores. The daily
+            // control-vs-oversold comparison is logged by the scheduler, not here, so it is
+            // recorded even on days the regime guard skips the scan.
             const precomputedList = await precomputedUniverseService.loadCandidates({
+                ...(selectionExperiment.isExperimentUser(userId) ? { rankBy: 'oversold' } : {}),
                 minScore: Math.max(80, minBuyScore - 5), // quality floor: ≥80 removes noise while keeping stocks that gap up intraday
                 // Cut from 120 — each candidate re-runs the full live PULSE+ORACLE pipeline,
                 // and with Gemini's free-tier quota exhausted almost immediately every real
@@ -2943,7 +2949,15 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
     // Validated by June 18 backtest: breakout_leader avg +0.12% vs quality_continuation +0.02%.
     const SETUP_PRIORITY = { breakout_leader: 4, oversold_reversal: 3, quality_continuation: 2, mean_reversion_bounce: 1 };
 
-    filteredOpportunities.sort((a, b) => {
+    if (selectionExperiment.isExperimentUser(userId)) {
+        // Phase 1 selection experiment: among opportunities that already cleared
+        // minBuyScore, buy the most "oversold" first (from the LIVE score breakdown).
+        for (const o of filteredOpportunities) o.oversoldScore = selectionExperiment.oversoldScore(o.scoringLog);
+        filteredOpportunities.sort(selectionExperiment.compareOversold);
+        logger.info('[SelectionExperiment] Buy order by oversold score', {
+            userId, top: filteredOpportunities.slice(0, 5).map(o => `${o.symbol}(${o.oversoldScore}/${o.aiScore})`),
+        });
+    } else filteredOpportunities.sort((a, b) => {
         // Primary: AI score, wide band — a genuinely dominant score always wins outright,
         // tier only breaks a close tie. Was tier-first with score as the tiebreaker (so
         // ANY tier-1/2 candidate outranked EVERY tier-3 one regardless of score gap) until
@@ -2995,6 +3009,7 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
                     sector: opportunity.sector,
                     daysToEarnings: opportunity.daysToEarnings ?? null,
                     newsSentiment: opportunity.newsSentiment,
+                    ...(opportunity.oversoldScore != null ? { selectionArm: 'oversold', oversoldScore: opportunity.oversoldScore } : {}),
                     relativeStrength: opportunity.relativeStrength,
                     scoringLog: opportunity.scoringLog
                 }

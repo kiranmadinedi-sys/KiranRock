@@ -185,7 +185,10 @@ async function checkAndFixStops(userId) {
     // ANY resting sell order commits the shares (a bracket take-profit limit leg, a
     // pending market sell) — a new stop would only be rejected, so it counts as covered.
     const protectedSyms = new Set(openOrders.filter(o => o.side === 'sell').map(o => o.symbol));
-    const positions = posRes.data.filter(p => parseFloat(p.qty) > 0);
+    // Crypto is excluded: it has no stop orders by design (the crypto process manages its
+    // own exits, and Alpaca rejects a plain stop on crypto), so every crypto position looked
+    // "unprotected" here and drew a rejected order + alert each sweep (seen 2026-10-12).
+    const positions = posRes.data.filter(p => parseFloat(p.qty) > 0 && p.asset_class !== 'crypto');
 
     // 2026-10-12: this check and the bot's StopRepair both manage the same stops. When
     // StopRepair was mid cancel→place (raising a stop), this saw "no stop" and placed
@@ -310,7 +313,7 @@ async function upgradeTrailingStops(userId) {
         }
     }
 
-    const positions = posRes.data.filter(p => parseFloat(p.qty) > 0);
+    const positions = posRes.data.filter(p => parseFloat(p.qty) > 0 && p.asset_class !== 'crypto'); // crypto: see checkAndFixStops
     const upgraded = [], failed = [];
 
     for (const pos of positions) {

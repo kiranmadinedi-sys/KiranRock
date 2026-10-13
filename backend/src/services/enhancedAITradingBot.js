@@ -5229,7 +5229,12 @@ async function manageExistingPositions(userId) {
                     } else {
                         // STALE stop — check if price diverged >0.2% from expected
                         const drift = Math.abs(existing.stopPrice - expectedStop) / expectedStop;
-                        if (drift > 0.002) {
+                        // Raise only in regular hours: outside them (this also runs 4-9:30 AM /
+                        // 4-8 PM ET) Alpaca leaves a cancel in pending_cancel, still holding the
+                        // shares, so the re-place fails and the old stop gets canceled at the
+                        // open with nothing behind it (kmadined CAKE 2026-10-12). A stop can't
+                        // trigger outside regular hours anyway, so waiting costs nothing.
+                        if (drift > 0.002 && isMarketOpen()) {
                             // Cancel-then-place is not atomic: if placeStopOrder fails after the
                             // cancel already succeeded, the position is left with NO stop at all
                             // until the next cycle. Observed live 2026-07-21 — TMUS/NET/MELI
@@ -5627,6 +5632,21 @@ async function manageExistingPositions(userId) {
                             );
                         }
                     } catch (_earningsCheckErr) { /* non-critical — skip */ }
+                }
+
+                if (shouldSell && sellQuantity > 0 && !isMarketOpen()) {
+                    // 2026-10-12: this function also runs 4-9:30 AM / 4-8 PM ET via
+                    // extendedHoursTradingService. A regular-session sell from there first
+                    // cancels the resting stop, then the order is rejected (the canceled stop
+                    // sits in pending_cancel and still holds the shares until the session
+                    // opens). kmadined CAKE: 6 such attempts 03:03-05:55 CT, and the failed
+                    // attempts then burned the day's idempotency key so the exit stayed
+                    // blocked all through regular hours. Defer to the first regular-hours
+                    // cycle — nothing executes before 9:30 anyway, and the stop stays armed.
+                    logger.info('[SwingExit] Exit deferred to regular hours (market closed)', {
+                        userId, symbol: holding.symbol, reason
+                    });
+                    continue;
                 }
 
                 if (shouldSell && sellQuantity > 0) {

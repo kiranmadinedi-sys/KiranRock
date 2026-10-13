@@ -92,6 +92,17 @@ describe('systemHealthMonitor — no longer races StopRepair', () => {
         expect(axios.post).not.toHaveBeenCalled();
     });
 
+    test('crypto positions are never given a stock-style stop (crypto manages its own exits)', async () => {
+        mockPositions([POS('SHIBUSD', { asset_class: 'crypto', qty: '1000000' })]);
+        broker.getOpenOrders.mockResolvedValue([]);
+
+        await monitor.checkAndFixStops('u1');
+        const r = await monitor.checkAndFixStops('u1');
+
+        expect(axios.post).not.toHaveBeenCalled();
+        expect(r).toEqual({ issue: null, fixed: null });
+    });
+
     test('a failed order fetch throws instead of reading as "nothing is protected"', async () => {
         mockPositions([POS('GME')]);
         broker.getOpenOrders.mockRejectedValue(new Error('pool timeout'));

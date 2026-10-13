@@ -79,4 +79,17 @@ describe('claimIdempotencyKey — retry after a pre-broker failure, never a real
         for (let i = 1; i <= 5; i++) auditRows.push({ idempotency_key: `${KEY}#retry${i}`, state: 'CREATED', created_at: minsAgo(30 - i) }, { idempotency_key: `${KEY}#retry${i}`, state: 'FAILED', created_at: minsAgo(30 - i) });
         expect(await claim(KEY, 'u1', 'NVDA')).toBeNull();
     });
+
+    // 2026-10-12 kmadined CAKE: 6 failures 03:03-05:55 CT (market closed) used up the cap
+    // and blocked the exit all through regular hours.
+    test('an old burst of failures (all >2h ago) does not block a retry later in the day', async () => {
+        auditRows.push({ idempotency_key: KEY, state: 'CREATED', created_at: minsAgo(400) }, { idempotency_key: KEY, state: 'FAILED', created_at: minsAgo(400) });
+        for (let i = 1; i <= 5; i++) auditRows.push({ idempotency_key: `${KEY}#retry${i}`, state: 'CREATED', created_at: minsAgo(400 - i * 35) }, { idempotency_key: `${KEY}#retry${i}`, state: 'FAILED', created_at: minsAgo(400 - i * 35) });
+        expect(await claim(KEY, 'u1', 'NVDA')).toBe(`${KEY}#retry6`);
+    });
+
+    test('an old burst still never allows a retry once any attempt reached the broker', async () => {
+        auditRows.push({ idempotency_key: KEY, state: 'CREATED', created_at: minsAgo(400) }, { idempotency_key: KEY, state: 'SUBMITTED', created_at: minsAgo(400) });
+        expect(await claim(KEY, 'u1', 'NVDA')).toBeNull();
+    });
 });

@@ -89,6 +89,7 @@ async function isOrderAlreadySubmitted(idempotencyKey) {
 const PRE_BROKER_STATES = new Set(['CREATED', 'VALIDATED', 'FAILED', 'REJECTED']);
 const STALE_CLAIM_MS = 2 * 60 * 1000;
 const MAX_CLAIM_RETRIES = 5;
+const RETRY_CAP_WINDOW_MS = 2 * 60 * 60 * 1000;
 
 async function claimIdempotencyKey(idemKey, userId, symbol, meta = {}) {
     const insertClaim = key => query(
@@ -130,8 +131,13 @@ async function claimIdempotencyKey(idemKey, userId, symbol, meta = {}) {
     const latestFailed = rows.some(r => r.idempotency_key === latestKey && (r.state === 'FAILED' || r.state === 'REJECTED'));
     const latestStale = Date.now() - claimedAt(latestKey) > STALE_CLAIM_MS;
     if (!latestFailed && !latestStale) return null; // a live attempt is still in flight
-    if (attemptKeys.length > MAX_CLAIM_RETRIES) {
-        logger.warn('[ARROW] Retry limit reached for idempotency key — blocking', { idemKey, symbol, attempts: attemptKeys.length });
+    // The cap counts only RECENT attempts (2026-10-12): kmadined's CAKE exit failed 6 times
+    // between 03:03 and 05:55 CT while the market was closed, which used up the whole cap and
+    // blocked the exit for all of regular hours. The cap is there to stop a tight loop on a
+    // permanently failing order; a burst hours ago says nothing about the next attempt.
+    const recentAttempts = attemptKeys.filter(k => Date.now() - claimedAt(k) <= RETRY_CAP_WINDOW_MS).length;
+    if (recentAttempts > MAX_CLAIM_RETRIES) {
+        logger.warn('[ARROW] Retry limit reached for idempotency key — blocking', { idemKey, symbol, attempts: attemptKeys.length, recentAttempts });
         return null;
     }
 

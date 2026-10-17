@@ -1697,6 +1697,8 @@ function startScheduler() {
         runWeeklyPnlReport();              // Friday 16:10 ET: realized $/day per account vs target
         runWeeklyScoreValidation();        // Saturday 10:00 ET: which score components actually predict returns
         runWeeklyMarketStudy();            // Saturday 11:00 ET: exits + picking methods tested on ALL ≥80 candidates
+        runWeeklyInsiderSweep();           // Saturday 12:00 ET: insider trades for every scanned ticker (research archive)
+        require('./researchArchiveService').syncRecentNews().catch(() => {}); // every tick, 24/7: all-ticker news archive
         runCryptoWatchdog();               // every tick, 24/7: alert if the crypto process went silent while positions are open
         runMorningBriefing();              // 8:00 AM ET Mon-Fri: STRONG BUY pre-market alert
         runPremarketGapBriefing();         // 8:30 AM ET Mon-Fri: gap check on tonight's setups
@@ -1789,6 +1791,23 @@ async function runWeeklyMarketStudy() {
     } catch (err) {
         console.error('[MarketStudy] Error:', err.message);
     }
+}
+
+// Saturday 12:00 ET — insider trades (Finnhub, last 60 days) for the whole scan universe.
+// ~1 hour at the rate limit; runs after the 11:00 market study so they don't overlap.
+let _insiderSweepRanDate = null;
+async function runWeeklyInsiderSweep() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit'
+    }).formatToParts(new Date());
+    const get = t => parts.find(p => p.type === t).value;
+    const etDate = `${get('year')}-${get('month')}-${get('day')}`;
+    if (get('weekday') !== 'Sat' || parseInt(get('hour'), 10) !== 12) return;
+    if (_insiderSweepRanDate === etDate) return;
+    _insiderSweepRanDate = etDate;
+    require('./researchArchiveService').weeklyInsiderSweep().catch(err =>
+        console.error('[ResearchArchive] Insider sweep error:', err.message));
 }
 
 let _weeklyPnlRanDate = null;

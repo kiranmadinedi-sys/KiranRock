@@ -47,11 +47,11 @@ describe('precomputedUniverseService.loadCandidates — tie-break fairness', () 
         }]);
     });
 
-    test('minScore and limit are still passed through as query parameters unchanged', async () => {
+    test('minScore is passed through; limit is over-fetched by 15 for the hype-gap guard (2026-10-17)', async () => {
         query.mockResolvedValue({ rows: [] });
 
         await loadCandidates({ minScore: 80, limit: 40 });
 
-        expect(query.mock.calls[0][1]).toEqual([80, 40]);
+        expect(query.mock.calls[0][1]).toEqual([80, 55]);
     });
 });

@@ -18,11 +18,19 @@
 const { query } = require('../config/database');
 const { logger } = require('../utils/logger');
 
-// What the platform can realistically aim for on the current live capital, combined across
-// live accounts (a good swing system earns ~0.1-0.3%/day; ~$8.85k -> ~$9-27/day), and the
-// owner's stated stretch goal, shown alongside so the gap stays visible.
-const DEFAULT_TARGET_USD  = parseFloat(process.env.DAILY_PNL_TARGET_USD  || '15');
-const DEFAULT_STRETCH_USD = parseFloat(process.env.DAILY_PNL_STRETCH_USD || '100');
+// Capital-proportional targets (2026-10-17, agreed with the user): a fixed $15/day was ~50%/yr
+// on kmadined's $7.5K and ~370%/yr on a $1K account — unreachable targets make every week look
+// like a failure and push toward risk. Realistic = 8%/yr, stretch = 15%/yr, of each account's
+// own equity, so the target grows as capital is added. (Built from the evidence: core in SPY
+// ~8-10%/yr long run, SGOV ~3.8%, swing ~+0.25%/trade with the 'wide' exits if confirmed.)
+const ANNUAL_TARGET_PCT  = parseFloat(process.env.ANNUAL_TARGET_PCT  || '8');
+const ANNUAL_STRETCH_PCT = parseFloat(process.env.ANNUAL_STRETCH_PCT || '15');
+const TRADING_DAYS_PER_YEAR = 252;
+/** $ per trading day for an equity at an annual % — the per-account target. */
+const targetPerDay = (equity, annualPct) => (equity > 0 ? equity * annualPct / 100 / TRADING_DAYS_PER_YEAR : 0);
+// Kept for callers/tests that pass explicit dollar targets to formatCombinedMessage.
+const DEFAULT_TARGET_USD  = parseFloat(process.env.DAILY_PNL_TARGET_USD  || '0');
+const DEFAULT_STRETCH_USD = parseFloat(process.env.DAILY_PNL_STRETCH_USD || '0');
 
 const money = n => `${n < 0 ? '-' : '+'}$${Math.abs(n).toFixed(2)}`;
 
@@ -110,18 +118,46 @@ async function _fetchCashPct(userId) {
     }
 }
 
+/**
+ * TOTAL P&L per trading day from Alpaca's own portfolio history (profit_loss excludes
+ * deposits/withdrawals; includes closed trades, open positions and core holdings).
+ * Returns { last5, last28 } sums, or null when unavailable.
+ */
+async function _fetchTotalPnl(userId) {
+    try {
+        const axios = require('axios');
+        const userDb = require('./userDatabaseService');
+        const c = await userDb.getUserAlpacaCredentials(userId);
+        const base = c.isPaper !== false ? 'https://paper-api.alpaca.markets/v2' : 'https://api.alpaca.markets/v2';
+        const h = (await axios.get(`${base}/account/portfolio/history`, {
+            headers: { 'APCA-API-KEY-ID': c.keyId, 'APCA-API-SECRET-KEY': c.secretKey },
+            params: { period: '1M', timeframe: '1D' }, timeout: 8000,
+        })).data;
+        const pl = (h.profit_loss || []).map(v => (v == null ? 0 : Number(v)));
+        if (!pl.length) return null;
+        const sum = a => a.reduce((x, y) => x + y, 0);
+        return { last5: sum(pl.slice(-5)), last28: sum(pl.slice(-20)) };
+    } catch (err) {
+        logger.debug('[DailyPnl] Portfolio history lookup failed', { userId, err: err.message });
+        return null;
+    }
+}
+
 /** Build the numbers for one account. Injectable deps keep this testable. */
 async function buildAccountSummary(userId, { now = new Date(), deps = {} } = {}) {
     const realized = deps.realizedByDay || _realizedByDay;
     const crypto   = deps.cryptoByDay   || _cryptoByDay;
     const cashInfo = deps.cashInfo      || _fetchCashPct;
+    const totalPnl = deps.totalPnl      || _fetchTotalPnl;
     const holiday  = deps.isHoliday     || _isHoliday;
 
     const end = now;
     const start28 = new Date(end.getTime() - 27 * 86400000);
     const sinceKey = start28.toISOString().slice(0, 10);
 
-    const [rows, cryptoRows, cash] = await Promise.all([realized(userId, sinceKey), crypto(userId, sinceKey), cashInfo(userId)]);
+    const [rows, cryptoRows, cash, total] = await Promise.all([
+        realized(userId, sinceKey), crypto(userId, sinceKey), cashInfo(userId), totalPnl(userId).catch(() => null),
+    ]);
 
     const keys28 = tradingDayKeys(start28, end, holiday);
     const keys5  = keys28.slice(-5);
@@ -135,7 +171,13 @@ async function buildAccountSummary(userId, { now = new Date(), deps = {} } = {})
         cashPct: cash?.cashPct ?? null,
         last5: summarizeWindow(rows, keys5),
         last28: summarizeWindow(rows, keys28),
-        mtd: summarizeWindow(rows, keysMtd)
+        mtd: summarizeWindow(rows, keysMtd),
+        total: total || null,
+        targets: cash?.equity > 0 ? {
+            annualPct: ANNUAL_TARGET_PCT, stretchPct: ANNUAL_STRETCH_PCT,
+            perDay: targetPerDay(cash.equity, ANNUAL_TARGET_PCT),
+            stretchPerDay: targetPerDay(cash.equity, ANNUAL_STRETCH_PCT),
+        } : null,
     };
 
     if (cryptoRows.length > 0) {
@@ -145,14 +187,32 @@ async function buildAccountSummary(userId, { now = new Date(), deps = {} } = {})
     return summary;
 }
 
+/** "on track" verdict for an actual vs a target over the same window. */
+function verdict(actual, target) {
+    if (!(target > 0)) return '';
+    const pct = Math.round(actual / target * 100);
+    return `${pct}% of target ${pct >= 100 ? '✅ on track' : pct >= 50 ? '🟡 behind' : '🔴 well behind'}`;
+}
+
 function formatAccountMessage(username, s, { target = DEFAULT_TARGET_USD, stretch = DEFAULT_STRETCH_USD } = {}) {
-    const lines = [`📈 *Weekly $/day report — ${username}*${s.isPaper ? ' _(paper)_' : ''}`, ''];
+    const lines = [`📈 *Weekly report — ${username}*${s.isPaper ? ' _(paper)_' : ''}`, ''];
+    if (s.targets) {
+        const t = s.targets;
+        lines.push(`🎯 *Target:* ${t.annualPct}%/yr on $${s.equity.toFixed(0)} = *${money(t.perDay * 5)}/week* (stretch ${t.stretchPct}%: ${money(t.stretchPerDay * 5)}/week)`);
+        if (s.total) {
+            lines.push(`*Total P&L, last 5 days:* ${money(s.total.last5)} → ${verdict(s.total.last5, t.perDay * 5)}`);
+            lines.push(`*Total P&L, last 4 weeks:* ${money(s.total.last28)} vs ${money(t.perDay * 20)} target → ${verdict(s.total.last28, t.perDay * 20)}`);
+            lines.push('_Total = closed trades + open positions + core, deposits excluded (Alpaca)._');
+        }
+        lines.push('');
+    }
+    lines.push('*Swing trading (closed trades):*');
     lines.push(`*Last 5 trading days:* ${money(s.last5.total)} total → *${money(s.last5.avgPerDay)}/day* (${s.last5.greenDays} green, ${s.last5.redDays} red, ${s.last5.closedTrades} closes)`);
     lines.push(`*Last 4 weeks:* ${money(s.last28.total)} → *${money(s.last28.avgPerDay)}/day* over ${s.last28.days} trading days (${s.last28.greenDays} green / ${s.last28.redDays} red)`);
     lines.push(`*Month to date:* ${money(s.mtd.total)}`);
     if (s.crypto) lines.push(`*Crypto (24/7, 4 weeks):* ${money(s.crypto.total28)} → ${money(s.crypto.avgPerCalendarDay)}/day, ${s.crypto.trades28} closes`);
     if (s.equity != null) lines.push(`*Capital:* $${s.equity.toFixed(0)} equity, ${s.cashPct}% idle cash`);
-    lines.push('', '_Realized (closed) P&L only — deposits and unrealized swings are excluded._');
+    lines.push('', '_Swing lines are realized (closed) P&L only; the target lines above use total P&L._');
     return lines.join('\n');
 }
 
@@ -170,8 +230,18 @@ function formatCombinedMessage(entries, { target = DEFAULT_TARGET_USD, stretch =
     }
     lines.push(`  *Combined:* ${money(liveAvg5)}/day (5d) · *${money(liveAvg28)}/day (4w)* on ~$${liveEquity.toFixed(0)}`);
     lines.push('');
-    lines.push(`*Target:* ${money(target)}/day realistic on current capital — currently at ${target > 0 ? Math.round((liveAvg28 / target) * 100) : 0}%`);
-    lines.push(`*Your ${money(stretch)}/day goal:* at ${stretch > 0 ? Math.round((liveAvg28 / stretch) * 100) : 0}% — needs ~${(stretch / Math.max(liveEquity, 1) * 100).toFixed(1)}%/day return on this capital`);
+    if (target > 0 || stretch > 0) {
+        // explicit dollar targets (legacy / tests)
+        lines.push(`*Target:* ${money(target)}/day realistic on current capital — currently at ${target > 0 ? Math.round((liveAvg28 / target) * 100) : 0}%`);
+        lines.push(`*Your ${money(stretch)}/day goal:* at ${stretch > 0 ? Math.round((liveAvg28 / stretch) * 100) : 0}% — needs ~${(stretch / Math.max(liveEquity, 1) * 100).toFixed(1)}%/day return on this capital`);
+    } else {
+        lines.push(`*Targets (${ANNUAL_TARGET_PCT}%/yr of each account, total P&L, last 4 weeks):*`);
+        for (const e of live) {
+            const t = e.summary.targets, tot = e.summary.total;
+            if (!t) continue;
+            lines.push(`  ${e.username}: ${tot ? money(tot.last28) : 'n/a'} vs ${money(t.perDay * 20)} → ${tot ? verdict(tot.last28, t.perDay * 20) : 'n/a'}`);
+        }
+    }
     if (paper.length) {
         lines.push('', '*Paper (no real money):*');
         for (const e of paper) {
@@ -236,6 +306,7 @@ async function sendWeeklyPnlReports({ now = new Date(), deps = {} } = {}) {
 }
 
 module.exports = {
+    targetPerDay, verdict, ANNUAL_TARGET_PCT, ANNUAL_STRETCH_PCT,
     tradingDayKeys, summarizeWindow, buildAccountSummary, buildAllSummaries,
     formatAccountMessage, formatCombinedMessage, sendWeeklyPnlReports,
     DEFAULT_TARGET_USD, DEFAULT_STRETCH_USD

@@ -107,3 +107,32 @@ describe('dailyPnlTargetService (2026-09-20)', () => {
         });
     });
 });
+
+describe('capital-proportional targets (2026-10-17)', () => {
+    test('8%/yr and 15%/yr of equity, per trading day', () => {
+        expect(svc.targetPerDay(7472, 8)).toBeCloseTo(2.372, 3);    // ≈ $597/yr
+        expect(svc.targetPerDay(7472, 15)).toBeCloseTo(4.448, 3);
+        expect(svc.targetPerDay(0, 8)).toBe(0);
+    });
+
+    test('verdict labels progress against the target', () => {
+        expect(svc.verdict(12, 10)).toMatch(/120% of target ✅ on track/);
+        expect(svc.verdict(6, 10)).toMatch(/60% of target 🟡 behind/);
+        expect(svc.verdict(-3, 10)).toMatch(/-30% of target 🔴 well behind/);
+    });
+
+    test('the account report leads with the target and total P&L, then the swing lines', async () => {
+        const s = await svc.buildAccountSummary('u1', { now: NOW, deps: {
+            realizedByDay: async () => [{ day: '2026-09-18', pnl: 5, trades: 1 }],
+            cryptoByDay: async () => [], isHoliday: () => false,
+            cashInfo: async () => ({ equity: 7472, cash: 6701, cashPct: 90, isPaper: false }),
+            totalPnl: async () => ({ last5: 20, last28: 30 }),
+        } });
+        const msg = svc.formatAccountMessage('kmadined', s);
+        expect(msg).toContain('8%/yr on $7472');
+        expect(msg).toContain('+$11.86/week');                      // 2.372 × 5
+        expect(msg).toMatch(/Total P&L, last 5 days:\* \+\$20\.00 → 169% of target ✅ on track/);
+        expect(msg).toMatch(/last 4 weeks:\* \+\$30\.00 vs \+\$47\.44 target → 63% of target 🟡 behind/);
+        expect(msg.indexOf('Swing trading')).toBeGreaterThan(msg.indexOf('Target'));
+    });
+});

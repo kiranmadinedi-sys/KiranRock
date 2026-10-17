@@ -1,3 +1,4 @@
+jest.mock('../src/services/coreHoldingsService', () => ({ getCoreSymbols: jest.fn().mockResolvedValue(new Set()) }));
 jest.mock('../src/utils/logger', () => ({
     logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), aiDecision: jest.fn() },
 }));

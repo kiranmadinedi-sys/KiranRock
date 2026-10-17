@@ -1,3 +1,4 @@
+jest.mock('../src/services/coreHoldingsService', () => ({ getCoreSymbols: jest.fn().mockResolvedValue(new Set()) }));
 jest.mock('../src/config/database', () => ({ query: jest.fn() }));
 jest.mock('../src/services/enhancedAITradingBot', () => ({
     scanMarketForOpportunities: jest.fn(),
@@ -15,6 +16,7 @@ const bot = require('../src/services/enhancedAITradingBot');
 const broker = require('../src/services/brokerService');
 const holdingsDb = require('../src/services/holdingsDatabaseService');
 const regimeSvc = require('../src/services/marketRegimeService');
+const coreSvc = require('../src/services/coreHoldingsService');
 const { scanExtendedHoursForUser } = require('../src/services/extendedHoursTradingService');
 
 /**
@@ -28,6 +30,7 @@ describe('extended-hours entries respect max_open_positions', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
+        coreSvc.getCoreSymbols.mockResolvedValue(new Set());
         query.mockResolvedValue({ rows: [{ n: 0 }] }); // today's extended-hours entries
         bot.getUserRiskConfig.mockResolvedValue({ maxOpenPositions: 4, minBuyScore: 75, stopLoss: -0.05 });
         bot.scanMarketForOpportunities.mockResolvedValue([{ symbol: 'SNOW', price: 300, recommendation: 'STRONG BUY', aiScore: 95 }]);
@@ -70,6 +73,7 @@ describe('extended-hours entries respect the regime guard', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
+        coreSvc.getCoreSymbols.mockResolvedValue(new Set());
         query.mockResolvedValue({ rows: [{ n: 0 }] });
         bot.getUserRiskConfig.mockResolvedValue({ maxOpenPositions: 4, minBuyScore: 75, stopLoss: -0.05 });
         bot.scanMarketForOpportunities.mockResolvedValue([{ symbol: 'KEYS', price: 350, recommendation: 'STRONG BUY', aiScore: 95 }]);

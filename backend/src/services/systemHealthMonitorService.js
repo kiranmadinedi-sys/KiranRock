@@ -188,7 +188,9 @@ async function checkAndFixStops(userId) {
     // Crypto is excluded: it has no stop orders by design (the crypto process manages its
     // own exits, and Alpaca rejects a plain stop on crypto), so every crypto position looked
     // "unprotected" here and drew a rejected order + alert each sweep (seen 2026-10-12).
-    const positions = posRes.data.filter(p => parseFloat(p.qty) > 0 && p.asset_class !== 'crypto');
+    // Core holdings carry no stop by design (coreHoldingsService) — never "fix" them.
+    const coreSymbols = await require('./coreHoldingsService').getCoreSymbols(userId);
+    const positions = posRes.data.filter(p => parseFloat(p.qty) > 0 && p.asset_class !== 'crypto' && !coreSymbols.has(String(p.symbol).toUpperCase()));
 
     // 2026-10-12: this check and the bot's StopRepair both manage the same stops. When
     // StopRepair was mid cancel→place (raising a stop), this saw "no stop" and placed
@@ -313,7 +315,8 @@ async function upgradeTrailingStops(userId) {
         }
     }
 
-    const positions = posRes.data.filter(p => parseFloat(p.qty) > 0 && p.asset_class !== 'crypto'); // crypto: see checkAndFixStops
+    const coreSymbols = await require('./coreHoldingsService').getCoreSymbols(userId);
+    const positions = posRes.data.filter(p => parseFloat(p.qty) > 0 && p.asset_class !== 'crypto' && !coreSymbols.has(String(p.symbol).toUpperCase())); // crypto + core: see checkAndFixStops
     const upgraded = [], failed = [];
 
     for (const pos of positions) {

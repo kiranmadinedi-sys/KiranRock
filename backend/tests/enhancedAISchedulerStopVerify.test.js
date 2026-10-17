@@ -1,3 +1,4 @@
+jest.mock('../src/services/coreHoldingsService', () => ({ getCoreSymbols: jest.fn().mockResolvedValue(new Set()) }));
 jest.mock('@alpacahq/alpaca-trade-api');
 jest.mock('../src/config/database', () => ({ query: jest.fn() }));
 jest.mock('../src/services/userDatabaseService', () => ({

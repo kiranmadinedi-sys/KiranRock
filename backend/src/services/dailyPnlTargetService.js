@@ -215,7 +215,15 @@ async function sendWeeklyPnlReports({ now = new Date(), deps = {} } = {}) {
         try {
             const chatId = await alertService.getUserTelegramChatId(e.userId);
             if (chatId) {
-                await alertService.sendTelegramMessage(chatId, formatAccountMessage(e.username, e.summary));
+                // Core holdings are reported apart from the swing bot's realized P&L above
+                // (core never sells, so it never shows up in realized trades).
+                let text = formatAccountMessage(e.username, e.summary);
+                const core = await (deps.coreSummary || require('./coreHoldingsService').coreSummary)(e.userId).catch(() => null);
+                if (core && core.value > 0) {
+                    const pct = core.cost > 0 ? (core.unrealizedPl / core.cost * 100).toFixed(1) : '0.0';
+                    text += `\n\n🏛️ Core holdings (long-term, separate from swing): $${core.value.toFixed(0)} — unrealized ${core.unrealizedPl >= 0 ? '+' : ''}$${core.unrealizedPl.toFixed(2)} (${pct}%) · ${core.positions.map(p => p.symbol).join(', ')}`;
+                }
+                await alertService.sendTelegramMessage(chatId, text);
                 sent++;
             }
         } catch (err) {

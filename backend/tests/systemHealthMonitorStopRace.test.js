@@ -19,6 +19,7 @@ describe('systemHealthMonitor — no longer races StopRepair', () => {
             getUserAlpacaCredentials: jest.fn().mockResolvedValue({ keyId: 'k', secretKey: 's', isPaper: true }),
         }));
         jest.doMock('../src/services/brokerService', () => ({ getOpenOrders: jest.fn() }));
+        jest.doMock('../src/services/coreHoldingsService', () => ({ getCoreSymbols: jest.fn().mockResolvedValue(new Set()) }));
 
         axios   = require('axios');
         broker  = require('../src/services/brokerService');
@@ -101,6 +102,17 @@ describe('systemHealthMonitor — no longer races StopRepair', () => {
 
         expect(axios.post).not.toHaveBeenCalled();
         expect(r).toEqual({ issue: null, fixed: null });
+    });
+
+    test('core holdings never get a stop, even when missing on two sweeps', async () => {
+        mockPositions([POS('SPY')]);
+        broker.getOpenOrders.mockResolvedValue([]);
+        require('../src/services/coreHoldingsService').getCoreSymbols.mockResolvedValue(new Set(['SPY']));
+
+        await monitor.checkAndFixStops('u1');
+        await monitor.checkAndFixStops('u1');
+
+        expect(axios.post).not.toHaveBeenCalled();
     });
 
     test('a failed order fetch throws instead of reading as "nothing is protected"', async () => {

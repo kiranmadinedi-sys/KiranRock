@@ -40,6 +40,7 @@ const cacheService = require('./cacheService');
 const brokerService = require('./brokerService');
 const stopOrderLock = require('../utils/stopOrderLock');
 const selectionExperiment = require('./selectionExperimentService');
+const coreHoldings = require('./coreHoldingsService');
 const dataProvider  = require('./dataProvider');
 const { ensurePhase0Schema, getGlobalTradingControl, getUserTradingControls } = require('./tradingControlService');
 const { evaluateGates }   = require('./activationGateService');
@@ -3046,7 +3047,13 @@ const _pendingBuySlots = new Map(); // userId -> Map(symbol -> expiresAt)
 const PENDING_BUY_SLOT_TTL_MS = 3 * 60 * 1000;
 
 async function _reservePositionSlot(userId, symbol, maxPositions) {
-    const held = ((await holdingsDb.getUserHoldings(userId)) || []).map(h => String(h.symbol).toUpperCase());
+    const coreSymbols = await coreHoldings.getCoreSymbols(userId);
+    // A core symbol is never bought as a swing trade (one holdings row = one strategy),
+    // and core positions don't use up swing slots.
+    if (coreSymbols.has(String(symbol).toUpperCase())) return { ok: false, duplicate: true, count: 0 };
+    const held = ((await holdingsDb.getUserHoldings(userId)) || [])
+        .map(h => String(h.symbol).toUpperCase())
+        .filter(s => !coreSymbols.has(s));
     let brokerPendingBuys = [];
     try {
         const orders = await brokerService.getOpenOrders(userId);
@@ -3341,7 +3348,11 @@ async function executeAutonomousTrading(userId) {
         const portfolio = await tradingServiceDB.getPortfolioSummary(userId);
 
         let availableBalance = parseFloat(account.balance);
-        const currentHoldings = portfolio.holdings || [];
+        // Swing view of the portfolio: core holdings don't count toward max positions, sector
+        // caps, heat or the swing investment budget (a 50% core would otherwise block every
+        // swing buy). totalPortfolioValue stays the whole account, so swing sizes are unchanged.
+        const _coreSymbols = await coreHoldings.getCoreSymbols(userId);
+        const currentHoldings = (portfolio.holdings || []).filter(h => !_coreSymbols.has(String(h.symbol).toUpperCase()));
 
         // For Alpaca broker: fetch live account values FIRST so that StrategyScale,
         // sector allocation checks, and the daily loss circuit breaker all operate on
@@ -3724,7 +3735,7 @@ async function executeAutonomousTrading(userId) {
         }
 
         // Filter out stocks we already own
-        const ownedSymbols = currentHoldings.map(h => h.symbol);
+        const ownedSymbols = currentHoldings.map(h => h.symbol).concat([..._coreSymbols]); // never swing-buy a core symbol
         const newOpportunities = opportunities.filter(opp => !ownedSymbols.includes(opp.symbol));
 
         // Edge Gate: only enter new positions when there is at least one STRONG BUY signal.
@@ -5021,7 +5032,12 @@ async function manageExistingPositions(userId) {
     // [ScoreDecay] deferral comment further down.
     const rescoreOracleDeadline = Date.now() + LIVE_ORACLE_CUTOFF_MS;
     try {
-        const holdings = await holdingsDb.getUserHoldings(userId);
+        // Core holdings (long-term, see coreHoldingsService) are never managed here: no
+        // stop repair, no exits. If the core list can't be read this throws into the catch
+        // below and the pass is skipped, rather than treating a core position as a swing trade.
+        const coreSymbols = await coreHoldings.getCoreSymbols(userId);
+        const holdings = ((await holdingsDb.getUserHoldings(userId)) || [])
+            .filter(h => !coreSymbols.has(String(h.symbol).toUpperCase()));
         
         if (!holdings || holdings.length === 0) {
             return;

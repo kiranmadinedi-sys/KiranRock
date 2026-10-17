@@ -180,12 +180,14 @@ async function scanExtendedHoursForUser(user) {
     // live ORACLE calls) while it could never legally buy. Checked BEFORE the scan so a
     // full account costs nothing; the per-order slot guard below covers the race with
     // regular-hours cycles.
-    const holdings = await holdingsDb.getUserHoldings(userId);
+    const coreSymbols = await require('./coreHoldingsService').getCoreSymbols(userId);
+    const allHoldings = await holdingsDb.getUserHoldings(userId);
+    const holdings = allHoldings.filter(h => !coreSymbols.has(String(h.symbol).toUpperCase())); // core doesn't use swing slots
     const maxPositions = riskConfig.maxOpenPositions;
     if (maxPositions && holdings.length >= maxPositions) return;
 
     const opportunities = await enhancedAITradingBot.scanMarketForOpportunities(userId, 50, riskConfig.minBuyScore);
-    const owned = new Set(holdings.map(h => h.symbol));
+    const owned = new Set(allHoldings.map(h => h.symbol)); // includes core — never buy a core symbol here
 
     const candidates = opportunities
         .filter(o => !owned.has(o.symbol) && o.recommendation === 'STRONG BUY')

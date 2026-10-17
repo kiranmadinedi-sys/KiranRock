@@ -838,9 +838,13 @@ async function runMorningStopVerification() {
 
                 const restored = [];
                 const failed = [];
+                // Core holdings carry no stop by design (coreHoldingsService) — never add one.
+                const coreSymbols = await require('./coreHoldingsService').getCoreSymbols(user.id);
                 for (const pos of positions) {
                     if (parseFloat(pos.qty) <= 0) continue;
                     if (protectedSymbols.has(pos.symbol)) continue;
+                    if (coreSymbols.has(String(pos.symbol).toUpperCase())) continue;
+                    if (String(pos.symbol).includes('/') || pos.asset_class === 'crypto') continue;
 
                     // No stop found — place one immediately
                     const avgEntry = parseFloat(pos.avg_entry_price || pos.avg_cost || 0);
@@ -1699,6 +1703,9 @@ function startScheduler() {
         runMorningReconciliationTick();    // 9:00 AM ET Mon-Fri: DB vs Alpaca position sync
         runMorningStopVerification();      // 9:31 AM ET Mon-Fri: ensure every position has an active stop
         runMorningDigest();                // 9:25 AM ET Mon-Fri: portfolio digest via Telegram
+        require('./coreHoldingsService').runDailyRebalance().catch(err =>
+            console.warn('[Core] Rebalance tick failed:', err.message)
+        );                                 // ~10:00 ET trading days: buy core holdings toward target (CORE_HOLDINGS_USER_IDS only)
         require('./selectionExperimentService').runDailyPickLog().catch(err =>
             console.warn('[SelectionExperiment] Pick log tick failed:', err.message)
         );                                 // 9:35 AM ET trading days: Phase 1 control-vs-oversold picks

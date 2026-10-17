@@ -159,6 +159,18 @@ async function scanExtendedHoursForUser(user) {
     const dailyCount = await countTodaysExtendedHoursPositions(userId);
     if (dailyCount >= MAX_POSITIONS_DAY) return;
 
+    // Regime guard (2026-10-17): this path never checked the regime, so it kept buying
+    // pre-market/after-hours while the regular cycle was CHOPPY/PANIC (exits only).
+    // Paper account, Aug 3 – Oct 16: 146 extended-hours entries, 30% winners, -$904.86 —
+    // more than the account's entire loss since July. Fails closed: no regime, no entry.
+    const regime = await require('./marketRegimeService').getMarketRegime().catch(() => null);
+    if (!regime || regime.regimeType === 'CHOPPY' || regime.regimeType === 'PANIC') {
+        logger.info('[ExtendedHours] Entries skipped — regime does not allow new positions', {
+            userId, regimeType: regime?.regimeType ?? 'unavailable'
+        });
+        return;
+    }
+
     const enhancedAITradingBot = require('./enhancedAITradingBot');
     const riskConfig = await enhancedAITradingBot.getUserRiskConfig(userId);
 

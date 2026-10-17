@@ -7,12 +7,14 @@ jest.mock('../src/services/enhancedAITradingBot', () => ({
 jest.mock('../src/services/brokerService', () => ({ getAccountInfo: jest.fn(), buyLimitExtendedHours: jest.fn() }));
 jest.mock('../src/services/holdingsDatabaseService', () => ({ getUserHoldings: jest.fn() }));
 jest.mock('../src/services/telegramAlertService', () => ({ sendMessage: jest.fn().mockResolvedValue() }));
+jest.mock('../src/services/marketRegimeService', () => ({ getMarketRegime: jest.fn() }));
 jest.mock('../src/utils/logger', () => ({ logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() } }));
 
 const { query } = require('../src/config/database');
 const bot = require('../src/services/enhancedAITradingBot');
 const broker = require('../src/services/brokerService');
 const holdingsDb = require('../src/services/holdingsDatabaseService');
+const regimeSvc = require('../src/services/marketRegimeService');
 const { scanExtendedHoursForUser } = require('../src/services/extendedHoursTradingService');
 
 /**
@@ -32,6 +34,7 @@ describe('extended-hours entries respect max_open_positions', () => {
         broker.getAccountInfo.mockResolvedValue({ cashBalance: 10000 });
         broker.buyLimitExtendedHours.mockResolvedValue({ filledQty: 1, filledAvgPrice: 300 });
         bot._reservePositionSlot.mockResolvedValue({ ok: true, count: 4 });
+        regimeSvc.getMarketRegime.mockResolvedValue({ regimeType: 'BULL_MILD' });
     });
 
     test('an account already at or over its limit skips the scan entirely and buys nothing', async () => {
@@ -54,5 +57,44 @@ describe('extended-hours entries respect max_open_positions', () => {
         await scanExtendedHoursForUser(user);
         // $500 extended-hours notional cap / $300 → 1 whole share
         expect(broker.buyLimitExtendedHours).toHaveBeenCalledWith('user-1', 'SNOW', 1, expect.any(Object));
+    });
+});
+
+/**
+ * 2026-10-17: this path never checked the regime — it bought pre-market/after-hours while
+ * the regular cycle was CHOPPY (exits only). Paper account: 146 such entries since Aug 3,
+ * 30% winners, -$904.86.
+ */
+describe('extended-hours entries respect the regime guard', () => {
+    const user = { id: 'user-1' };
+
+    beforeEach(() => {
+        jest.clearAllMocks();
+        query.mockResolvedValue({ rows: [{ n: 0 }] });
+        bot.getUserRiskConfig.mockResolvedValue({ maxOpenPositions: 4, minBuyScore: 75, stopLoss: -0.05 });
+        bot.scanMarketForOpportunities.mockResolvedValue([{ symbol: 'KEYS', price: 350, recommendation: 'STRONG BUY', aiScore: 95 }]);
+        broker.getAccountInfo.mockResolvedValue({ cashBalance: 10000 });
+        broker.buyLimitExtendedHours.mockResolvedValue({ filledQty: 1, filledAvgPrice: 350 });
+        bot._reservePositionSlot.mockResolvedValue({ ok: true, count: 1 });
+        holdingsDb.getUserHoldings.mockResolvedValue([]);
+    });
+
+    test.each(['CHOPPY', 'PANIC'])('%s regime: no scan, no entry', async (regimeType) => {
+        regimeSvc.getMarketRegime.mockResolvedValue({ regimeType });
+        await scanExtendedHoursForUser(user);
+        expect(bot.scanMarketForOpportunities).not.toHaveBeenCalled();
+        expect(broker.buyLimitExtendedHours).not.toHaveBeenCalled();
+    });
+
+    test('regime unavailable: fails closed, no entry', async () => {
+        regimeSvc.getMarketRegime.mockRejectedValue(new Error('SPY fetch failed'));
+        await scanExtendedHoursForUser(user);
+        expect(broker.buyLimitExtendedHours).not.toHaveBeenCalled();
+    });
+
+    test('a regime that allows entries still buys', async () => {
+        regimeSvc.getMarketRegime.mockResolvedValue({ regimeType: 'BULL_STRONG' });
+        await scanExtendedHoursForUser(user);
+        expect(broker.buyLimitExtendedHours).toHaveBeenCalledWith('user-1', 'KEYS', 1, expect.any(Object));
     });
 });

@@ -19,11 +19,19 @@ const { logger } = require('../utils/logger');
 const MIN_DAYS = 15;
 const MIN_EDGE_PP = 1.0;
 const PAPER_SOAK_DAYS = 7;
-const KMADINED = 'ca632c53-8798-46f4-be94-29be0fede7f2';
 
 const idList = (v, dflt = '') => (v ?? dflt).split(',').map(s => s.trim()).filter(Boolean);
 const paperUsers = () => idList(process.env.SELECTION_EXPERIMENT_USER_IDS);
-const liveApprovalUsers = () => idList(process.env.LIVE_APPROVAL_USER_IDS, KMADINED);
+/**
+ * Every active live-trading account gets its own approval request (2026-10-17, the user:
+ * "applicable for all user ids") — each owner decides for their own account. Set
+ * LIVE_APPROVAL_USER_IDS to restrict it to a list.
+ */
+async function liveApprovalUsers() {
+    if (process.env.LIVE_APPROVAL_USER_IDS) return idList(process.env.LIVE_APPROVAL_USER_IDS);
+    const r = await query(`SELECT id FROM users WHERE ai_trading_enabled AND is_active AND alpaca_paper = false`);
+    return r.rows.map(x => String(x.id));
+}
 const avg = a => (a.length ? a.reduce((s, v) => s + v, 0) / a.length : null);
 const r2 = v => (v == null ? null : Math.round(v * 100) / 100);
 const LABEL = { control: 'Current (AI score)', oversold: 'Oversold', steady: 'Steady trend', insider: 'Insider cluster', oil: 'Oil → energy tilt', sector: 'Sector strength' };
@@ -118,7 +126,7 @@ async function runWeeklyPromotion(now = new Date()) {
         }
         if (soaked.length) {
             const a = arms[best];
-            for (const liveId of liveApprovalUsers()) {
+            for (const liveId of await liveApprovalUsers()) {
                 if (await strategy.getSelectionMethod(liveId) === best) continue;
                 const { created } = await approvals.createRequest({
                     userId: liveId, kind: 'selection_method', key: best,
@@ -137,7 +145,7 @@ async function runWeeklyPromotion(now = new Date()) {
         if (!health.ok) { lines.push(`⏳ Core holdings on live: ${health.why}.`); continue; }
         const holdings = health.rows.filter(r => r.targetPct > 0).map(r => ({ symbol: r.symbol, targetPct: r.targetPct }));
         const { cashReservePct } = await core.getSettings(paperId);
-        for (const liveId of liveApprovalUsers()) {
+        for (const liveId of await liveApprovalUsers()) {
             const s = await core.getSettings(liveId);
             if (s.enabled) continue;
             let equityTxt = '';
@@ -162,4 +170,4 @@ async function runWeeklyPromotion(now = new Date()) {
     return { arms, best, lines };
 }
 
-module.exports = { evaluateArms, paperCoreHealthy, runWeeklyPromotion, MIN_DAYS, MIN_EDGE_PP };
+module.exports = { evaluateArms, paperCoreHealthy, runWeeklyPromotion, liveApprovalUsers, MIN_DAYS, MIN_EDGE_PP };

@@ -76,3 +76,24 @@ describe('promotionService.evaluateArms', () => {
         expect(arms.steady.passes).toBe(true);
     });
 });
+
+describe('promotionService.liveApprovalUsers', () => {
+    afterEach(() => { delete process.env.LIVE_APPROVAL_USER_IDS; });
+
+    test('defaults to every active live account (each owner decides for their own)', async () => {
+        jest.resetModules();
+        jest.doMock('../src/config/database', () => ({ query: jest.fn().mockResolvedValue({ rows: [{ id: 'kmadined-id' }, { id: 'anil-id' }] }) }));
+        const { liveApprovalUsers } = require('../src/services/promotionService');
+        const query = require('../src/config/database').query;
+        expect(await liveApprovalUsers()).toEqual(['kmadined-id', 'anil-id']);
+        expect(query.mock.calls[0][0]).toMatch(/alpaca_paper = false/);
+    });
+
+    test('LIVE_APPROVAL_USER_IDS restricts it to a list', async () => {
+        jest.resetModules();
+        jest.doMock('../src/config/database', () => ({ query: jest.fn() }));
+        process.env.LIVE_APPROVAL_USER_IDS = 'only-me';
+        const { liveApprovalUsers } = require('../src/services/promotionService');
+        expect(await liveApprovalUsers()).toEqual(['only-me']);
+    });
+});

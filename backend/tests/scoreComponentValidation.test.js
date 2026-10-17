@@ -66,10 +66,10 @@ describe('scoreComponentValidationService.analyzeRows', () => {
 describe('SCORE_UNSCORED_BONUSES env switch', () => {
     afterEach(() => { delete process.env.SCORE_UNSCORED_BONUSES; jest.resetModules(); });
 
-    test('defaults to the five components that failed the 2026-10-06 validation', () => {
+    test('defaults to the components that failed validation (five on 2026-10-06, ATLAS on 2026-10-17)', () => {
         jest.resetModules();
         const { UNSCORED_BONUSES } = require('../src/services/enhancedAITradingBot');
-        expect([...UNSCORED_BONUSES].sort()).toEqual(['Gemini', 'News', 'RelStrength5d', 'SmartMoney', 'WeeklyAlign']);
+        expect([...UNSCORED_BONUSES].sort()).toEqual(['ATLAS', 'Gemini', 'News', 'RelStrength5d', 'SmartMoney', 'WeeklyAlign']);
     });
 
     test('an empty value restores the old scoring (nothing unscored)', () => {

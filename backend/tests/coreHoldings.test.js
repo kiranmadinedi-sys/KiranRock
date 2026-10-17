@@ -21,8 +21,10 @@ describe('coreHoldingsService', () => {
         dataProvider = require('../src/services/dataProvider');
     });
 
-    const coreRows = rows => query.mockImplementation(sql =>
-        Promise.resolve(/FROM core_holdings/.test(sql) ? { rows } : { rows: [] }));
+    const coreRows = rows => query.mockImplementation(sql => Promise.resolve(
+        /FROM core_holdings/.test(sql) ? { rows }
+            : /FROM core_settings/.test(sql) ? { rows: [{ enabled: true, cashReservePct: 25 }] }
+            : { rows: [] }));
 
     test('core symbols come back upper-cased as a Set', async () => {
         coreRows([{ symbol: 'spy', targetPct: 40 }, { symbol: 'V', targetPct: 10 }]);
@@ -78,6 +80,48 @@ describe('coreHoldingsService', () => {
         expect(actions.map(a => a.action)).toEqual(['at_target', 'pending_order']);
         expect(broker.buyMarket).not.toHaveBeenCalled();
         expect(broker).not.toHaveProperty('sellMarket');
+    });
+});
+
+describe('coreHoldingsService.saveConfig (Settings screen rules)', () => {
+    let core, query;
+    beforeEach(() => {
+        jest.resetModules();
+        jest.doMock('../src/config/database', () => ({ query: jest.fn() }));
+        jest.doMock('../src/utils/logger', () => ({ logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }));
+        core = require('../src/services/coreHoldingsService');
+        query = require('../src/config/database').query;
+    });
+    // current core list + current holdings (any strategy)
+    const db = ({ core = [], held = [] } = {}) => query.mockImplementation(sql => {
+        if (/SELECT symbol FROM core_holdings/.test(sql)) return Promise.resolve({ rows: core.map(symbol => ({ symbol })) });
+        if (/FROM holdings WHERE/.test(sql)) return Promise.resolve({ rows: held.map(symbol => ({ symbol })) });
+        if (/FROM core_holdings WHERE user_id = $1 AND active/.test(sql)) return Promise.resolve({ rows: [] });
+        return Promise.resolve({ rows: [] });
+    });
+
+    test('rejects a total over 80% and a single stock over 50%', async () => {
+        db();
+        await expect(core.saveConfig('u1', { holdings: [{ symbol: 'SPY', targetPct: 60 }, { symbol: 'QQQ', targetPct: 30 }] }))
+            .rejects.toThrow(/target must be 0-50%.*Total target is 90%/);
+    });
+
+    test('rejects adding a stock the swing bot currently holds', async () => {
+        db({ held: ['NVDA'] });
+        await expect(core.saveConfig('u1', { holdings: [{ symbol: 'NVDA', targetPct: 10 }] })).rejects.toThrow(/open swing-bot position/);
+    });
+
+    test('removing a held core stock needs explicit release; 0% keeps holding', async () => {
+        db({ core: ['V'], held: ['V'] });
+        await expect(core.saveConfig('u1', { holdings: [] })).rejects.toThrow(/V is still held/);
+        await expect(core.saveConfig('u1', { holdings: [{ symbol: 'V', targetPct: 0 }] })).resolves.toMatchObject({ released: [] });
+        await expect(core.saveConfig('u1', { holdings: [], releaseSymbols: ['V'] })).resolves.toMatchObject({ released: ['V'] });
+    });
+
+    test('rejects invalid symbols and duplicates', async () => {
+        db();
+        await expect(core.saveConfig('u1', { holdings: [{ symbol: 'sp y', targetPct: 5 }] })).rejects.toThrow(/not a valid stock symbol/);
+        await expect(core.saveConfig('u1', { holdings: [{ symbol: 'SPY', targetPct: 5 }, { symbol: 'spy', targetPct: 5 }] })).rejects.toThrow(/only once/);
     });
 });
 

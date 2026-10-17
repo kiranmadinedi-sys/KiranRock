@@ -15,7 +15,9 @@
  *     symbol as a swing trade (one holdings row per symbol must stay one strategy).
  *   - rebalanceCore() only BUYS toward target (once a trading day, ~10:00 ET) and keeps a
  *     cash reserve for the swing bot. It never sells — selling core is the user's call.
- *   - Buying is enabled per account via CORE_HOLDINGS_USER_IDS (paper first).
+ *   - Each account opts in from Settings -> Core Holdings (core_settings.enabled), like the
+ *     crypto feature. Turning it off stops BUYING only; held core positions stay protected
+ *     from the swing bot. A target of 0% means "keep holding, stop buying".
  *   - No stop-loss on core by design (index-level dips recover; stops sell the lows).
  */
 const { query } = require('../config/database');
@@ -31,11 +33,22 @@ async function ensureTable() {
         CREATE TABLE IF NOT EXISTS core_holdings (
             user_id    TEXT        NOT NULL,
             symbol     TEXT        NOT NULL,
-            target_pct NUMERIC     NOT NULL CHECK (target_pct > 0 AND target_pct <= 80),
+            target_pct NUMERIC     NOT NULL CHECK (target_pct >= 0 AND target_pct <= 80),
             active     BOOLEAN     NOT NULL DEFAULT true,
             note       TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             PRIMARY KEY (user_id, symbol)
+        )`);
+    // 0% = keep holding, stop buying (2026-10-17, Settings screen) — widen the original > 0.
+    await query(`
+        ALTER TABLE core_holdings DROP CONSTRAINT IF EXISTS core_holdings_target_pct_check;
+        ALTER TABLE core_holdings ADD CONSTRAINT core_holdings_target_pct_check CHECK (target_pct >= 0 AND target_pct <= 80)`);
+    await query(`
+        CREATE TABLE IF NOT EXISTS core_settings (
+            user_id          TEXT        PRIMARY KEY,
+            enabled          BOOLEAN     NOT NULL DEFAULT false,
+            cash_reserve_pct NUMERIC     NOT NULL DEFAULT 25 CHECK (cash_reserve_pct >= 10 AND cash_reserve_pct <= 80),
+            updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )`);
     _tableReady = true;
 }
@@ -68,11 +81,86 @@ async function getCoreSymbols(userId) {
 
 function _clearCache() { _cache.clear(); }
 
-function isEnabledForBuying(userId) {
-    return (process.env.CORE_HOLDINGS_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean).includes(String(userId));
+async function getSettings(userId) {
+    await ensureTable();
+    const r = await query(`SELECT enabled, cash_reserve_pct::float AS "cashReservePct" FROM core_settings WHERE user_id = $1`, [String(userId)]);
+    return r.rows[0] || { enabled: false, cashReservePct: 25 };
 }
 
-const CASH_RESERVE_PCT = () => parseFloat(process.env.CORE_CASH_RESERVE_PCT || '25'); // kept free for swing trades
+async function setEnabled(userId, enabled) {
+    await ensureTable();
+    await query(
+        `INSERT INTO core_settings (user_id, enabled) VALUES ($1, $2)
+         ON CONFLICT (user_id) DO UPDATE SET enabled = EXCLUDED.enabled, updated_at = NOW()`,
+        [String(userId), !!enabled]
+    );
+    return getSettings(userId);
+}
+
+const MAX_SYMBOLS = 10, MAX_TOTAL_PCT = 80, MAX_SINGLE_PCT = 50;
+
+/**
+ * Replace the account's core list (Settings -> Save). Guards:
+ *   - total <= 80% of equity, any one symbol <= 50%, at most 10 symbols, valid tickers;
+ *   - a symbol the SWING bot currently holds can't become core (its swing stop is still
+ *     resting at the broker and would sell the "core" position);
+ *   - removing a symbol that is still held needs explicit release — removal hands the
+ *     position to the swing bot, which may stop it out or sell it. Use 0% to keep holding.
+ */
+async function saveConfig(userId, { cashReservePct, holdings = [], releaseSymbols = [] } = {}) {
+    await ensureTable();
+    const uid = String(userId);
+    const list = holdings.map(h => ({ symbol: String(h.symbol || '').trim().toUpperCase(), targetPct: Number(h.targetPct) }));
+    const errors = [];
+    if (list.length > MAX_SYMBOLS) errors.push(`At most ${MAX_SYMBOLS} core symbols.`);
+    for (const h of list) {
+        if (!/^[A-Z][A-Z.]{0,5}$/.test(h.symbol)) errors.push(`"${h.symbol}" is not a valid stock symbol.`);
+        if (!(h.targetPct >= 0 && h.targetPct <= MAX_SINGLE_PCT)) errors.push(`${h.symbol}: target must be 0-${MAX_SINGLE_PCT}%.`);
+    }
+    if (new Set(list.map(h => h.symbol)).size !== list.length) errors.push('Each symbol can appear only once.');
+    const total = list.reduce((sum, h) => sum + (h.targetPct || 0), 0);
+    if (total > MAX_TOTAL_PCT) errors.push(`Total target is ${total}% — keep it at ${MAX_TOTAL_PCT}% or less so the swing bot has room.`);
+    if (cashReservePct != null && !(cashReservePct >= 10 && cashReservePct <= 80)) errors.push('Cash reserve must be 10-80%.');
+
+    const current = await query(`SELECT symbol FROM core_holdings WHERE user_id = $1 AND active`, [uid]);
+    const currentSet = new Set(current.rows.map(r => r.symbol.toUpperCase()));
+    const held = await query(`SELECT UPPER(symbol) AS symbol FROM holdings WHERE user_id = $1 AND quantity > 0`, [uid]);
+    const heldSet = new Set(held.rows.map(r => r.symbol));
+    for (const h of list) {
+        if (!currentSet.has(h.symbol) && heldSet.has(h.symbol)) {
+            errors.push(`${h.symbol} is an open swing-bot position right now — add it to core after that swing trade closes.`);
+        }
+    }
+    const newSet = new Set(list.map(h => h.symbol));
+    const release = new Set(releaseSymbols.map(x => String(x).toUpperCase()));
+    for (const sym of currentSet) {
+        if (!newSet.has(sym) && heldSet.has(sym) && !release.has(sym)) {
+            errors.push(`${sym} is still held. Set it to 0% to keep holding without buying more, or confirm release to hand it to the swing bot (which may set a stop or sell it).`);
+        }
+    }
+    if (errors.length) { const e = new Error(errors.join(' ')); e.status = 400; e.errors = errors; throw e; }
+
+    for (const h of list) {
+        await query(
+            `INSERT INTO core_holdings (user_id, symbol, target_pct, active) VALUES ($1, $2, $3, true)
+             ON CONFLICT (user_id, symbol) DO UPDATE SET target_pct = EXCLUDED.target_pct, active = true`,
+            [uid, h.symbol, h.targetPct]
+        );
+    }
+    const removed = [...currentSet].filter(x => !newSet.has(x));
+    if (removed.length) await query(`UPDATE core_holdings SET active = false WHERE user_id = $1 AND symbol = ANY($2)`, [uid, removed]);
+    if (cashReservePct != null) {
+        await query(
+            `INSERT INTO core_settings (user_id, cash_reserve_pct) VALUES ($1, $2)
+             ON CONFLICT (user_id) DO UPDATE SET cash_reserve_pct = EXCLUDED.cash_reserve_pct, updated_at = NOW()`,
+            [uid, cashReservePct]
+        );
+    }
+    _cache.delete(uid);
+    logger.info('[Core] Settings saved', { userId: uid, holdings: list, removed, cashReservePct });
+    return { holdings: await getCoreRows(uid), settings: await getSettings(uid), released: removed };
+}
+
 const MIN_BUY_USD = 50;
 
 /**
@@ -87,7 +175,8 @@ async function rebalanceCore(userId) {
     const account = await brokerService.getAccountInfo(userId);
     const equity = account.portfolioValue;
     let cash = Math.max(0, account.cashBalance ?? 0);
-    const reserve = equity * CASH_RESERVE_PCT() / 100;
+    const { cashReservePct } = await getSettings(userId);
+    const reserve = equity * cashReservePct / 100; // kept free for swing trades
     // Respect the same per-order caps brokerService.safetyCheck enforces (MAX_BOT_INVESTMENT_USD
     // and the account's maxOrderNotional): a large target is built up over several days
     // instead of being rejected outright.
@@ -100,6 +189,7 @@ async function rebalanceCore(userId) {
     const actions = [];
 
     for (const row of rows) {
+        if (!(row.targetPct > 0)) { actions.push({ symbol: row.symbol, action: 'hold_only' }); continue; }
         const target = equity * row.targetPct / 100;
         const current = held[row.symbol] || 0;
         const gap = target - current;
@@ -130,7 +220,8 @@ async function rebalanceCore(userId) {
 /** Scheduler tick (every 5 min): once per trading day after 10:00 ET for enabled accounts. */
 const _ranOn = new Set();
 async function runDailyRebalance(now = new Date()) {
-    const ids = (process.env.CORE_HOLDINGS_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+    await ensureTable();
+    const ids = (await query(`SELECT user_id FROM core_settings WHERE enabled`)).rows.map(r => r.user_id);
     if (!ids.length) return;
     const { isMarketOpen } = require('../utils/marketCalendar');
     if (!isMarketOpen(now)) return;
@@ -170,4 +261,36 @@ async function coreSummary(userId) {
     return { positions: r.rows, value, unrealizedPl: pl, cost: value - pl };
 }
 
-module.exports = { ensureTable, getCoreRows, getCoreSymbols, isEnabledForBuying, rebalanceCore, runDailyRebalance, coreSummary, _clearCache };
+/** Everything the Settings screen shows. */
+async function getStatus(userId) {
+    const [settings, rows] = await Promise.all([getSettings(userId), getCoreRows(userId)]);
+    const summary = await coreSummary(userId).catch(() => null);
+    let equity = null, cash = null;
+    try {
+        const acct = await require('./brokerService').getAccountInfo(userId);
+        equity = acct.portfolioValue; cash = acct.cashBalance;
+    } catch (_) { /* the screen still loads without live account numbers */ }
+    const bySym = Object.fromEntries((summary?.positions || []).map(p => [p.symbol.toUpperCase(), p]));
+    return {
+        settings,
+        equity, cash,
+        totalTargetPct: rows.reduce((sum, r) => sum + r.targetPct, 0),
+        holdings: rows.map(r => {
+            const p = bySym[r.symbol];
+            return {
+                symbol: r.symbol, targetPct: r.targetPct, note: r.note || null,
+                targetUsd: equity != null ? +(equity * r.targetPct / 100).toFixed(2) : null,
+                qty: p?.qty ?? 0, avgPrice: p?.avg ?? null, price: p?.px ?? null,
+                value: p?.mv ?? 0, unrealizedPl: p?.pl ?? 0,
+                currentPct: equity ? +((p?.mv ?? 0) / equity * 100).toFixed(1) : null,
+            };
+        }),
+        totals: summary ? { value: summary.value, unrealizedPl: summary.unrealizedPl, cost: summary.cost } : { value: 0, unrealizedPl: 0, cost: 0 },
+        limits: { maxSymbols: MAX_SYMBOLS, maxTotalPct: MAX_TOTAL_PCT, maxSinglePct: MAX_SINGLE_PCT },
+    };
+}
+
+module.exports = {
+    ensureTable, getCoreRows, getCoreSymbols, getSettings, setEnabled, saveConfig, getStatus,
+    rebalanceCore, runDailyRebalance, coreSummary, _clearCache,
+};

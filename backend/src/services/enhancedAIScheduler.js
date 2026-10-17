@@ -1692,6 +1692,7 @@ function startScheduler() {
         runWeeklyParameterHealthCheck();   // Friday 15:45 ET: health check + backtest summary
         runWeeklyPnlReport();              // Friday 16:10 ET: realized $/day per account vs target
         runWeeklyScoreValidation();        // Saturday 10:00 ET: which score components actually predict returns
+        runWeeklyMarketStudy();            // Saturday 11:00 ET: exits + picking methods tested on ALL ≥80 candidates
         runCryptoWatchdog();               // every tick, 24/7: alert if the crypto process went silent while positions are open
         runMorningBriefing();              // 8:00 AM ET Mon-Fri: STRONG BUY pre-market alert
         runPremarketGapBriefing();         // 8:30 AM ET Mon-Fri: gap check on tonight's setups
@@ -1757,6 +1758,29 @@ async function runWeeklyScoreValidation() {
         await require('./scoreComponentValidationService').runWeeklyReport();
     } catch (err) {
         console.error('[ScoreValidation] Error:', err.message);
+    }
+}
+
+// Saturday 11:00 ET — weekly market study over ALL ≥80 candidates (exits, picking
+// methods, last week's leaders). Once per Saturday: skips if today's row already exists,
+// so a restart during the 11 o'clock hour doesn't resend it.
+let _marketStudyRanDate = null;
+async function runWeeklyMarketStudy() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit'
+    }).formatToParts(new Date());
+    const get = t => parts.find(p => p.type === t).value;
+    const etDate = `${get('year')}-${get('month')}-${get('day')}`;
+    if (get('weekday') !== 'Sat' || parseInt(get('hour'), 10) !== 11) return;
+    if (_marketStudyRanDate === etDate) return;
+    _marketStudyRanDate = etDate;
+    try {
+        const done = await query(`SELECT 1 FROM weekly_market_study WHERE run_date = $1::date`, [etDate]).catch(() => ({ rows: [] }));
+        if (done.rows.length) return;
+        await require('./weeklyMarketStudyService').runWeeklyReport();
+    } catch (err) {
+        console.error('[MarketStudy] Error:', err.message);
     }
 }
 

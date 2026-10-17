@@ -305,10 +305,21 @@ function formatReport(r) {
 }
 
 async function runWeeklyReport() {
+    // Grow the multi-year price history first (new week + any new symbols), then re-run
+    // the since-2024 rule check on it. Both are best-effort: the 8-week study still sends.
+    await require('./historyBarsService').appendRecent();
+    let history = null;
+    try {
+        const hb = require('./historyBacktestService');
+        history = hb.formatSection(await hb.runHistoryBacktest());
+    } catch (err) {
+        logger.warn('[MarketStudy] Multi-year check failed (non-blocking)', { error: err.message });
+    }
     const r = await runMarketStudy();
     if (r.skipped) return r;
     const { sendAdminMessage } = require('./telegramAlertService');
-    await sendAdminMessage(formatReport(r), 'HTML').catch(err =>
+    const text = history ? formatReport(r).replace('\n\n<i>Report only', `\n\n${history}\n\n<i>Report only`) : formatReport(r);
+    await sendAdminMessage(text, 'HTML').catch(err =>
         logger.warn('[MarketStudy] Telegram send failed', { error: err.message })
     );
     return r;

@@ -5023,7 +5023,14 @@ async function executeAutonomousTrading(userId) {
  * @param {number|null} peakPrice — current peak price (used to convert ATR to %)
  * @returns {{ trailPct: number, useBreakevenFloor: boolean }}
  */
-function getDynamicTrailingStop(changePercent, atr, peakPrice) {
+function getDynamicTrailingStop(changePercent, atr, peakPrice, exitProfile = 'standard') {
+    // 'wide' exit profile (strategySettingsService): flat 7% trail, no break-even lock —
+    // the 3-year replay's best rule per day held. ATR floor still applies.
+    if (exitProfile === 'wide') {
+        let trailPct = 0.07;
+        if (atr && atr > 0 && peakPrice && peakPrice > 0) trailPct = Math.max(trailPct, (atr * 1.5) / peakPrice);
+        return { trailPct, useBreakevenFloor: false };
+    }
     // Once up 2%, stop floor = entry price — position can never become a loser.
     const useBreakevenFloor = changePercent >= 0.02;
 
@@ -5060,6 +5067,7 @@ async function manageExistingPositions(userId) {
         const coreSymbols = await coreHoldings.getCoreSymbols(userId);
         const holdings = ((await holdingsDb.getUserHoldings(userId)) || [])
             .filter(h => !coreSymbols.has(String(h.symbol).toUpperCase()));
+        const exitProfile = await require('./strategySettingsService').getExitProfile(userId);
         
         if (!holdings || holdings.length === 0) {
             return;
@@ -5191,7 +5199,7 @@ async function manageExistingPositions(userId) {
                 const entry    = parseFloat(h.average_price);
                 const peak     = parseFloat(h.peak_price || entry);
                 const hChange  = entry > 0 ? (peak - entry) / entry : 0;
-                const { trailPct, useBreakevenFloor } = getDynamicTrailingStop(hChange, h.atr, peak);
+                const { trailPct, useBreakevenFloor } = getDynamicTrailingStop(hChange, h.atr, peak, exitProfile);
                 let expectedStop = peak * (1 - trailPct);
                 if (useBreakevenFloor) expectedStop = Math.max(expectedStop, entry);
                 // Hard stop floor: never place broker stop below the configured hard stop (e.g. -5% from entry).
@@ -5507,7 +5515,7 @@ async function manageExistingPositions(userId) {
                 // Multi-stage trailing stop with breakeven floor (ATR-aware).
                 // Once position is up ≥2%, the stop floor locks at entry price — no loser from a winner.
                 const { trailPct: dynamicTrailPctBase, useBreakevenFloor } =
-                    getDynamicTrailingStop(changePercent, holding.atr, holding.peak_price);
+                    getDynamicTrailingStop(changePercent, holding.atr, holding.peak_price, exitProfile);
                 const dynamicTrailPct = dynamicTrailPctBase * decayTrailMult * regimeDowngradeMult;
                 let trailingStopPrice = holding.peak_price * (1 - dynamicTrailPct);
                 if (useBreakevenFloor && purchasePrice > 0) {
@@ -5631,7 +5639,8 @@ async function manageExistingPositions(userId) {
                 // Partial exit rule: if the winner is >5% and not yet partially exited, sell
                 // only 50% to lock gains — the remaining half trails with getDynamicTrailingStop.
                 // Weak winners (gain 0–5%) or already-partial positions exit fully at 7 days.
-                else if (holdAgeHrs >= 168 && changePercent > 0) {
+                // 'wide' exit profile: take profits after ~10 trading days (336h), not ~5.
+                else if (holdAgeHrs >= (exitProfile === 'wide' ? 336 : 168) && changePercent > 0) {
                     shouldSell = true;
                     const holdDays = Math.round(holdAgeHrs / 24);
                     const halfQty  = Math.floor(holding.quantity / 2);
@@ -5647,7 +5656,7 @@ async function manageExistingPositions(userId) {
                             `⏰ *Swing Max-Hold Partial*\n${holding.symbol}: ${holdDays}d | +${(changePercent * 100).toFixed(2)}% | Selling 50%, trailing the rest`
                         );
                     } else {
-                        reason = `Swing max-hold: ${holdDays}d held (limit 7d) — closing to redeploy capital [gain: +${(changePercent * 100).toFixed(2)}%]`;
+                        reason = `Swing max-hold: ${holdDays}d held (limit ${exitProfile === 'wide' ? 14 : 7}d) — closing to redeploy capital [gain: +${(changePercent * 100).toFixed(2)}%]`;
                         logger.info('[SwingExit] Max-hold full exit', { userId, symbol: holding.symbol, holdDays, gainPct: (changePercent * 100).toFixed(2) });
                         pendingAlert = () => alertService.sendMessage(userId,
                             `⏰ *Swing Max-Hold Exit*\n${holding.symbol}: held ${holdDays} days | +${(changePercent * 100).toFixed(2)}% | Releasing capital for new signals`
@@ -5658,7 +5667,17 @@ async function manageExistingPositions(userId) {
                 // ── Slow Mover Eject (5+ days, gain < 2%) ──────────────────────────────
                 // Tightened from 10d/<3% → 5d/<2%: USB held 18 days for +1% — dead money.
                 // Exit earlier and redeploy into this week's high-conviction candidates.
-                else if (!tooNew && holdAgeHrs >= 120 && changePercent >= 0 && changePercent < 0.02) {
+                // 'wide' exit profile: hard time cap ~20 trading days (672h), win or lose —
+                // the replay's horizon. (Standard has no cap; its max-hold handles winners.)
+                else if (exitProfile === 'wide' && holdAgeHrs >= 672) {
+                    shouldSell = true;
+                    const holdDays = Math.round(holdAgeHrs / 24);
+                    reason = `Swing time cap: ${holdDays}d held (wide exit profile limit 28d) [gain: ${(changePercent * 100).toFixed(2)}%]`;
+                    logger.info('[SwingExit] Wide-profile time cap', { userId, symbol: holding.symbol, holdDays, gainPct: (changePercent * 100).toFixed(2) });
+                }
+
+                // Slow-mover exit is off for the 'wide' profile (the replay found it slightly hurts).
+                else if (exitProfile !== 'wide' && !tooNew && holdAgeHrs >= 120 && changePercent >= 0 && changePercent < 0.02) {
                     shouldSell = true;
                     const holdDays = Math.round(holdAgeHrs / 24);
                     reason = `Slow mover: ${holdDays}d held with only +${(changePercent * 100).toFixed(2)}% — deploying capital to stronger signals`;
@@ -5984,6 +6003,7 @@ async function manageExistingPositions(userId) {
 }
 
 module.exports = {
+    getDynamicTrailingStop,
     executeAutonomousTrading,
     scanMarketForOpportunities,
     analyzeStockWithAI,

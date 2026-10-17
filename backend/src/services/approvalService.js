@@ -81,6 +81,10 @@ const HANDLERS = {
         await require('./strategySettingsService').setSelectionMethod(userId, payload.method, 'approved');
         return `Stock-picking method is now "${payload.method}".`;
     },
+    async exit_profile(userId, payload) {
+        await require('./strategySettingsService').setExitProfile(userId, payload.profile, 'approved');
+        return `Exit profile is now "${payload.profile}".`;
+    },
     async core_enable(userId, payload) {
         const core = require('./coreHoldingsService');
         await core.saveConfig(userId, { holdings: payload.holdings, cashReservePct: payload.cashReservePct });

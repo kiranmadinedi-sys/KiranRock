@@ -62,6 +62,18 @@ function oversoldScore(scoringLog) {
     return Math.round((mr - mom) * 100) / 100;
 }
 
+/**
+ * "Steady trend" profile (2026-10-17, from the Visa/Mastercard/oil misses): a full uptrend
+ * (TrendTemplate 5/5 = +15), not yet overbought (RSI 55-70), a $50+ stock. In-sample it beat
+ * the ≥80 pool by +1.1pp over 5 days (~60% winners), but the fields it needs only exist
+ * since late September — 11 scan days. A hypothesis to log forward, not a trading rule.
+ * The >5% scan-day jump is excluded upstream (precomputedUniverseService jump guard).
+ */
+function isSteadyTrend({ scoringLog, rsi, price }) {
+    const p = _parts(scoringLog);
+    return (p.TrendTemplate || 0) >= 15 && rsi >= 55 && rsi <= 70 && price >= 50;
+}
+
 /** Sort comparator for the experiment ordering: oversold score, then AI score. */
 function compareOversold(a, b) {
     const d = (b.oversoldScore ?? -Infinity) - (a.oversoldScore ?? -Infinity);
@@ -85,6 +97,11 @@ async function ensureTable() {
             logged_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE (scan_date, user_id, arm, symbol)
         )`);
+    // 'steady' arm added 2026-10-17 — widen the original two-arm CHECK.
+    await query(`
+        ALTER TABLE selection_experiment_picks DROP CONSTRAINT IF EXISTS selection_experiment_picks_arm_check;
+        ALTER TABLE selection_experiment_picks ADD CONSTRAINT selection_experiment_picks_arm_check
+            CHECK (arm IN ('control', 'oversold', 'steady'))`);
     _tableReady = true;
 }
 
@@ -107,9 +124,12 @@ async function logDailyPicks(userId, pool) {
         // same md5 order the SQL used, which the pool already arrives in).
         const control = pool.slice(0, PICKS_PER_ARM);
         const oversold = [...pool].sort(compareOversold).slice(0, PICKS_PER_ARM);
+        // Steady arm: qualifying stocks only (often fewer than 40), in AI-score order.
+        const steady = pool.filter(c => c.steadyTrend).slice(0, PICKS_PER_ARM);
         const rows = [
             ...control.map((c, i) => ['control', i + 1, c]),
             ...oversold.map((c, i) => ['oversold', i + 1, c]),
+            ...steady.map((c, i) => ['steady', i + 1, c]),
         ];
         const values = [], params = [];
         rows.forEach(([arm, rank, c], i) => {
@@ -128,6 +148,7 @@ async function logDailyPicks(userId, pool) {
             userId, scanDate,
             controlTop5: control.slice(0, 5).map(c => c.symbol),
             oversoldTop5: oversold.slice(0, 5).map(c => c.symbol),
+            steady: steady.map(c => c.symbol),
         });
         return true;
     } catch (err) {
@@ -196,10 +217,11 @@ async function getExperimentReport({ userId = null, sinceDate = '2026-10-12' } =
             picks: picks.length,
         };
     };
-    const top5 = { control: arm('control', 5), oversold: arm('oversold', 5) };
-    const top40 = { control: arm('control', 40), oversold: arm('oversold', 40) };
-    const edge = (t) => (t.oversold.avgReturn5dPct != null && t.control.avgReturn5dPct != null)
-        ? +(t.oversold.avgReturn5dPct - t.control.avgReturn5dPct).toFixed(2) : null;
+    const top5 = { control: arm('control', 5), oversold: arm('oversold', 5), steady: arm('steady', 5) };
+    const top40 = { control: arm('control', 40), oversold: arm('oversold', 40), steady: arm('steady', 40) };
+    const edgeOf = (t, name) => (t[name].avgReturn5dPct != null && t.control.avgReturn5dPct != null)
+        ? +(t[name].avgReturn5dPct - t.control.avgReturn5dPct).toFixed(2) : null;
+    const edge = t => ({ oversold: edgeOf(t, 'oversold'), steady: edgeOf(t, 'steady') });
 
     return {
         sinceDate, daysWithReturns: days.length,
@@ -210,6 +232,6 @@ async function getExperimentReport({ userId = null, sinceDate = '2026-10-12' } =
 }
 
 module.exports = {
-    isExperimentUser, oversoldScore, compareOversold, logDailyPicks, runDailyPickLog, getExperimentReport,
+    isExperimentUser, oversoldScore, compareOversold, isSteadyTrend, logDailyPicks, runDailyPickLog, getExperimentReport,
     MEAN_REVERSION, MOMENTUM,
 };

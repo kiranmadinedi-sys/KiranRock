@@ -106,6 +106,15 @@ async function isAvailable(minCount = 10) {
  * @param {number} opts.minScore  — minimum ai_score to include (default 85, matches bot minBuyScore)
  * @param {number} opts.limit     — max records to return (default 120)
  */
+// Jump guard (2026-10-17): skip stocks that rose more than this on the scan day. Within the
+// score ≥80 pool (59 scan days, Jul 15 – Oct 9), buying after a >5% up-day lagged the rest
+// over the next 5 days in EVERY month: Jul −4.8pp, Aug −3.4pp, Sep −0.7pp, Oct −2.4pp
+// (~4% of the pool). Unknown day change (older rows) is kept. Env-tunable; 0 disables.
+const MAX_SCAN_DAY_JUMP_PCT = parseFloat(process.env.MAX_SCAN_DAY_JUMP_PCT ?? '5');
+const JUMP_GUARD_SQL = MAX_SCAN_DAY_JUMP_PCT > 0
+    ? `AND COALESCE((metadata->>'change')::float, 0) <= ${MAX_SCAN_DAY_JUMP_PCT}`
+    : '';
+
 function _toCandidate(row, oversoldScore) {
     return {
         symbol:    row.symbol,
@@ -132,17 +141,20 @@ async function loadCandidates({ minScore = 85, limit = 120, rankBy = 'score', on
         const exp = require('./selectionExperimentService');
         const res = await query(
             `SELECT symbol, ai_score, recommendation, setup_family, sector, market_cap,
-                    analysis_date::text AS scan_date, metadata->'scoringLog' AS scoring_log
+                    analysis_date::text AS scan_date, metadata->'scoringLog' AS scoring_log,
+                    (metadata->>'rsi')::float AS rsi, (metadata->>'price')::float AS price
              FROM daily_universe_analysis
              WHERE analysis_date = ${LATEST_DATE_SQL}
                AND passed_prescreen = true
                AND ai_score >= $1
+               ${JUMP_GUARD_SQL}
              ORDER BY ai_score DESC, md5(symbol || analysis_date::text) ASC`,
             [minScore]
         );
         const pool = res.rows.map(row => ({
             row, symbol: row.symbol, scanDate: row.scan_date,
             aiScore: parseFloat(row.ai_score), oversoldScore: exp.oversoldScore(row.scoring_log),
+            steadyTrend: exp.isSteadyTrend({ scoringLog: row.scoring_log, rsi: row.rsi, price: row.price }),
         }));
         if (onPool) {
             try { await onPool(pool); } catch (_) { /* logging must never block candidate loading */ }
@@ -169,6 +181,7 @@ async function loadCandidates({ minScore = 85, limit = 120, rankBy = 'score', on
          WHERE analysis_date = ${LATEST_DATE_SQL}
            AND passed_prescreen = true
            AND ai_score >= $1
+           ${JUMP_GUARD_SQL}
          ORDER BY ai_score DESC, md5(symbol || analysis_date::text) ASC
          LIMIT $2`,
         [minScore, limit]

@@ -37,6 +37,15 @@ describe('selectionExperimentService', () => {
         expect(exp.oversoldScore(null)).toBe(0);
     });
 
+    test('steady trend = full uptrend, RSI 55-70, $50+ stock', () => {
+        const up = ['TrendTemplate: +15 (5/5 MA conditions)'];
+        expect(exp.isSteadyTrend({ scoringLog: up, rsi: 62, price: 390 })).toBe(true);   // Visa-like
+        expect(exp.isSteadyTrend({ scoringLog: up, rsi: 74, price: 390 })).toBe(false);  // overbought
+        expect(exp.isSteadyTrend({ scoringLog: up, rsi: 62, price: 12 })).toBe(false);   // cheap
+        expect(exp.isSteadyTrend({ scoringLog: ['TrendTemplate: +6 (2/5)'], rsi: 62, price: 390 })).toBe(false);
+        expect(exp.isSteadyTrend({ scoringLog: up, rsi: null, price: 390 })).toBe(false);
+    });
+
     test('ordering: oversold score first, AI score breaks ties', () => {
         const xs = [
             { symbol: 'A', oversoldScore: 2, aiScore: 99 },
@@ -51,7 +60,7 @@ describe('selectionExperimentService.runDailyPickLog', () => {
     let exp, query;
     const pool = [
         { row: {}, symbol: 'HOT', scanDate: '2026-10-12', aiScore: 100, oversoldScore: -20 },
-        { row: {}, symbol: 'DIP', scanDate: '2026-10-12', aiScore: 84, oversoldScore: 10 },
+        { row: {}, symbol: 'DIP', scanDate: '2026-10-12', aiScore: 84, oversoldScore: 10, steadyTrend: true },
     ];
 
     beforeEach(() => {
@@ -79,6 +88,7 @@ describe('selectionExperimentService.runDailyPickLog', () => {
         const params = inserts()[0][1];
         expect(params.filter(p => p === 'control')).toHaveLength(2);
         expect(params.filter(p => p === 'oversold')).toHaveLength(2);
+        expect(params.filter(p => p === 'steady')).toHaveLength(1); // only DIP qualifies
     });
 
     test('does nothing on a weekend or with no experiment accounts', async () => {
@@ -125,6 +135,24 @@ describe('precomputedUniverseService.loadCandidates — oversold ordering', () =
         query.mockResolvedValue({ rows: [row('DIP', 84, ['WilliamsR: +6'])] });
         const out = await svc.loadCandidates({ minScore: 80, limit: 40, rankBy: 'oversold', onPool: () => { throw new Error('db down'); } });
         expect(out.map(c => c.symbol)).toEqual(['DIP']);
+    });
+
+    test('the jump guard (>5% scan-day rise) is in both candidate queries', async () => {
+        query.mockResolvedValue({ rows: [] });
+        await svc.loadCandidates({ minScore: 80, limit: 40 });
+        await svc.loadCandidates({ minScore: 80, limit: 40, rankBy: 'oversold' });
+        for (const [sql] of query.mock.calls) expect(sql).toContain("COALESCE((metadata->>'change')::float, 0) <= 5");
+    });
+
+    test('pool rows carry the steady-trend flag', async () => {
+        query.mockResolvedValue({ rows: [
+            { ...row('V', 87, ['TrendTemplate: +15 (5/5 MA conditions)']), rsi: 64, price: 385 },
+            { ...row('HOT', 99, ['TrendTemplate: +15 (5/5 MA conditions)']), rsi: 78, price: 385 }, // overbought
+        ] });
+        const seen = [];
+        await svc.loadCandidates({ minScore: 80, limit: 40, rankBy: 'oversold', onPool: p => seen.push(...p) });
+        expect(seen.find(p => p.symbol === 'V').steadyTrend).toBe(true);
+        expect(seen.find(p => p.symbol === 'HOT').steadyTrend).toBe(false);
     });
 
     test('default ordering is unchanged (no oversold fields)', async () => {

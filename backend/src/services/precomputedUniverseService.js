@@ -17,6 +17,7 @@
  */
 
 const { query } = require('../config/database');
+const { logger } = require('../utils/logger');
 
 /**
  * Scan date the trading bot should use — isAvailable() and loadCandidates().
@@ -115,6 +116,55 @@ const JUMP_GUARD_SQL = MAX_SCAN_DAY_JUMP_PCT > 0
     ? `AND COALESCE((metadata->>'change')::float, 0) <= ${MAX_SCAN_DAY_JUMP_PCT}`
     : '';
 
+/**
+ * Hype-gap guard (2026-10-17): drop stocks that gapped up ≥5% at the open on ≥2.5× their
+ * 20-day volume WITHOUT earnings news, on the scan day or the 4 trading days before.
+ * 3-year study (Jun 2023 → Oct 2026, entry at the gap day's close): −8.25% vs the S&P
+ * over 20 days (t −28.9, only 34% rose), −7% to −9% in every year — while earnings
+ * gap-ups were about average (−1.3%). In the ≥80 pool such stocks were 0.8% of
+ * candidates and averaged −1.62% per trade (23% winners). Complements the >5%
+ * scan-day jump guard (catches gaps that faded intraday or happened days earlier).
+ * Uses daily_bars (EOD ingestion) + news_archive. Never throws: on any error it keeps
+ * every row. HYPE_GAP_GUARD=off disables it.
+ */
+async function _dropHypeGaps(rows, scanDate) {
+    if ((process.env.HYPE_GAP_GUARD || 'on') === 'off' || !rows.length) return rows;
+    try {
+        const syms = [...new Set(rows.map(r => r.symbol))];
+        const asOf = scanDate || new Date().toISOString().slice(0, 10);
+        const b = await query(
+            `SELECT symbol, (timestamp AT TIME ZONE 'America/New_York')::date::text AS d, open::float AS o, close::float AS c, volume::float AS v
+             FROM daily_bars
+             WHERE symbol = ANY($1) AND timestamp >= ($2::date - 45) AND timestamp < ($2::date + 1)
+             ORDER BY symbol, timestamp`, [syms, asOf]);
+        const bars = {};
+        for (const x of b.rows) (bars[x.symbol] ||= []).push(x);
+        const gaps = []; // { symbol, d, prevD }
+        for (const [sym, list] of Object.entries(bars)) {
+            for (let k = Math.max(21, list.length - 5); k < list.length; k++) {
+                let av = 0; for (let j = k - 20; j < k; j++) av += list[j].v; av /= 20;
+                const gap = (list[k].o / list[k - 1].c - 1) * 100;
+                if (gap >= 5 && av > 0 && list[k].v / av >= 2.5) gaps.push({ symbol: sym, d: list[k].d, prevD: list[k - 1].d });
+            }
+        }
+        if (!gaps.length) return rows;
+        const n = await query(
+            `SELECT DISTINCT symbols[1] AS s, (created_at AT TIME ZONE 'America/New_York')::date::text AS d
+             FROM news_archive
+             WHERE symbols && $1::text[] AND cardinality(symbols) <= 2
+               AND created_at >= ($2::date - 50)
+               AND headline ~* '(earnings|quarter|Q[1-4] |results|revenue|EPS|guidance|beats|misses)'`,
+            [[...new Set(gaps.map(g => g.symbol))], asOf]);
+        const earn = new Set(n.rows.map(r => r.s + '|' + r.d));
+        const hype = new Set(gaps.filter(g => !earn.has(g.symbol + '|' + g.d) && !earn.has(g.symbol + '|' + g.prevD)).map(g => g.symbol));
+        if (hype.size) logger.info('[HypeGapGuard] Dropped candidates with a no-earnings hype gap in the last 5 days', { scanDate: asOf, symbols: [...hype] });
+        return rows.filter(r => !hype.has(r.symbol));
+    } catch (err) {
+        logger.warn('[HypeGapGuard] Check failed — keeping all candidates', { error: err.message });
+        return rows;
+    }
+}
+
 function _toCandidate(row, oversoldScore) {
     return {
         symbol:    row.symbol,
@@ -151,7 +201,8 @@ async function loadCandidates({ minScore = 85, limit = 120, rankBy = 'score', on
              ORDER BY ai_score DESC, md5(symbol || analysis_date::text) ASC`,
             [minScore]
         );
-        const pool = res.rows.map(row => ({
+        const kept = await _dropHypeGaps(res.rows, res.rows[0]?.scan_date);
+        const pool = kept.map(row => ({
             row, symbol: row.symbol, scanDate: row.scan_date,
             aiScore: parseFloat(row.ai_score), oversoldScore: exp.oversoldScore(row.scoring_log),
             steadyTrend: exp.isSteadyTrend({ scoringLog: row.scoring_log, rsi: row.rsi, price: row.price }),
@@ -183,7 +234,8 @@ async function loadCandidates({ minScore = 85, limit = 120, rankBy = 'score', on
     // in place indefinitely. This does not change who QUALIFIES (same WHERE clause, same
     // LIMIT, same cost) — only which of several equally-scored candidates a tie resolves to.
     const res = await query(
-        `SELECT symbol, ai_score, recommendation, setup_family, sector, market_cap, metadata
+        `SELECT symbol, ai_score, recommendation, setup_family, sector, market_cap, metadata,
+                analysis_date::text AS scan_date
          FROM daily_universe_analysis
          WHERE analysis_date = ${LATEST_DATE_SQL}
            AND passed_prescreen = true
@@ -191,10 +243,11 @@ async function loadCandidates({ minScore = 85, limit = 120, rankBy = 'score', on
            ${JUMP_GUARD_SQL}
          ORDER BY ai_score DESC, md5(symbol || analysis_date::text) ASC
          LIMIT $2`,
-        [minScore, limit]
+        [minScore, limit + 15]
     );
 
-    return res.rows.map(row => _toCandidate(row));
+    const kept = await _dropHypeGaps(res.rows, res.rows[0]?.scan_date);
+    return kept.slice(0, limit).map(row => _toCandidate(row));
 }
 
 /**
@@ -400,6 +453,7 @@ async function getSymbolScanRecord(symbol, date) {
 }
 
 module.exports = {
+    _dropHypeGaps,
     isAvailable,
     loadCandidates,
     getDailyScanSummary,

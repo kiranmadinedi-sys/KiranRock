@@ -2091,8 +2091,10 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         }
 
         // 15. PULSE Gemini (±5) — AI-powered news sentiment bonus
+        let geminiAdjForGate = null; // read by the buy-time Strong Bearish block (see opportunities below)
         if (geminiResult) {
             const gemAdj = Math.round((geminiResult.score - 50) / 10); // maps 0-100 → -5..+5
+            geminiAdjForGate = gemAdj;
             if (gemAdj !== 0) {
                 aiScore += _scoredPts('Gemini', gemAdj);
                 scoringLog.push(`Gemini: ${gemAdj >= 0 ? '+' : ''}${gemAdj} (${geminiResult.label})${_unscoredNote('Gemini', gemAdj)}`);
@@ -2586,6 +2588,10 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             newsSourceCount,
             xPostCount,
             scoringLog,
+            // Gemini −3 or worse (2026-10-17 study, all scanned stocks): −1.55% vs the day's
+            // average over the following week (Oct 9-15, t −2.9) and −0.81% over 5 days since
+            // Sep 15 (t −2.5). Kept in the analysis/scan record; blocked only at buy time.
+            geminiStrongBearish: geminiAdjForGate !== null && geminiAdjForGate <= -3,
             rsiInterpretation: rsiInterpretation.signal,
             macd: macd.histogram.toFixed(4),
             macdSignal: macdInterpretation?.signal || 'NEUTRAL',
@@ -2853,7 +2859,12 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
                 // sectorMinScore enforces a higher bar for defensive sectors (Utilities/Staples/REITs = 78)
                 // so they almost never pass the momentum scanner without a hard exclusion list.
                 const effectiveMinScore = Math.max(minBuyScore, analysis.sectorMinScore || 0);
-                if (analysis.aiScore >= effectiveMinScore &&
+                // Never buy what Gemini rates Strong Bearish (−3 or worse) — see geminiStrongBearish.
+                if (analysis.geminiStrongBearish) {
+                    logger.info('[GeminiGate] Skipping — Gemini rates it Strong Bearish', {
+                        userId, symbol: analysis.symbol, aiScore: analysis.aiScore
+                    });
+                } else if (analysis.aiScore >= effectiveMinScore &&
                     (analysis.recommendation === 'BUY' || analysis.recommendation === 'STRONG BUY')) {
                     opportunities.push(enriched);
                 }

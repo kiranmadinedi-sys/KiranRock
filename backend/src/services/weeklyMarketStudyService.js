@@ -213,6 +213,7 @@ async function runMarketStudy({ weeks = 8, now = new Date() } = {}) {
         market: await _lastWeekMarket(now),
         arms: await armForwardResults().catch(err => { logger.warn('[MarketStudy] Arm results failed', { error: err.message }); return null; }),
         insiderHistory: await require('./insiderSignalService').clusterHistoryStudy().catch(err => { logger.warn('[MarketStudy] Insider history failed', { error: err.message }); return null; }),
+        gemini: await geminiNewsCheck(now).catch(err => { logger.warn('[MarketStudy] Gemini/news check failed', { error: err.message }); return null; }),
     };
 
     await query(
@@ -307,6 +308,53 @@ async function armForwardResults() {
     }]));
 }
 
+/**
+ * Gemini verdicts and news sentiment vs what happened next, for EVERY scanned stock over
+ * the last ~4 weeks (scans whose 5 trading days are complete). Entry next open, 5 trading
+ * days, vs the same day's scanned average. Watches the 2026-10-17 findings: Strong
+ * Bearish (≤−3) fell (now blocked at buy time), Strong Bullish (+4/+5) lagged (hype).
+ */
+async function geminiNewsCheck(now = new Date()) {
+    const to = new Date(now.getTime() - 9 * 86400000).toISOString().slice(0, 10);
+    const from = new Date(now.getTime() - 37 * 86400000).toISOString().slice(0, 10);
+    const r = await query(`
+        SELECT a.analysis_date::text AS d, a.symbol,
+               (SELECT substring(l from '^Gemini: ([+-]?[0-9]+)')::int FROM jsonb_array_elements_text(a.metadata->'scoringLog') l WHERE l LIKE 'Gemini:%' LIMIT 1) AS g,
+               (a.metadata->>'newsSentiment')::float AS ns
+        FROM daily_universe_analysis a
+        WHERE a.analysis_date BETWEEN $1::date AND $2::date AND EXTRACT(ISODOW FROM a.analysis_date) < 6
+          AND a.symbol ~ '^[A-Z.]+$'`, [from, to]);
+    const rows = r.rows;
+    if (rows.length < 1000) return null;
+    const bars = {};
+    const syms = [...new Set(rows.map(x => x.symbol))];
+    for (let i = 0; i < syms.length; i += 500) {
+        const b = await query(`SELECT symbol, d::text AS d, o, c FROM history_bars WHERE symbol = ANY($1) AND d >= $2::date ORDER BY symbol, d`, [syms.slice(i, i + 500), from]);
+        for (const x of b.rows) (bars[x.symbol] ||= []).push({ d: x.d, o: +x.o, c: +x.c });
+    }
+    for (const x of rows) {
+        const b = bars[x.symbol]; if (!b) continue;
+        const i = b.findIndex(z => z.d > x.d);
+        if (i < 0 || i + 4 >= b.length || !(b[i].o >= 2)) continue;
+        x.r5 = (b[i + 4].c / b[i].o - 1) * 100;
+    }
+    const byDay = {};
+    for (const x of rows) if (x.r5 != null) (byDay[x.d] ||= []).push(x);
+    for (const g of Object.values(byDay)) { const m = avg(g.map(x => x.r5)); for (const x of g) x.ex = Math.max(-40, Math.min(40, x.r5 - m)); }
+    const scored = rows.filter(x => x.ex != null);
+    const grp = (f) => { const v = scored.filter(f).map(x => x.ex); return { n: v.length, avgPct: r2(avg(v)) }; };
+    return {
+        from, to,
+        strongBullish: grp(x => x.g >= 4),
+        bullish: grp(x => x.g >= 1 && x.g <= 3),
+        neutralOrNone: grp(x => x.g == null || x.g === 0),
+        bearish: grp(x => x.g <= -1 && x.g >= -2),
+        strongBearish: grp(x => x.g != null && x.g <= -3),
+        newsPositive: grp(x => x.ns >= 50),
+        newsNegative: grp(x => x.ns != null && x.ns < 50),
+    };
+}
+
 function formatReport(r) {
     const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const pct = v => (v == null ? 'n/a' : `${v >= 0 ? '+' : ''}${v}%`);
@@ -347,6 +395,13 @@ function formatReport(r) {
     if (r.insiderHistory) {
         const h = r.insiderHistory;
         lines.push(`Insider clusters since 2023: ${h.events} events, 20d ${pct(h.avg20dVsSpy)} vs SPY (a random stock: about −1.1%) — ${Object.entries(h.byYear).map(([y, v]) => `${y} ${pct(v)}`).join(', ')}`);
+    }
+    if (r.gemini) {
+        const g = r.gemini;
+        lines.push('', `<b>6. Gemini &amp; news</b> (all scanned stocks, ${g.from} → ${g.to}, 5 days vs the day's average)`,
+            `Strong Bullish +4/+5: ${pct(g.strongBullish.avgPct)} (n ${g.strongBullish.n}) · Bullish: ${pct(g.bullish.avgPct)} · Neutral: ${pct(g.neutralOrNone.avgPct)}`,
+            `Bearish −1/−2: ${pct(g.bearish.avgPct)} · <b>Strong Bearish ≤−3: ${pct(g.strongBearish.avgPct)}</b> (n ${g.strongBearish.n}, blocked from buying since 2026-10-17)`,
+            `News sentiment ≥50: ${pct(g.newsPositive.avgPct)} vs &lt;50: ${pct(g.newsNegative.avgPct)}`);
     }
     lines.push('', '<i>Report only — trading is unchanged.</i>');
     return lines.join('\n');

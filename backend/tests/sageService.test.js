@@ -1,13 +1,12 @@
 const SageService = require('../src/services/sageService');
 const { query } = require('../src/config/database');
-const logger = require('../src/utils/logger');
+const { logger } = require('../src/utils/logger');
 
 // Mock dependencies
 jest.mock('../src/config/database');
+// The logger module exports { logger } (was mocked as a bare object, which crashed the suite on load).
 jest.mock('../src/utils/logger', () => ({
-  info: jest.fn(),
-  warn: jest.fn(),
-  error: jest.fn(),
+  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
 describe('SageService (SAGE)', () => {
@@ -56,7 +55,7 @@ describe('SageService (SAGE)', () => {
     // Assert
     expect(metrics.winProbability).toBe(0.55);
     expect(metrics.winLossRatio).toBe(1.5);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Insufficient trade history'));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('Insufficient live trade history'));
   });
 
   test('should return default metrics on database error', async () => {

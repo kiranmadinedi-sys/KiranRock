@@ -1,7 +1,7 @@
 const PositionSizingService = require('../src/services/positionSizingService');
 const sageService = require('../src/services/sageService');
 const riskConfig = require('../src/config/riskConfig');
-const logger = require('../src/utils/logger');
+const { logger } = require('../src/utils/logger');
 
 // Mock dependencies
 jest.mock('../src/services/sageService');
@@ -10,10 +10,9 @@ jest.mock('../src/config/riskConfig', () => ({
   maxPositionSize: 0.10, // 10%
   kellyFraction: 0.5,    // Use 50% of the calculated Kelly fraction
 }));
+// The logger module exports { logger } (was mocked as a bare object, which crashed the suite on load).
 jest.mock('../src/utils/logger', () => ({
-  info: jest.fn(),
-  warn: jest.fn(),
-  error: jest.fn(),
+  logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
 describe('PositionSizingService (SCALE)', () => {
@@ -45,7 +44,9 @@ describe('PositionSizingService (SCALE)', () => {
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Final position size fraction after applying constraints: 0.1000'));
   });
 
-  test('should return 0 when Kelly Criterion is negative (no edge)', async () => {
+  // PANTHEON design (documented in positionSizingService): with no proven edge the bot uses
+  // the MINIMUM size rather than 0, so it isn't fully paralysed. This test predated that.
+  test('falls back to the minimum position size when Kelly is negative (no edge)', async () => {
     // Arrange: Losing strategy
     sageService.getStrategyMetrics.mockResolvedValue({
       winProbability: 0.4, // 40% win rate
@@ -57,8 +58,8 @@ describe('PositionSizingService (SCALE)', () => {
 
     // Assert
     // Raw Kelly = 0.4 - ((1 - 0.4) / 1.0) = 0.4 - 0.6 = -0.2
-    expect(fraction).toBe(0);
-    expect(logger.info).toHaveBeenCalledWith('[SCALE] Kelly fraction is not positive. Suggests no edge. Returning 0.');
+    expect(fraction).toBe(0.01); // riskConfig.minPositionSize (mocked above)
+    expect(logger.info).toHaveBeenCalledWith('[SCALE] Kelly fraction is not positive — using minimum position size as floor.');
   });
 
   test('should apply confidence score to moderate the fraction', async () => {

@@ -2720,8 +2720,11 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
             // the highest "oversold" scores instead of the highest AI scores. The daily
             // control-vs-oversold comparison is logged by the scheduler, not here, so it is
             // recorded even on days the regime guard skips the scan.
+            // Per-account stock-picking method (strategySettingsService): paper can be promoted
+            // automatically; a live account changes only through an approved request.
+            const _selectionMethod = await require('./strategySettingsService').getSelectionMethod(userId);
             const precomputedList = await precomputedUniverseService.loadCandidates({
-                ...(selectionExperiment.isExperimentUser(userId) ? { rankBy: 'oversold' } : {}),
+                ...(_selectionMethod !== 'control' ? { rankBy: _selectionMethod } : {}),
                 minScore: Math.max(80, minBuyScore - 5), // quality floor: ≥80 removes noise while keeping stocks that gap up intraday
                 // Cut from 120 — each candidate re-runs the full live PULSE+ORACLE pipeline,
                 // and with Gemini's free-tier quota exhausted almost immediately every real
@@ -2961,14 +2964,28 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
     // Validated by June 18 backtest: breakout_leader avg +0.12% vs quality_continuation +0.02%.
     const SETUP_PRIORITY = { breakout_leader: 4, oversold_reversal: 3, quality_continuation: 2, mean_reversion_bounce: 1 };
 
-    if (selectionExperiment.isExperimentUser(userId)) {
-        // Phase 1 selection experiment: among opportunities that already cleared
-        // minBuyScore, buy the most "oversold" first (from the LIVE score breakdown).
+    const _buyMethod = await require('./strategySettingsService').getSelectionMethod(userId);
+    if (_buyMethod === 'oversold') {
+        // Among opportunities that already cleared minBuyScore, buy the most "oversold"
+        // first (from the LIVE score breakdown).
         for (const o of filteredOpportunities) o.oversoldScore = selectionExperiment.oversoldScore(o.scoringLog);
         filteredOpportunities.sort(selectionExperiment.compareOversold);
         logger.info('[SelectionExperiment] Buy order by oversold score', {
             userId, top: filteredOpportunities.slice(0, 5).map(o => `${o.symbol}(${o.oversoldScore}/${o.aiScore})`),
         });
+    } else if (_buyMethod === 'steady') {
+        filteredOpportunities.sort((a, b) => {
+            const sa = selectionExperiment.isSteadyTrend({ scoringLog: a.scoringLog, rsi: parseFloat(a.rsi), price: a.price ?? a.entry });
+            const sb = selectionExperiment.isSteadyTrend({ scoringLog: b.scoringLog, rsi: parseFloat(b.rsi), price: b.price ?? b.entry });
+            return Number(sb) - Number(sa) || b.aiScore - a.aiScore;
+        });
+        logger.info('[SelectionExperiment] Buy order: steady trend first', { userId, top: filteredOpportunities.slice(0, 5).map(o => o.symbol) });
+    } else if (_buyMethod === 'insider') {
+        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+        const clusters = await require('./insiderSignalService').getActiveClusters(today).catch(() => []);
+        const rank = Object.fromEntries(clusters.map(c => [c.symbol, c.insiders]));
+        filteredOpportunities.sort((a, b) => (rank[b.symbol] || 0) - (rank[a.symbol] || 0) || b.aiScore - a.aiScore);
+        logger.info('[SelectionExperiment] Buy order: insider clusters first', { userId, top: filteredOpportunities.slice(0, 5).map(o => o.symbol) });
     } else filteredOpportunities.sort((a, b) => {
         // Primary: AI score, wide band — a genuinely dominant score always wins outright,
         // tier only breaks a close tie. Was tier-first with score as the tiebreaker (so

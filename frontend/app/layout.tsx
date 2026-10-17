@@ -5,6 +5,7 @@ import { NotificationProvider } from './contexts/NotificationContext';
 import { ThemeProvider } from './contexts/ThemeContext';
 import AuthGuard from './components/AuthGuard';
 import AppHeader from './components/AppHeader';
+import ApprovalPopup from './components/ApprovalPopup';
 
 const inter = Inter({ subsets: ['latin'] });
 
@@ -45,6 +46,7 @@ export default function RootLayout({
           <NotificationProvider>
             <AuthGuard>
               <AppHeader />
+              <ApprovalPopup />
               {children}
               {/* Reserves space below page content so the fixed mobile bottom nav
                   (rendered inside AppHeader) doesn't cover the last bit of it. Was

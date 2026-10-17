@@ -1699,6 +1699,7 @@ function startScheduler() {
         runWeeklyMarketStudy();            // Saturday 11:00 ET: exits + picking methods tested on ALL ≥80 candidates
         runWeeklyInsiderSweep();           // Saturday 12:00 ET: insider trades for every scanned ticker (research archive)
         runDailyInsiderSweep();            // Weekdays 17:00 ET: last 10 days of insider filings (feeds the 'insider' test arm)
+        runPromotionAndReminders();        // Sat 11:30 ET promotion check; weekdays 9:00 ET approval reminders
         require('./researchArchiveService').syncRecentNews().catch(() => {}); // every tick, 24/7: all-ticker news archive
         runCryptoWatchdog();               // every tick, 24/7: alert if the crypto process went silent while positions are open
         runMorningBriefing();              // 8:00 AM ET Mon-Fri: STRONG BUY pre-market alert
@@ -1826,6 +1827,29 @@ function runDailyInsiderSweep() {
     _insiderDailyRanDate = etDate;
     require('./insiderSignalService').dailyInsiderSweep().catch(err =>
         console.error('[InsiderSignal] Daily sweep error:', err.message));
+}
+
+// Saturday 11:30 ET — automatic promotion check (after the 11:00 market study): paper
+// switches automatically; live accounts get approval requests (Telegram + website popup).
+let _promotionRanDate = null;
+// Weekdays 9:00 ET — re-announce approval requests still waiting.
+let _approvalReminderRanDate = null;
+function runPromotionAndReminders() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit'
+    }).formatToParts(new Date());
+    const get = t => parts.find(p => p.type === t).value;
+    const etDate = `${get('year')}-${get('month')}-${get('day')}`;
+    const hour = parseInt(get('hour'), 10), minute = parseInt(get('minute'), 10), day = get('weekday');
+    if (day === 'Sat' && hour === 11 && minute >= 30 && _promotionRanDate !== etDate) {
+        _promotionRanDate = etDate;
+        require('./promotionService').runWeeklyPromotion().catch(err => console.error('[Promotion] Error:', err.message));
+    }
+    if (!['Sat', 'Sun'].includes(day) && hour === 9 && _approvalReminderRanDate !== etDate) {
+        _approvalReminderRanDate = etDate;
+        require('./approvalService').remindPending().catch(err => console.error('[Approval] Reminder error:', err.message));
+    }
 }
 
 let _weeklyPnlRanDate = null;

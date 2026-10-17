@@ -211,6 +211,8 @@ async function runMarketStudy({ weeks = 8, now = new Date() } = {}) {
         exitRules: compareExitRules(trades),
         methods: compareMethods(trades),
         market: await _lastWeekMarket(now),
+        arms: await armForwardResults().catch(err => { logger.warn('[MarketStudy] Arm results failed', { error: err.message }); return null; }),
+        insiderHistory: await require('./insiderSignalService').clusterHistoryStudy().catch(err => { logger.warn('[MarketStudy] Insider history failed', { error: err.message }); return null; }),
     };
 
     await query(
@@ -272,6 +274,39 @@ async function _lastWeekMarket(now = new Date()) {
     }
 }
 
+/**
+ * How each logged test arm's picks actually did: entry next open after the pick's data
+ * date, 5 and 20 trading days later, minus SPY over the same window (history_bars).
+ */
+async function armForwardResults() {
+    const r = await query(`
+        WITH p AS (SELECT DISTINCT scan_date AS d, arm, symbol FROM selection_experiment_picks),
+             b AS (SELECT symbol, d, o, c, ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY d) rn
+                   FROM history_bars WHERE symbol IN (SELECT symbol FROM p) OR symbol = 'SPY'),
+             s AS (SELECT p.arm, p.symbol, p.d, MIN(b.rn) AS rn FROM p JOIN b ON b.symbol = p.symbol AND b.d > p.d GROUP BY 1, 2, 3)
+        SELECT s.arm,
+               (e5.c / e1.o - 1) * 100 - (q5.c / q1.o - 1) * 100 AS x5,
+               CASE WHEN e20.c IS NOT NULL THEN (e20.c / e1.o - 1) * 100 - (q20.c / q1.o - 1) * 100 END AS x20
+        FROM s
+        JOIN b e1 ON e1.symbol = s.symbol AND e1.rn = s.rn
+        JOIN b e5 ON e5.symbol = s.symbol AND e5.rn = s.rn + 4
+        JOIN b q1 ON q1.symbol = 'SPY' AND q1.d = e1.d
+        JOIN b q5 ON q5.symbol = 'SPY' AND q5.d = e5.d
+        LEFT JOIN b e20 ON e20.symbol = s.symbol AND e20.rn = s.rn + 19
+        LEFT JOIN b q20 ON q20.symbol = 'SPY' AND q20.d = e20.d
+        WHERE e1.o > 0`);
+    const out = {};
+    for (const row of r.rows) {
+        const a = (out[row.arm] ||= { x5: [], x20: [] });
+        a.x5.push(Math.max(-60, Math.min(60, +row.x5)));
+        if (row.x20 != null) a.x20.push(Math.max(-60, Math.min(60, +row.x20)));
+    }
+    return Object.fromEntries(Object.entries(out).map(([arm, v]) => [arm, {
+        picks5d: v.x5.length, avg5dVsSpy: r2(avg(v.x5)), win5d: r2(v.x5.filter(x => x > 0).length / v.x5.length * 100),
+        picks20d: v.x20.length, avg20dVsSpy: r2(avg(v.x20)),
+    }]));
+}
+
 function formatReport(r) {
     const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const pct = v => (v == null ? 'n/a' : `${v >= 0 ? '+' : ''}${v}%`);
@@ -299,6 +334,19 @@ function formatReport(r) {
             `Lagging: ${mk.bottomSectors.map(s => `${esc(s.sector)} ${pct(s.avgPct)}`).join(', ')}`,
             `Top movers (our score): ${mk.topMovers.map(x => `${esc(x.symbol)} ${pct(x.pct)} (${x.score ?? '–'})`).join(', ')}`,
             `${mk.topMoversScored80}/10 top movers were rated ≥80 by our scan that day.`);
+    }
+    if (r.arms && Object.keys(r.arms).length) {
+        const order = ['control', 'oversold', 'steady', 'insider'];
+        lines.push('', '<b>5. Test methods — real results so far</b> (vs SPY, entry next open)');
+        for (const k of order) {
+            const a = r.arms[k];
+            if (!a) continue;
+            lines.push(`${k}: 5d ${pct(a.avg5dVsSpy)} (${a.picks5d} picks, win ${a.win5d}%)${a.picks20d ? ` · 20d ${pct(a.avg20dVsSpy)} (${a.picks20d})` : ''}`);
+        }
+    }
+    if (r.insiderHistory) {
+        const h = r.insiderHistory;
+        lines.push(`Insider clusters since 2023: ${h.events} events, 20d ${pct(h.avg20dVsSpy)} vs SPY (a random stock: about −1.1%) — ${Object.entries(h.byYear).map(([y, v]) => `${y} ${pct(v)}`).join(', ')}`);
     }
     lines.push('', '<i>Report only — trading is unchanged.</i>');
     return lines.join('\n');

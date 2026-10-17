@@ -97,11 +97,11 @@ async function ensureTable() {
             logged_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE (scan_date, user_id, arm, symbol)
         )`);
-    // 'steady' arm added 2026-10-17 — widen the original two-arm CHECK.
+    // 'steady' and 'insider' arms added 2026-10-17 — widen the original two-arm CHECK.
     await query(`
         ALTER TABLE selection_experiment_picks DROP CONSTRAINT IF EXISTS selection_experiment_picks_arm_check;
         ALTER TABLE selection_experiment_picks ADD CONSTRAINT selection_experiment_picks_arm_check
-            CHECK (arm IN ('control', 'oversold', 'steady'))`);
+            CHECK (arm IN ('control', 'oversold', 'steady', 'insider'))`);
     _tableReady = true;
 }
 
@@ -126,10 +126,22 @@ async function logDailyPicks(userId, pool) {
         const oversold = [...pool].sort(compareOversold).slice(0, PICKS_PER_ARM);
         // Steady arm: qualifying stocks only (often fewer than 40), in AI-score order.
         const steady = pool.filter(c => c.steadyTrend).slice(0, PICKS_PER_ARM);
+        // Insider arm: stocks with an active insider-buying cluster (insiderSignalService) —
+        // not limited to the score pool, since the signal is independent of the AI score.
+        let insider = [];
+        try {
+            const scoreBySym = Object.fromEntries(pool.map(c => [c.symbol, c.aiScore]));
+            insider = (await require('./insiderSignalService').getActiveClusters(scanDate))
+                .slice(0, PICKS_PER_ARM)
+                .map(c => ({ symbol: c.symbol, aiScore: scoreBySym[c.symbol] ?? null, oversoldScore: null }));
+        } catch (err) {
+            logger.warn('[SelectionExperiment] Insider arm unavailable today', { err: err.message });
+        }
         const rows = [
             ...control.map((c, i) => ['control', i + 1, c]),
             ...oversold.map((c, i) => ['oversold', i + 1, c]),
             ...steady.map((c, i) => ['steady', i + 1, c]),
+            ...insider.map((c, i) => ['insider', i + 1, c]),
         ];
         const values = [], params = [];
         rows.forEach(([arm, rank, c], i) => {
@@ -149,6 +161,7 @@ async function logDailyPicks(userId, pool) {
             controlTop5: control.slice(0, 5).map(c => c.symbol),
             oversoldTop5: oversold.slice(0, 5).map(c => c.symbol),
             steady: steady.map(c => c.symbol),
+            insider: insider.map(c => c.symbol),
         });
         return true;
     } catch (err) {

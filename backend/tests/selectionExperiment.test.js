@@ -69,6 +69,9 @@ describe('selectionExperimentService.runDailyPickLog', () => {
         jest.doMock('../src/services/precomputedUniverseService', () => ({
             loadCandidates: jest.fn(async ({ onPool }) => { await onPool(pool); return []; }),
         }));
+        jest.doMock('../src/services/insiderSignalService', () => ({
+            getActiveClusters: jest.fn().mockResolvedValue([{ symbol: 'SBLK', insiders: 5 }]),
+        }));
         process.env.SELECTION_EXPERIMENT_USER_IDS = 'paper-1';
         exp = require('../src/services/selectionExperimentService');
         query = require('../src/config/database').query;
@@ -89,6 +92,8 @@ describe('selectionExperimentService.runDailyPickLog', () => {
         expect(params.filter(p => p === 'control')).toHaveLength(2);
         expect(params.filter(p => p === 'oversold')).toHaveLength(2);
         expect(params.filter(p => p === 'steady')).toHaveLength(1); // only DIP qualifies
+        expect(params.filter(p => p === 'insider')).toHaveLength(1); // active insider cluster, outside the score pool
+        expect(params).toContain('SBLK');
     });
 
     test('does nothing on a weekend or with no experiment accounts', async () => {

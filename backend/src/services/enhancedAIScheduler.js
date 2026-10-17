@@ -1698,6 +1698,7 @@ function startScheduler() {
         runWeeklyScoreValidation();        // Saturday 10:00 ET: which score components actually predict returns
         runWeeklyMarketStudy();            // Saturday 11:00 ET: exits + picking methods tested on ALL ≥80 candidates
         runWeeklyInsiderSweep();           // Saturday 12:00 ET: insider trades for every scanned ticker (research archive)
+        runDailyInsiderSweep();            // Weekdays 17:00 ET: last 10 days of insider filings (feeds the 'insider' test arm)
         require('./researchArchiveService').syncRecentNews().catch(() => {}); // every tick, 24/7: all-ticker news archive
         runCryptoWatchdog();               // every tick, 24/7: alert if the crypto process went silent while positions are open
         runMorningBriefing();              // 8:00 AM ET Mon-Fri: STRONG BUY pre-market alert
@@ -1808,6 +1809,23 @@ async function runWeeklyInsiderSweep() {
     _insiderSweepRanDate = etDate;
     require('./researchArchiveService').weeklyInsiderSweep().catch(err =>
         console.error('[ResearchArchive] Insider sweep error:', err.message));
+}
+
+// Weekdays 17:00 ET — refresh the last 10 days of insider filings so tomorrow's 'insider'
+// test arm sees fresh clusters (~1.5 h at the Finnhub rate limit; runs in the background).
+let _insiderDailyRanDate = null;
+function runDailyInsiderSweep() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit'
+    }).formatToParts(new Date());
+    const get = t => parts.find(p => p.type === t).value;
+    const etDate = `${get('year')}-${get('month')}-${get('day')}`;
+    if (['Sat', 'Sun'].includes(get('weekday')) || parseInt(get('hour'), 10) !== 17) return;
+    if (_insiderDailyRanDate === etDate) return;
+    _insiderDailyRanDate = etDate;
+    require('./insiderSignalService').dailyInsiderSweep().catch(err =>
+        console.error('[InsiderSignal] Daily sweep error:', err.message));
 }
 
 let _weeklyPnlRanDate = null;

@@ -1531,7 +1531,9 @@ const _withQuoteTimeout = (promise, fallback, ms = 10000) =>
 // them and any can be re-enabled — via SCORE_UNSCORED_BONUSES, no code change — if it
 // starts predicting. Set SCORE_UNSCORED_BONUSES="" to restore the old scoring.
 const UNSCORED_BONUSES = new Set(
-    (process.env.SCORE_UNSCORED_BONUSES ?? 'News,Gemini,RelStrength5d,WeeklyAlign,SmartMoney')
+    // ATLAS added 2026-10-17 (user-approved): its dollar/oil/world-markets blend scored
+    // −0.21pp (t −2.0) in the 2026-08-24→10-09 validation, negative in both halves.
+    (process.env.SCORE_UNSCORED_BONUSES ?? 'News,Gemini,RelStrength5d,WeeklyAlign,SmartMoney,ATLAS')
         .split(',').map(s => s.trim()).filter(Boolean)
 );
 const UNSCORED_MARKER = '[unscored]';
@@ -2304,8 +2306,8 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
                 atlasReason = globalSentiment.label ?? 'cached';
             }
             if (atlasAdj !== 0) {
-                aiScore += atlasAdj;
-                scoringLog.push(`ATLAS: ${atlasAdj >= 0 ? '+' : ''}${atlasAdj} (${atlasReason})`);
+                aiScore += _scoredPts('ATLAS', atlasAdj);
+                scoringLog.push(`ATLAS: ${atlasAdj >= 0 ? '+' : ''}${atlasAdj} (${atlasReason})${_unscoredNote('ATLAS', atlasAdj)}`);
             }
         }
 
@@ -2965,27 +2967,19 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
     const SETUP_PRIORITY = { breakout_leader: 4, oversold_reversal: 3, quality_continuation: 2, mean_reversion_bounce: 1 };
 
     const _buyMethod = await require('./strategySettingsService').getSelectionMethod(userId);
-    if (_buyMethod === 'oversold') {
-        // Among opportunities that already cleared minBuyScore, buy the most "oversold"
-        // first (from the LIVE score breakdown).
-        for (const o of filteredOpportunities) o.oversoldScore = selectionExperiment.oversoldScore(o.scoringLog);
-        filteredOpportunities.sort(selectionExperiment.compareOversold);
-        logger.info('[SelectionExperiment] Buy order by oversold score', {
-            userId, top: filteredOpportunities.slice(0, 5).map(o => `${o.symbol}(${o.oversoldScore}/${o.aiScore})`),
+    if (_buyMethod !== 'control') {
+        // The account's stock-picking method (strategySettingsService), via the same shared
+        // ordering the candidate loader uses. Start from AI-score order so ties keep it.
+        filteredOpportunities.sort((a, b) => b.aiScore - a.aiScore);
+        const _ordered = await selectionExperiment.orderByMethod(filteredOpportunities, _buyMethod, {
+            log: o => o.scoringLog, sector: o => o.sector, score: o => o.aiScore,
+            rsi: o => parseFloat(o.rsi), price: o => o.price ?? o.entry, symbol: o => o.symbol,
         });
-    } else if (_buyMethod === 'steady') {
-        filteredOpportunities.sort((a, b) => {
-            const sa = selectionExperiment.isSteadyTrend({ scoringLog: a.scoringLog, rsi: parseFloat(a.rsi), price: a.price ?? a.entry });
-            const sb = selectionExperiment.isSteadyTrend({ scoringLog: b.scoringLog, rsi: parseFloat(b.rsi), price: b.price ?? b.entry });
-            return Number(sb) - Number(sa) || b.aiScore - a.aiScore;
+        filteredOpportunities.splice(0, filteredOpportunities.length, ..._ordered);
+        for (const o of filteredOpportunities) { o.selectionMethod = _buyMethod; o.oversoldScore = selectionExperiment.oversoldScore(o.scoringLog); }
+        logger.info('[SelectionExperiment] Buy order by account method', {
+            userId, method: _buyMethod, top: filteredOpportunities.slice(0, 5).map(o => `${o.symbol}(${o.aiScore})`),
         });
-        logger.info('[SelectionExperiment] Buy order: steady trend first', { userId, top: filteredOpportunities.slice(0, 5).map(o => o.symbol) });
-    } else if (_buyMethod === 'insider') {
-        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-        const clusters = await require('./insiderSignalService').getActiveClusters(today).catch(() => []);
-        const rank = Object.fromEntries(clusters.map(c => [c.symbol, c.insiders]));
-        filteredOpportunities.sort((a, b) => (rank[b.symbol] || 0) - (rank[a.symbol] || 0) || b.aiScore - a.aiScore);
-        logger.info('[SelectionExperiment] Buy order: insider clusters first', { userId, top: filteredOpportunities.slice(0, 5).map(o => o.symbol) });
     } else filteredOpportunities.sort((a, b) => {
         // Primary: AI score, wide band — a genuinely dominant score always wins outright,
         // tier only breaks a close tie. Was tier-first with score as the tiebreaker (so
@@ -3038,7 +3032,7 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
                     sector: opportunity.sector,
                     daysToEarnings: opportunity.daysToEarnings ?? null,
                     newsSentiment: opportunity.newsSentiment,
-                    ...(opportunity.oversoldScore != null ? { selectionArm: 'oversold', oversoldScore: opportunity.oversoldScore } : {}),
+                    ...(opportunity.selectionMethod ? { selectionArm: opportunity.selectionMethod, oversoldScore: opportunity.oversoldScore } : {}),
                     relativeStrength: opportunity.relativeStrength,
                     scoringLog: opportunity.scoringLog
                 }

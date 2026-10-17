@@ -384,7 +384,7 @@ function formatReport(r) {
             `${mk.topMoversScored80}/10 top movers were rated ≥80 by our scan that day.`);
     }
     if (r.arms && Object.keys(r.arms).length) {
-        const order = ['control', 'oversold', 'steady', 'insider'];
+        const order = ['control', 'oversold', 'steady', 'insider', 'oil', 'sector'];
         lines.push('', '<b>5. Test methods — real results so far</b> (vs SPY, entry next open)');
         for (const k of order) {
             const a = r.arms[k];

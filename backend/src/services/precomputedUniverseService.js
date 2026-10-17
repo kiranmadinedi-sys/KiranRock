@@ -137,7 +137,7 @@ function _toCandidate(row, oversoldScore) {
  * whole pool (in the default AI-score order) so both orderings can be logged.
  */
 async function loadCandidates({ minScore = 85, limit = 120, rankBy = 'score', onPool = null } = {}) {
-    if (rankBy === 'oversold' || rankBy === 'steady' || rankBy === 'insider') {
+    if (rankBy && rankBy !== 'score' && rankBy !== 'control') {
         const exp = require('./selectionExperimentService');
         const res = await query(
             `SELECT symbol, ai_score, recommendation, setup_family, sector, market_cap,
@@ -155,22 +155,17 @@ async function loadCandidates({ minScore = 85, limit = 120, rankBy = 'score', on
             row, symbol: row.symbol, scanDate: row.scan_date,
             aiScore: parseFloat(row.ai_score), oversoldScore: exp.oversoldScore(row.scoring_log),
             steadyTrend: exp.isSteadyTrend({ scoringLog: row.scoring_log, rsi: row.rsi, price: row.price }),
+            scoringLog: row.scoring_log, sector: row.sector || 'Unknown', rsi: row.rsi, price: row.price,
         }));
         if (onPool) {
             try { await onPool(pool); } catch (_) { /* logging must never block candidate loading */ }
         }
-        // Same pool, different order (strategySettingsService method). Ties keep the pool's
-        // AI-score order (Array.prototype.sort is stable).
-        let ordered;
-        if (rankBy === 'oversold') {
-            ordered = [...pool].sort(exp.compareOversold);
-        } else if (rankBy === 'steady') {
-            ordered = [...pool].sort((a, b) => Number(b.steadyTrend) - Number(a.steadyTrend));
-        } else {
-            const clusters = await require('./insiderSignalService').getActiveClusters(pool[0]?.scanDate || new Date().toISOString().slice(0, 10)).catch(() => []);
-            const rank = Object.fromEntries(clusters.map(c => [c.symbol, c.insiders]));
-            ordered = [...pool].sort((a, b) => (rank[b.symbol] || 0) - (rank[a.symbol] || 0));
-        }
+        // Same pool, different order (strategySettingsService method) — one shared
+        // ordering function so the loader and the buy step can never disagree.
+        const ordered = await exp.orderByMethod(pool, rankBy, {
+            log: p => p.scoringLog, sector: p => p.sector, score: p => p.aiScore,
+            rsi: p => p.rsi, price: p => p.price, symbol: p => p.symbol,
+        }, { asOf: pool[0]?.scanDate });
         return ordered.slice(0, limit).map(p => _toCandidate(p.row, p.oversoldScore));
     }
 

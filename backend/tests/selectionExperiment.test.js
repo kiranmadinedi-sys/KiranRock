@@ -69,6 +69,7 @@ describe('selectionExperimentService.runDailyPickLog', () => {
         jest.doMock('../src/services/precomputedUniverseService', () => ({
             loadCandidates: jest.fn(async ({ onPool }) => { await onPool(pool); return []; }),
         }));
+        jest.doMock('axios', () => ({ get: jest.fn().mockRejectedValue(new Error('no network in tests')) }));
         jest.doMock('../src/services/insiderSignalService', () => ({
             getActiveClusters: jest.fn().mockResolvedValue([{ symbol: 'SBLK', insiders: 5 }]),
         }));
@@ -165,5 +166,47 @@ describe('precomputedUniverseService.loadCandidates — oversold ordering', () =
         const out = await svc.loadCandidates({ minScore: 80, limit: 40 });
         expect(out[0]).not.toHaveProperty('_oversoldScore');
         expect(query.mock.calls[0][0]).toMatch(/LIMIT \$2/);
+    });
+});
+
+describe('orderByMethod — oil → energy tilt and sector strength (2026-10-17)', () => {
+    let exp, axios;
+    const acc = { log: x => x.log, sector: x => x.sector, score: x => x.score, rsi: () => null, price: () => null, symbol: x => x.symbol };
+    const items = [
+        { symbol: 'NVDA', sector: 'Technology', score: 100, log: ['SectorRotation: -8 (Tech rotating out — COMPASS)'] },
+        { symbol: 'XOM', sector: 'Energy', score: 90, log: ['SectorRotation: +6 (Energy rotating in — COMPASS)'] },
+        { symbol: 'JPM', sector: 'Financials', score: 95, log: [] },
+    ];
+    const bno = closes => ({ data: { bars: { BNO: closes.map((c, i) => ({ t: `2026-09-${String(i + 1).padStart(2, '0')}T04:00:00Z`, c })) } } });
+
+    beforeEach(() => {
+        jest.resetModules();
+        jest.doMock('../src/config/database', () => ({ query: jest.fn().mockResolvedValue({ rows: [] }) }));
+        jest.doMock('axios', () => ({ get: jest.fn() }));
+        exp = require('../src/services/selectionExperimentService');
+        axios = require('axios');
+    });
+
+    test('oil up over ~20 days → Energy first; ties keep the incoming order', async () => {
+        axios.get.mockResolvedValue(bno(Array.from({ length: 25 }, (_, i) => 30 + i * 0.2)));
+        expect((await exp.orderByMethod(items, 'oil', acc)).map(x => x.symbol)).toEqual(['XOM', 'NVDA', 'JPM']);
+    });
+
+    test('oil down → order unchanged', async () => {
+        axios.get.mockResolvedValue(bno(Array.from({ length: 25 }, (_, i) => 35 - i * 0.2)));
+        expect((await exp.orderByMethod(items, 'oil', acc)).map(x => x.symbol)).toEqual(['NVDA', 'XOM', 'JPM']);
+    });
+
+    test('oil feed unavailable → order unchanged (never throws)', async () => {
+        axios.get.mockRejectedValue(new Error('network'));
+        expect((await exp.orderByMethod(items, 'oil', acc)).map(x => x.symbol)).toEqual(['NVDA', 'XOM', 'JPM']);
+    });
+
+    test('sector strength: rotating-in sectors first, rotating-out last', async () => {
+        expect((await exp.orderByMethod(items, 'sector', acc)).map(x => x.symbol)).toEqual(['XOM', 'JPM', 'NVDA']);
+    });
+
+    test('control leaves the order alone', async () => {
+        expect((await exp.orderByMethod(items, 'control', acc)).map(x => x.symbol)).toEqual(['NVDA', 'XOM', 'JPM']);
     });
 });

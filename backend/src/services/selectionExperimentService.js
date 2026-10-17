@@ -82,6 +82,77 @@ function compareOversold(a, b) {
 }
 
 let _tableReady = false;
+/** COMPASS sector-rotation points from a scoring log (+ rotating in, − rotating out). */
+function sectorRotationPts(scoringLog) {
+    return _parts(scoringLog).SectorRotation || 0;
+}
+
+/**
+ * Oil trend (2026-10-17 study, monthly windows 2023-26): after oil rose over the last ~20
+ * trading days, energy stocks beat the S&P by +0.34% the next month vs −1.17% after oil
+ * fell. Brent fund BNO from Alpaca daily bars, cached per day. Never throws.
+ */
+const _oilCache = { day: null, value: null };
+async function getOilTrend(now = new Date()) {
+    const day = now.toISOString().slice(0, 10);
+    if (_oilCache.day === day) return _oilCache.value;
+    let value = null;
+    try {
+        const axios = require('axios');
+        const start = new Date(now.getTime() - 45 * 86400000).toISOString().slice(0, 10);
+        const r = await axios.get('https://data.alpaca.markets/v2/stocks/bars', {
+            headers: { 'APCA-API-KEY-ID': process.env.ALPACA_KEY_ID, 'APCA-API-SECRET-KEY': process.env.ALPACA_SECRET_KEY },
+            params: { symbols: 'BNO', timeframe: '1Day', start, feed: 'iex', adjustment: 'all', limit: 100 }, timeout: 15000,
+        });
+        const bars = r.data?.bars?.BNO || [];
+        if (bars.length >= 21) {
+            const last = bars[bars.length - 1].c, prior = bars[bars.length - 21].c;
+            const ret20 = (last / prior - 1) * 100;
+            value = { ret20: Math.round(ret20 * 100) / 100, up: ret20 > 0 };
+        }
+    } catch (err) {
+        logger.warn('[SelectionExperiment] Oil trend unavailable', { error: err.message });
+    }
+    _oilCache.day = day; _oilCache.value = value;
+    return value;
+}
+
+/**
+ * One ordering function for every stock-picking method, shared by the candidate loader
+ * and the buy step. items: any objects; acc gives { log, sector, score, rsi, price, symbol }.
+ * Stable sort, so ties keep the incoming (AI-score) order.
+ *   oversold — mean-reversion minus momentum points
+ *   steady   — full uptrend, RSI 55-70, $50+ first
+ *   insider  — active insider-buying clusters first (more insiders first)
+ *   oil      — when oil rose over ~20 days, Energy stocks first; otherwise unchanged
+ *   sector   — strongest COMPASS sector rotation first (validated: +1.41pp, t 9.5)
+ */
+async function orderByMethod(items, method, acc, { asOf } = {}) {
+    const list = [...items];
+    if (method === 'oversold') {
+        return list.sort((a, b) => oversoldScore(acc.log(b)) - oversoldScore(acc.log(a)) || acc.score(b) - acc.score(a));
+    }
+    if (method === 'steady') {
+        const st = x => isSteadyTrend({ scoringLog: acc.log(x), rsi: acc.rsi(x), price: acc.price(x) });
+        return list.sort((a, b) => Number(st(b)) - Number(st(a)));
+    }
+    if (method === 'insider') {
+        const day = asOf || new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+        const clusters = await require('./insiderSignalService').getActiveClusters(day).catch(() => []);
+        const rank = Object.fromEntries(clusters.map(c => [c.symbol, c.insiders]));
+        return list.sort((a, b) => (rank[acc.symbol(b)] || 0) - (rank[acc.symbol(a)] || 0));
+    }
+    if (method === 'oil') {
+        const oil = await getOilTrend();
+        if (!oil?.up) return list;
+        return list.sort((a, b) => Number(acc.sector(b) === 'Energy') - Number(acc.sector(a) === 'Energy'));
+    }
+    if (method === 'sector') {
+        return list.sort((a, b) => sectorRotationPts(acc.log(b)) - sectorRotationPts(acc.log(a)));
+    }
+    return list; // control
+}
+
 async function ensureTable() {
     if (_tableReady) return;
     await query(`
@@ -97,11 +168,11 @@ async function ensureTable() {
             logged_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE (scan_date, user_id, arm, symbol)
         )`);
-    // 'steady' and 'insider' arms added 2026-10-17 — widen the original two-arm CHECK.
+    // 'steady', 'insider', 'oil' and 'sector' arms added 2026-10-17 — widen the original two-arm CHECK.
     await query(`
         ALTER TABLE selection_experiment_picks DROP CONSTRAINT IF EXISTS selection_experiment_picks_arm_check;
         ALTER TABLE selection_experiment_picks ADD CONSTRAINT selection_experiment_picks_arm_check
-            CHECK (arm IN ('control', 'oversold', 'steady', 'insider'))`);
+            CHECK (arm IN ('control', 'oversold', 'steady', 'insider', 'oil', 'sector'))`);
     _tableReady = true;
 }
 
@@ -137,7 +208,13 @@ async function logDailyPicks(userId, pool) {
         } catch (err) {
             logger.warn('[SelectionExperiment] Insider arm unavailable today', { err: err.message });
         }
+        // Oil and sector arms: same pool, reordered (see orderByMethod).
+        const poolAcc = { log: c => c.scoringLog, sector: c => c.sector, score: c => c.aiScore, rsi: c => c.rsi, price: c => c.price, symbol: c => c.symbol };
+        const oil = (await orderByMethod(pool, 'oil', poolAcc)).slice(0, PICKS_PER_ARM);
+        const sector = (await orderByMethod(pool, 'sector', poolAcc)).slice(0, PICKS_PER_ARM);
         const rows = [
+            ...oil.map((c, i) => ['oil', i + 1, c]),
+            ...sector.map((c, i) => ['sector', i + 1, c]),
             ...control.map((c, i) => ['control', i + 1, c]),
             ...oversold.map((c, i) => ['oversold', i + 1, c]),
             ...steady.map((c, i) => ['steady', i + 1, c]),
@@ -162,6 +239,8 @@ async function logDailyPicks(userId, pool) {
             oversoldTop5: oversold.slice(0, 5).map(c => c.symbol),
             steady: steady.map(c => c.symbol),
             insider: insider.map(c => c.symbol),
+            oilTop5: oil.slice(0, 5).map(c => c.symbol),
+            sectorTop5: sector.slice(0, 5).map(c => c.symbol),
         });
         return true;
     } catch (err) {
@@ -245,6 +324,6 @@ async function getExperimentReport({ userId = null, sinceDate = '2026-10-12' } =
 }
 
 module.exports = {
-    isExperimentUser, oversoldScore, compareOversold, isSteadyTrend, logDailyPicks, runDailyPickLog, getExperimentReport,
+    isExperimentUser, oversoldScore, compareOversold, isSteadyTrend, sectorRotationPts, getOilTrend, orderByMethod, logDailyPicks, runDailyPickLog, getExperimentReport,
     MEAN_REVERSION, MOMENTUM,
 };

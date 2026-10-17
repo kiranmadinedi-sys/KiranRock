@@ -26,7 +26,7 @@ const paperUsers = () => idList(process.env.SELECTION_EXPERIMENT_USER_IDS);
 const liveApprovalUsers = () => idList(process.env.LIVE_APPROVAL_USER_IDS, KMADINED);
 const avg = a => (a.length ? a.reduce((s, v) => s + v, 0) / a.length : null);
 const r2 = v => (v == null ? null : Math.round(v * 100) / 100);
-const LABEL = { control: 'Current (AI score)', oversold: 'Oversold', steady: 'Steady trend', insider: 'Insider cluster' };
+const LABEL = { control: 'Current (AI score)', oversold: 'Oversold', steady: 'Steady trend', insider: 'Insider cluster', oil: 'Oil → energy tilt', sector: 'Sector strength' };
 
 /** Per-method results vs control on the same scan days. */
 async function evaluateArms() {

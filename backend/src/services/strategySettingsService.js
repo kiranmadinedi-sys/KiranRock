@@ -13,7 +13,7 @@
  */
 const { query } = require('../config/database');
 
-const METHODS = ['control', 'oversold', 'steady', 'insider'];
+const METHODS = ['control', 'oversold', 'steady', 'insider', 'oil', 'sector'];
 const CACHE_MS = 60 * 1000;
 const _cache = new Map();
 
@@ -23,10 +23,14 @@ async function ensureTable() {
     await query(`
         CREATE TABLE IF NOT EXISTS strategy_settings (
             user_id          TEXT        PRIMARY KEY,
-            selection_method TEXT        NOT NULL DEFAULT 'control' CHECK (selection_method IN ('control', 'oversold', 'steady', 'insider')),
+            selection_method TEXT        NOT NULL DEFAULT 'control',
             source           TEXT,
             updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )`);
+    // methods list widened 2026-10-17 (oil, sector) — keep the constraint in step with METHODS
+    await query(`ALTER TABLE strategy_settings DROP CONSTRAINT IF EXISTS strategy_settings_selection_method_check`);
+    await query(`ALTER TABLE strategy_settings ADD CONSTRAINT strategy_settings_selection_method_check
+                 CHECK (selection_method IN (${METHODS.map(m => `'${m}'`).join(', ')}))`);
     _ready = true;
 }
 

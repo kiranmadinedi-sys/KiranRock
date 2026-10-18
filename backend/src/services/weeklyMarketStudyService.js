@@ -215,6 +215,7 @@ async function runMarketStudy({ weeks = 8, now = new Date() } = {}) {
         insiderHistory: await require('./insiderSignalService').clusterHistoryStudy().catch(err => { logger.warn('[MarketStudy] Insider history failed', { error: err.message }); return null; }),
         gemini: await geminiNewsCheck(now).catch(err => { logger.warn('[MarketStudy] Gemini/news check failed', { error: err.message }); return null; }),
         optionsIncome: await require('./optionsIncomeService').summary().catch(() => null),
+        satellite: await require('./satelliteService').performance().catch(() => null),
     };
 
     await query(
@@ -408,6 +409,12 @@ function formatReport(r) {
         const o = r.optionsIncome;
         lines.push('', '<b>7. Options income (paper, cash-secured puts)</b>',
             `Open: ${o.open} (collateral $${Math.round(o.collateral).toLocaleString()}) · Closed: ${o.done} (${o.wins} won, ${o.assigned} assigned) · P&amp;L $${o.pnl.toFixed(2)}`);
+    }
+    if (r.satellite) {
+        const s = r.satellite;
+        lines.push('', '<b>8. Momentum satellite (paper, 10%)</b>',
+            `Since ${s.since} (${s.months} rebalance${s.months > 1 ? 's' : ''}): basket ${pct(+s.basketPct.toFixed(2))} vs SPY ${pct(+s.spyPct.toFixed(2))}`,
+            `Holding: ${s.currentPicks.join(', ')}`);
     }
     lines.push('', '<i>Report only — trading is unchanged.</i>');
     return lines.join('\n');

@@ -1700,6 +1700,9 @@ function startScheduler() {
         runWeeklyInsiderSweep();           // Saturday 12:00 ET: insider trades for every scanned ticker (research archive)
         runDailyInsiderSweep();            // Weekdays 17:00 ET: last 10 days of insider filings (feeds the 'insider' test arm)
         runPromotionAndReminders();        // Sat 11:30 ET promotion check; weekdays 9:00 ET approval reminders
+        require('./satelliteService').runTick().catch(err =>
+            console.warn('[Satellite] Tick failed:', err.message)
+        );                                 // first trading day each month (10:30-15:00 ET): paper momentum satellite rebalance
         require('./optionsIncomeService').runTick().catch(err =>
             console.warn('[OptionsIncome] Tick failed:', err.message)
         );                                 // market hours: paper cash-secured puts (manage each tick, enter once/day after 11:00 ET)

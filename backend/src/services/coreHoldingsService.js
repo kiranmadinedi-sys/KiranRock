@@ -50,18 +50,21 @@ async function ensureTable() {
             cash_reserve_pct NUMERIC     NOT NULL DEFAULT 25 CHECK (cash_reserve_pct >= 10 AND cash_reserve_pct <= 80),
             updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )`);
+    // 'satellite' sleeve (2026-10-18): momentum positions managed by satelliteService. They are
+    // protected from the swing bot exactly like core, but kept out of the core list/settings.
+    await query(`ALTER TABLE core_holdings ADD COLUMN IF NOT EXISTS sleeve TEXT NOT NULL DEFAULT 'core'`);
     _tableReady = true;
 }
 
-/** Active core rows for an account. On a DB error, serves the last good copy, else throws. */
-async function getCoreRows(userId) {
+/** Active rows of every sleeve. On a DB error, serves the last good copy, else throws. */
+async function _getAllRows(userId) {
     const key = String(userId);
     const hit = _cache.get(key);
     if (hit && Date.now() - hit.at < CACHE_MS) return hit.rows;
     try {
         await ensureTable();
         const r = await query(
-            `SELECT symbol, target_pct::float AS "targetPct", note FROM core_holdings WHERE user_id = $1 AND active`,
+            `SELECT symbol, target_pct::float AS "targetPct", note, sleeve FROM core_holdings WHERE user_id = $1 AND active`,
             [key]
         );
         const rows = r.rows.map(x => ({ ...x, symbol: x.symbol.toUpperCase() }));
@@ -75,8 +78,34 @@ async function getCoreRows(userId) {
     }
 }
 
+/** The core sleeve only (core list, settings, rebalance, reports). */
+async function getCoreRows(userId) {
+    return (await _getAllRows(userId)).filter(r => (r.sleeve || 'core') === 'core');
+}
+
+/**
+ * Every symbol the swing bot must leave alone: core AND satellite. Throws (or serves a stale
+ * copy) on a failed read — never answers "none".
+ */
 async function getCoreSymbols(userId) {
-    return new Set((await getCoreRows(userId)).map(r => r.symbol));
+    return new Set((await _getAllRows(userId)).map(r => r.symbol));
+}
+
+/** Satellite sleeve: replace the account's active satellite symbols (satelliteService). */
+async function setSatelliteSymbols(userId, symbols) {
+    await ensureTable();
+    const uid = String(userId);
+    const list = [...new Set(symbols.map(x => String(x).toUpperCase()))];
+    for (const sym of list) {
+        await query(
+            `INSERT INTO core_holdings (user_id, symbol, target_pct, active, note, sleeve) VALUES ($1, $2, 0, true, 'momentum satellite', 'satellite')
+             ON CONFLICT (user_id, symbol) DO UPDATE SET active = true, sleeve = 'satellite', target_pct = 0, note = 'momentum satellite'
+             WHERE core_holdings.sleeve = 'satellite' OR NOT core_holdings.active`,
+            [uid, sym]
+        );
+    }
+    await query(`UPDATE core_holdings SET active = false WHERE user_id = $1 AND sleeve = 'satellite' AND NOT (symbol = ANY($2))`, [uid, list]);
+    _cache.delete(uid);
 }
 
 function _clearCache() { _cache.clear(); }
@@ -122,7 +151,7 @@ async function saveConfig(userId, { cashReservePct, holdings = [], releaseSymbol
     if (total > MAX_TOTAL_PCT) errors.push(`Total target is ${total}% — keep it at ${MAX_TOTAL_PCT}% or less so the swing bot has room.`);
     if (cashReservePct != null && !(cashReservePct >= 10 && cashReservePct <= 80)) errors.push('Cash reserve must be 10-80%.');
 
-    const current = await query(`SELECT symbol FROM core_holdings WHERE user_id = $1 AND active`, [uid]);
+    const current = await query(`SELECT symbol FROM core_holdings WHERE user_id = $1 AND active AND sleeve = 'core'`, [uid]);
     const currentSet = new Set(current.rows.map(r => r.symbol.toUpperCase()));
     const held = await query(`SELECT UPPER(symbol) AS symbol FROM holdings WHERE user_id = $1 AND quantity > 0`, [uid]);
     const heldSet = new Set(held.rows.map(r => r.symbol));
@@ -143,12 +172,12 @@ async function saveConfig(userId, { cashReservePct, holdings = [], releaseSymbol
     for (const h of list) {
         await query(
             `INSERT INTO core_holdings (user_id, symbol, target_pct, active) VALUES ($1, $2, $3, true)
-             ON CONFLICT (user_id, symbol) DO UPDATE SET target_pct = EXCLUDED.target_pct, active = true`,
+             ON CONFLICT (user_id, symbol) DO UPDATE SET target_pct = EXCLUDED.target_pct, active = true, sleeve = 'core'`,
             [uid, h.symbol, h.targetPct]
         );
     }
     const removed = [...currentSet].filter(x => !newSet.has(x));
-    if (removed.length) await query(`UPDATE core_holdings SET active = false WHERE user_id = $1 AND symbol = ANY($2)`, [uid, removed]);
+    if (removed.length) await query(`UPDATE core_holdings SET active = false WHERE user_id = $1 AND sleeve = 'core' AND symbol = ANY($2)`, [uid, removed]);
     if (cashReservePct != null) {
         await query(
             `INSERT INTO core_settings (user_id, cash_reserve_pct) VALUES ($1, $2)
@@ -291,6 +320,6 @@ async function getStatus(userId) {
 }
 
 module.exports = {
-    ensureTable, getCoreRows, getCoreSymbols, getSettings, setEnabled, saveConfig, getStatus,
+    ensureTable, getCoreRows, getCoreSymbols, setSatelliteSymbols, getSettings, setEnabled, saveConfig, getStatus,
     rebalanceCore, runDailyRebalance, coreSummary, _clearCache,
 };

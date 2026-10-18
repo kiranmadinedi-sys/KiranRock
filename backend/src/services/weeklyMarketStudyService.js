@@ -214,6 +214,7 @@ async function runMarketStudy({ weeks = 8, now = new Date() } = {}) {
         arms: await armForwardResults().catch(err => { logger.warn('[MarketStudy] Arm results failed', { error: err.message }); return null; }),
         insiderHistory: await require('./insiderSignalService').clusterHistoryStudy().catch(err => { logger.warn('[MarketStudy] Insider history failed', { error: err.message }); return null; }),
         gemini: await geminiNewsCheck(now).catch(err => { logger.warn('[MarketStudy] Gemini/news check failed', { error: err.message }); return null; }),
+        optionsIncome: await require('./optionsIncomeService').summary().catch(() => null),
     };
 
     await query(
@@ -402,6 +403,11 @@ function formatReport(r) {
             `Strong Bullish +4/+5: ${pct(g.strongBullish.avgPct)} (n ${g.strongBullish.n}) · Bullish: ${pct(g.bullish.avgPct)} · Neutral: ${pct(g.neutralOrNone.avgPct)}`,
             `Bearish −1/−2: ${pct(g.bearish.avgPct)} · <b>Strong Bearish ≤−3: ${pct(g.strongBearish.avgPct)}</b> (n ${g.strongBearish.n}, blocked from buying since 2026-10-17)`,
             `News sentiment ≥50: ${pct(g.newsPositive.avgPct)} vs &lt;50: ${pct(g.newsNegative.avgPct)}`);
+    }
+    if (r.optionsIncome && (r.optionsIncome.open || r.optionsIncome.done)) {
+        const o = r.optionsIncome;
+        lines.push('', '<b>7. Options income (paper, cash-secured puts)</b>',
+            `Open: ${o.open} (collateral $${Math.round(o.collateral).toLocaleString()}) · Closed: ${o.done} (${o.wins} won, ${o.assigned} assigned) · P&amp;L $${o.pnl.toFixed(2)}`);
     }
     lines.push('', '<i>Report only — trading is unchanged.</i>');
     return lines.join('\n');

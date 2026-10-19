@@ -42,6 +42,7 @@ const intradayRoutes = require('./routes/intradayRoutes');
 const cryptoTradingRoutes = require('./routes/cryptoTradingRoutes');
 const coreHoldingsRoutes = require('./routes/coreHoldingsRoutes');
 const approvalRoutes = require('./routes/approvalRoutes');
+const paperTestsRoutes = require('./routes/paperTestsRoutes');
 const performanceRoutes = require('./routes/performanceRoutes');
 const stockFeedRoutes = require('./routes/stockFeedRoutes');
 const systemRoutes = require('./routes/systemRoutes'); // Import the new system routes
@@ -198,6 +199,7 @@ app.use('/api/intraday', intradayRoutes);
 app.use('/api/crypto-trading', cryptoTradingRoutes);
 app.use('/api/core-holdings', coreHoldingsRoutes);
 app.use('/api/approvals', approvalRoutes);
+app.use('/api/paper-tests', paperTestsRoutes);
 app.use('/api/performance', performanceRoutes);
 app.use('/api/stock-feed', stockFeedRoutes);
 app.use('/api/system', systemRoutes); // Use the new system routes

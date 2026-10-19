@@ -146,7 +146,11 @@ async function rebalance(userId, now = new Date()) {
         const qty = Math.floor(perName / (pick.price * 1.01));
         if (qty < 1) { actions.push({ sym: pick.symbol, action: 'skip_price', price: pick.price }); continue; }
         try {
-            const res = await broker.buyMarket(userId, pick.symbol, qty, { executedBy: 'SATELLITE', reason: 'Satellite rebalance' });
+            // The account's swing per-order limit (paper: $500) doesn't apply: each satellite name
+            // is SATELLITE_PCT/10 of the account (~$1,070 on paper). MAX_BOT_INVESTMENT_USD still does.
+            const res = await broker.buyMarket(userId, pick.symbol, qty, {
+                executedBy: 'SATELLITE', reason: 'Satellite rebalance', safetyOptions: { enforceNotionalLimit: false },
+            });
             actions.push({ sym: pick.symbol, action: 'buy', qty: res.filledQty, price: res.filledAvgPrice, status: res.status });
         } catch (err) {
             actions.push({ sym: pick.symbol, action: 'buy_failed', error: err.message });

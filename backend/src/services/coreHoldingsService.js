@@ -206,13 +206,12 @@ async function rebalanceCore(userId) {
     let cash = Math.max(0, account.cashBalance ?? 0);
     const { cashReservePct } = await getSettings(userId);
     const reserve = equity * cashReservePct / 100; // kept free for swing trades
-    // Respect the same per-order caps brokerService.safetyCheck enforces (MAX_BOT_INVESTMENT_USD
-    // and the account's maxOrderNotional): a large target is built up over several days
-    // instead of being rejected outright.
-    const { getUserTradingControls } = require('./tradingControlService');
-    const controls = await getUserTradingControls(userId).catch(() => ({}));
-    const orderCaps = [parseFloat(process.env.MAX_BOT_INVESTMENT_USD || '5000'), controls.maxOrderNotional].filter(v => v > 0);
-    const maxOrderUsd = Math.min(...orderCaps) * 0.98;
+    // Per-order cap: the platform-wide MAX_BOT_INVESTMENT_USD only. The account's
+    // maxOrderNotional is a SWING-trade size limit (paper $500, kmadined $900) — applied to
+    // core it made SPY (~$770/share) unbuyable forever (found 2026-10-19, first live run).
+    // Core is already bounded by its target %, the cash reserve and this cap; large targets
+    // still build over several days.
+    const maxOrderUsd = parseFloat(process.env.MAX_BOT_INVESTMENT_USD || '5000') * 0.98;
     const positions = await brokerService.getPositions(userId);
     const held = Object.fromEntries(positions.map(p => [String(p.symbol).toUpperCase(), parseFloat(p.marketValue || 0)]));
     const actions = [];
@@ -233,7 +232,10 @@ async function rebalanceCore(userId) {
         const qty = price > 0 ? Math.floor(spendable / (price * 1.005)) : 0;
         if (qty < 1) { actions.push({ symbol: row.symbol, action: 'no_cash', current, target, cash, reserve }); continue; }
         try {
-            const res = await brokerService.buyMarket(userId, row.symbol, qty, { executedBy: 'CORE', reason: 'Core holding rebalance' });
+            const res = await brokerService.buyMarket(userId, row.symbol, qty, {
+                executedBy: 'CORE', reason: 'Core holding rebalance',
+                safetyOptions: { enforceNotionalLimit: false }, // swing per-order limit doesn't apply to core (see maxOrderUsd)
+            });
             const spent = (res.filledQty || 0) * (res.filledAvgPrice || price);
             cash -= spent;
             actions.push({ symbol: row.symbol, action: 'bought', qty: res.filledQty, price: res.filledAvgPrice, status: res.status, target });

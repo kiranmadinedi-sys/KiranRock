@@ -61,6 +61,16 @@ describe('coreHoldingsService', () => {
         expect(broker.buyMarket).toHaveBeenCalledWith('u1', 'SPY', 18, expect.any(Object));
     });
 
+    // 2026-10-19 first live run: paper's $500 swing per-order limit made SPY ($770) unbuyable.
+    test('the swing per-order limit does not apply to core; buys skip that check', async () => {
+        coreRows([{ symbol: 'SPY', targetPct: 40 }]);
+        broker.getAccountInfo.mockResolvedValue({ portfolioValue: 10000, cashBalance: 9000 });
+        broker.getPositions.mockResolvedValue([]);
+        dataProvider.getQuote.mockResolvedValue({ price: 770 });
+        broker.buyMarket.mockResolvedValue({ filledQty: 5, filledAvgPrice: 770, status: 'filled' });
+        await core.rebalanceCore('u1');
+        expect(broker.buyMarket).toHaveBeenCalledWith('u1', 'SPY', 5, expect.objectContaining({ safetyOptions: { enforceNotionalLimit: false } }));
+    });
     test('rebalance is limited by the cash reserve', async () => {
         coreRows([{ symbol: 'SPY', targetPct: 50 }]);
         broker.getAccountInfo.mockResolvedValue({ portfolioValue: 10000, cashBalance: 3000 }); // swing already uses most cash

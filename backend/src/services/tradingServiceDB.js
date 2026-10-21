@@ -100,8 +100,11 @@ const executeBuyOrder = async (userId, symbol, quantity, executedBy = 'MANUAL', 
             
             if (existingHolding) {
                 // Update existing holding
-                const totalQuantity = existingHolding.quantity + quantity;
-                const totalCostBasis = (existingHolding.average_price * existingHolding.quantity) + totalCost;
+                // pg returns NUMERIC as strings — "1.00000000" + 16 concatenated instead of adding,
+                // which corrupted average_price whenever a holding was ADDED to (first seen
+                // 2026-10-20 on core buys; the swing bot never adds to a position).
+                const totalQuantity = parseFloat(existingHolding.quantity) + parseFloat(quantity);
+                const totalCostBasis = (parseFloat(existingHolding.average_price) * parseFloat(existingHolding.quantity)) + parseFloat(totalCost);
                 const newAveragePrice = totalCostBasis / totalQuantity;
                 
                 await client.query(`

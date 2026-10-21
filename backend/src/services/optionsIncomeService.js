@@ -64,6 +64,7 @@ async function ensureTable() {
             closed_at       TIMESTAMPTZ,
             pnl             NUMERIC
         )`);
+    await query(`ALTER TABLE options_income_trades ADD COLUMN IF NOT EXISTS next_earnings DATE`);
     _ready = true;
 }
 
@@ -120,6 +121,32 @@ function choosePut(snapshots, today) {
     return cands[0] || null;
 }
 
+/**
+ * Next earnings date for one symbol from Finnhub (2026-10-21: the scan's daysToEarnings is null for
+ * every symbol, so SHAK sold a put straight across its Nov 5 report). Per-symbol on purpose — the
+ * range calendar silently truncates at 1500 rows in earnings season. Cached per symbol per day.
+ * Returns undefined when the lookup fails — callers must then skip (fail closed); null = none in window.
+ */
+const _earnCache = new Map();
+async function nextEarnings(symbol, now = new Date()) {
+    const day = now.toISOString().slice(0, 10);
+    const hit = _earnCache.get(symbol);
+    if (hit && hit.day === day) return hit.date;
+    try {
+        const to = new Date(now.getTime() + (CFG.maxDte + 5) * 86400000).toISOString().slice(0, 10);
+        const resp = await axios.get('https://finnhub.io/api/v1/calendar/earnings', {
+            params: { from: day, to, symbol, token: process.env.FINNHUB_KEY }, timeout: 15000 });
+        const rows = resp.data?.earningsCalendar;
+        if (!Array.isArray(rows)) throw new Error('bad earnings response');
+        const date = rows.map(e => e.date).filter(Boolean).sort()[0] || null;
+        _earnCache.set(symbol, { day, date });
+        return date;
+    } catch (err) {
+        logger.warn('[OptionsIncome] Earnings lookup failed — skipping', { symbol, error: err.message });
+        return undefined;
+    }
+}
+
 /** Quality underlyings from the latest complete scan. */
 async function candidateUnderlyings() {
     const LATEST_DATE_SQL = require('./precomputedUniverseService').buildLatestTradingScanDateSql();
@@ -157,6 +184,12 @@ async function runEntries(userId, now = new Date()) {
         let pick;
         try { pick = await pickPut(client, u.symbol, u.price, now); } catch (err) { continue; }
         if (!pick) continue;
+        const nextEarn = await nextEarnings(u.symbol, now);
+        if (nextEarn === undefined) continue;
+        if (nextEarn && nextEarn <= pick.expiry) {
+            logger.info('[OptionsIncome] Skipped — earnings before expiry', { symbol: u.symbol, earnings: nextEarn, expiry: pick.expiry });
+            continue;
+        }
         const need = pick.strike * 100;
         if (collateral + need > maxCollateralTotal()) continue;
         const limit = roundTick(pick.mid);
@@ -165,9 +198,9 @@ async function runEntries(userId, now = new Date()) {
                 symbol: pick.contract, qty: '1', side: 'sell', type: 'limit', limit_price: String(limit),
                 time_in_force: 'day', position_intent: 'sell_to_open',
             }, { headers: client.headers, timeout: 15000 })).data;
-            await query(`INSERT INTO options_income_trades (user_id, contract, underlying, strike, expiry, open_order_id, entry_premium, entry_delta, collateral)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-                [String(userId), pick.contract, u.symbol, pick.strike, pick.expiry, o.id, limit, pick.delta, need]);
+            await query(`INSERT INTO options_income_trades (user_id, contract, underlying, strike, expiry, open_order_id, entry_premium, entry_delta, collateral, next_earnings)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+                [String(userId), pick.contract, u.symbol, pick.strike, pick.expiry, o.id, limit, pick.delta, need, nextEarn]);
             logger.info('[OptionsIncome] Sell-to-open placed', { userId, contract: pick.contract, limit, delta: pick.delta, dte: pick.dte, premiumPct: pick.premiumPct.toFixed(2) });
             opened.push({ contract: pick.contract, limit, collateral: need });
             held.add(u.symbol); slots--; collateral += need;
@@ -284,4 +317,4 @@ async function summary() {
     return r.rows[0];
 }
 
-module.exports = { CFG, choosePut, candidateUnderlyings, runEntries, runManagement, runTick, summary, ensureTable };
+module.exports = { CFG, choosePut, nextEarnings, candidateUnderlyings, runEntries, runManagement, runTick, summary, ensureTable };

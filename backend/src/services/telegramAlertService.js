@@ -464,6 +464,7 @@ ${holdingsLine}
 ${totalProfit > 0 ? '🎉 Profitable day!' : totalProfit < 0 ? '💪 Tomorrow is another day' : '➡️ Break even'}
 `;
 
+    await require('./reportArchiveService').save({ kind: 'daily_summary', title: `Daily trading summary — ${display}`, body: message, userId });
     await sendToUserAndAdmin(chatId, message);
 }
 

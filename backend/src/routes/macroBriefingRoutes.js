@@ -48,6 +48,8 @@ router.get('/macro-briefing', async (req, res) => {
         return res.status(500).json({ ok: false, error: 'storage_failed' });
     }
 
+    await require('../services/reportArchiveService').save({ kind: 'macro_briefing', title: `Macro briefing — ${riskLevel}`, body: message });
+
     let telegramSent = false;
     if (ADMIN_CHAT_ID) {
         telegramSent = await telegramAlertService.sendTelegramMessage(ADMIN_CHAT_ID, message).catch(() => false);

@@ -164,7 +164,9 @@ async function runWeeklyPromotion(now = new Date()) {
     }
 
     const { sendAdminMessage } = require('./telegramAlertService');
-    await sendAdminMessage(`<b>🚦 Weekly promotion check</b>\n${lines.join('\n') || 'Nothing to report yet.'}\n\n<i>Paper changes are automatic; live changes need your approval.</i>`, 'HTML')
+    const _promoText = `<b>🚦 Weekly promotion check</b>\n${lines.join('\n') || 'Nothing to report yet.'}\n\n<i>Paper changes are automatic; live changes need your approval.</i>`;
+    await require('./reportArchiveService').save({ kind: 'promotion_check', body: _promoText, format: 'html', adminOnly: true });
+    await sendAdminMessage(_promoText, 'HTML')
         .catch(err => logger.warn('[Promotion] Telegram send failed', { error: err.message }));
     logger.info('[Promotion] Weekly promotion check done', { arms, best });
     return { arms, best, lines };

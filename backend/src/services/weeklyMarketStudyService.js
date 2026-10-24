@@ -438,6 +438,7 @@ async function runWeeklyReport() {
     // 2026-10-24: one strategy per week on a fixed rotation, with its decision numbers.
     const review = await require('./weeklyStrategyReviewService').buildSection().catch(() => null);
     if (review) text = text.replace('\n\n<i>Report only', `\n\n${review}\n\n<i>Report only`);
+    await require('./reportArchiveService').save({ kind: 'market_study', title: 'Saturday market study & strategy review', body: text, format: 'html' });
     await sendAdminMessage(text, 'HTML').catch(err =>
         logger.warn('[MarketStudy] Telegram send failed', { error: err.message })
     );

@@ -294,13 +294,18 @@ async function sendWeeklyPnlReports({ now = new Date(), deps = {} } = {}) {
                     text += `\n\n🏛️ Core holdings (long-term, separate from swing): $${core.value.toFixed(0)} — unrealized ${core.unrealizedPl >= 0 ? '+' : ''}$${core.unrealizedPl.toFixed(2)} (${pct}%) · ${core.positions.map(p => p.symbol).join(', ')}`;
                 }
                 await alertService.sendTelegramMessage(chatId, text);
+                await require('./reportArchiveService').save({ kind: 'pnl_scoreboard', title: `Weekly $/day scoreboard — ${e.username}`, body: text, userId: e.userId });
                 sent++;
             }
         } catch (err) {
             logger.warn('[DailyPnl] Send failed for user', { userId: e.userId, err: err.message });
         }
     }
-    if (entries.length > 0) await alertService.sendAdminMessage(formatCombinedMessage(entries));
+    if (entries.length > 0) {
+        const combined = formatCombinedMessage(entries);
+        await require('./reportArchiveService').save({ kind: 'pnl_scoreboard', title: 'Weekly $/day scoreboard — all accounts', body: combined, adminOnly: true });
+        await alertService.sendAdminMessage(combined);
+    }
     logger.info('[DailyPnl] Weekly $/day reports sent', { accounts: entries.length, userMessages: sent });
     return { accounts: entries.length, userMessages: sent, entries };
 }

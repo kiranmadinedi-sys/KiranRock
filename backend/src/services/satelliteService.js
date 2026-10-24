@@ -194,8 +194,14 @@ async function performance() {
     await ensureTables();
     const r = await query(`SELECT as_of::text AS d, picks FROM satellite_rebalances ORDER BY as_of`);
     if (!r.rows.length) return null;
-    const close = async (sym, d) => (await query(`SELECT c::float AS c FROM history_bars WHERE symbol = $1 AND d <= $2::date ORDER BY d DESC LIMIT 1`, [sym, d])).rows[0]?.c;
-    const latest = (await query(`SELECT MAX(d)::text AS d FROM history_bars WHERE symbol = 'SPY'`)).rows[0].d;
+    // daily_bars first (refreshed daily); history_bars only grows on Saturdays, which made this
+    // read +0% vs +0% all week (2026-10-24).
+    const close = async (sym, d) => (await query(
+        `SELECT c FROM (SELECT close::float AS c, timestamp::date AS d FROM daily_bars WHERE symbol = $1 AND timestamp::date <= $2::date
+                        UNION ALL SELECT c::float, d FROM history_bars WHERE symbol = $1 AND d <= $2::date) x
+         ORDER BY d DESC LIMIT 1`, [sym, d])).rows[0]?.c;
+    const latest = (await query(
+        `SELECT GREATEST((SELECT MAX(timestamp)::date FROM daily_bars WHERE symbol = 'SPY'), (SELECT MAX(d) FROM history_bars WHERE symbol = 'SPY'))::text AS d`)).rows[0].d;
     let basket = 1, spy = 1;
     for (let i = 0; i < r.rows.length; i++) {
         const from = r.rows[i].d, to = r.rows[i + 1]?.d || latest;

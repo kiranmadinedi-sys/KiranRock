@@ -434,7 +434,10 @@ async function runWeeklyReport() {
     const r = await runMarketStudy();
     if (r.skipped) return r;
     const { sendAdminMessage } = require('./telegramAlertService');
-    const text = history ? formatReport(r).replace('\n\n<i>Report only', `\n\n${history}\n\n<i>Report only`) : formatReport(r);
+    let text = history ? formatReport(r).replace('\n\n<i>Report only', `\n\n${history}\n\n<i>Report only`) : formatReport(r);
+    // 2026-10-24: one strategy per week on a fixed rotation, with its decision numbers.
+    const review = await require('./weeklyStrategyReviewService').buildSection().catch(() => null);
+    if (review) text = text.replace('\n\n<i>Report only', `\n\n${review}\n\n<i>Report only`);
     await sendAdminMessage(text, 'HTML').catch(err =>
         logger.warn('[MarketStudy] Telegram send failed', { error: err.message })
     );

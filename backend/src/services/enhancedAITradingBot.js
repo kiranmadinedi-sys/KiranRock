@@ -1318,6 +1318,15 @@ async function getDaysToEarnings(symbol, yahooFinanceInstance = null) {
     const cached = cacheService.get(cacheKey);
     if (cached !== null) return cached;
 
+    // Finnhub first (2026-10-24): Yahoo calendarEvents is 429-blocked, which made this return
+    // null for every symbol and silently disabled the earnings guards. Yahoo stays as fallback.
+    try {
+        const date = await require('../utils/finnhubEarnings').nextEarningsDate(symbol, 60);
+        const days = date ? Math.ceil((new Date(date + 'T13:30:00Z') - new Date()) / (1000 * 60 * 60 * 24)) : null;
+        cacheService.set(cacheKey, days, 6 * 60 * 60 * 1000);
+        return days;
+    } catch (_finnhubErr) { /* fall through to Yahoo */ }
+
     try {
         // Route through yfClient (not the raw yahoo-finance2 instance) unless an
         // explicit override is passed — gets its own caching plus the shared
@@ -5065,8 +5074,20 @@ async function manageExistingPositions(userId) {
         // stop repair, no exits. If the core list can't be read this throws into the catch
         // below and the pass is skipped, rather than treating a core position as a swing trade.
         const coreSymbols = await coreHoldings.getCoreSymbols(userId);
-        const holdings = ((await holdingsDb.getUserHoldings(userId)) || [])
-            .filter(h => !coreSymbols.has(String(h.symbol).toUpperCase()));
+        const _allHoldings = (await holdingsDb.getUserHoldings(userId)) || [];
+        const holdings = _allHoldings.filter(h => !coreSymbols.has(String(h.symbol).toUpperCase()));
+        // 2026-10-24: core/satellite rows were filtered out before the per-holding price refresh
+        // below, so their current_price/gain_loss stayed frozen at the buy price (satellite showed
+        // $0.00 P&L while the broker had -$452). Price-only refresh here — still no stops/exits.
+        for (const h of _allHoldings.filter(h => coreSymbols.has(String(h.symbol).toUpperCase()))) {
+            try {
+                const px = await tradingServiceDB.getCurrentPrice(h.symbol);
+                if (!px) continue;
+                const qty = parseFloat(h.quantity), cost = parseFloat(h.average_price) * qty, mv = px * qty;
+                await query(`UPDATE holdings SET current_price = $1, market_value = $2, gain_loss = $3, gain_loss_percent = $4, updated_at = NOW()
+                             WHERE user_id = $5 AND symbol = $6`, [px, mv, mv - cost, cost > 0 ? ((mv - cost) / cost) * 100 : 0, userId, h.symbol]);
+            } catch (_corePx) {}
+        }
         const exitProfile = await require('./strategySettingsService').getExitProfile(userId);
         
         if (!holdings || holdings.length === 0) {

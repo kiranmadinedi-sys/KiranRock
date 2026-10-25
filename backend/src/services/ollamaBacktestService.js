@@ -407,7 +407,7 @@ async function getOllamaInsights(stats) {
                 },
                 { role: 'user', content: prompt }
             ],
-            options: { temperature: 0.25, num_predict: 800 },
+            options: { temperature: 0.25, num_predict: 800, num_ctx: parseInt(process.env.OLLAMA_NUM_CTX || '16384', 10) },
         });
 
         const http = require('http');

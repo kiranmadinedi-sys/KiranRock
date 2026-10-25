@@ -178,7 +178,13 @@ async function _post(path, body, priority = 'batch', maxWaitMs = null) {
     }
 }
 
+// 2026-10-25: no request set num_ctx, so Ollama loaded qwen3.8:27b at its 262K maximum —
+// ~41 GB private memory on a CPU-only box, heavy paging. Prompts need a few thousand tokens.
+// One value for every call (a different num_ctx forces a model reload).
+const OLLAMA_NUM_CTX = parseInt(process.env.OLLAMA_NUM_CTX || '16384', 10);
+
 async function _rawPost(path, body) {
+    if (body && typeof body === 'object') body = { ...body, options: { num_ctx: OLLAMA_NUM_CTX, ...(body.options || {}) } };
     const url     = new URL(path, BASE_URL);
     const payload = JSON.stringify(body);
     const isHttps = url.protocol === 'https:';

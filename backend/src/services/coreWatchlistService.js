@@ -1,19 +1,23 @@
 /**
- * Core watchlist (2026-10-26) — quality names the user MAY add to core, with a daily
- * "today's entry" status. Information only: nothing here places an order.
+ * Core watchlist (2026-10-26) — quality names the user MAY add to core, with a daily status.
+ * Information only: nothing here places an order.
  *
- * Why the statuses are about avoiding bad timing rather than predicting bounces: the quality-dip
- * validation (qualityDipBacktestService, 2026-10-26) found buying these names after a 10-20% dip did
- * no better than buying them on a random day of the same year. So "Good entry" just means "on sale
- * and nothing wrong today"; the real value is the Wait/Review flags (earnings imminent, strongly
- * bearish news, 30%+ collapse, shrinking revenue). Every status is stored daily so its forward
- * returns can be measured (getOutcomes) before anyone trusts it.
+ * Statuses deliberately never say "buy" (review feedback 2026-10-26): the quality-dip validation
+ * (qualityDipBacktestService) found buying after a 10-20% dip did no better than a random day of the
+ * same year, so a price drop alone is never presented as a good entry. A dip is labelled by what we
+ * can actually check — valuation vs the company's own usual P/E, growth, news, earnings timing — and
+ * the system fails closed ("Data unavailable") when prices are stale or earnings can't be verified.
+ * Every status is stored daily so its forward returns can be measured (getOutcomes).
  */
 const { query } = require('../config/database');
 const { logger } = require('../utils/logger');
 
 const DEFAULT_LIST = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'MA', 'NVDA', 'AVGO', 'COST', 'JPM', 'LLY'];
-const STATUS_ORDER = ['Good entry', 'Fine to buy', 'Wait', 'Review first', 'Avoid today'];
+const STATUS_ORDER = ['Dip — valuation OK', 'Dip — review fundamentals', 'Dip — but pricey', 'No dip',
+                      'Reassess', 'Wait', 'Review first', 'Avoid today', 'Data unavailable'];
+const PRICEY_PCT = 10;     // P/E more than 10% above its own 5-year median
+const STALE_DAYS = 4;      // last close older than this (calendar days) → no recommendation
+const SOURCES = 'Prices: Alpaca daily bars · Earnings & valuation: Finnhub · News: Gemini (nightly scan)';
 
 let _ready = false;
 async function ensureTables() {
@@ -28,28 +32,42 @@ async function ensureTables() {
 }
 
 const todayET = (now = new Date()) => now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+const dayDiff = (a, b) => Math.round((new Date(`${a}T12:00:00Z`) - new Date(`${b}T12:00:00Z`)) / 86400000);
 
 /**
- * Pure: status + reasons from the facts gathered for one symbol.
- * f = { ddPct, above200, gemini, daysToEarnings, revenueGrowth }
+ * Pure: status + reasons. f = { ddPct, above200, gemini, staleDays, earningsKnown, daysToEarnings,
+ * daysSinceEarnings, lastEarningsDate, valuation: { peVsUsualPct, revenueGrowthPct, epsGrowthPct } | null }
  */
 function classify(f) {
-    const reasons = [];
+    const v = f.valuation || {};
+    if (f.staleDays == null || f.staleDays > STALE_DAYS) return { status: 'Data unavailable', reasons: [`price data is ${f.staleDays ?? '?'} days old — no recommendation`] };
+    if (!f.earningsKnown) return { status: 'Data unavailable', reasons: ['earnings date could not be verified — no recommendation'] };
     if (f.gemini != null && f.gemini <= -3) return { status: 'Avoid today', reasons: [`strongly bearish news (Gemini ${f.gemini})`] };
     if (f.daysToEarnings != null && f.daysToEarnings >= 0 && f.daysToEarnings <= 5) {
-        return { status: 'Wait', reasons: [`earnings in ${f.daysToEarnings} day${f.daysToEarnings === 1 ? '' : 's'} — buy after the report`] };
+        return { status: 'Wait', reasons: [`earnings in ${f.daysToEarnings} day${f.daysToEarnings === 1 ? '' : 's'} — reassess results, guidance and valuation after the report`] };
+    }
+    if (f.daysSinceEarnings != null && f.daysSinceEarnings <= 3) {
+        return { status: 'Reassess', reasons: [`just reported (${f.lastEarningsDate}) — check results and guidance before deciding`] };
     }
     if (f.ddPct >= 30) return { status: 'Review first', reasons: [`down ${f.ddPct.toFixed(0)}% from its 52-week high — check whether the business changed`] };
-    if (f.ddPct >= 10 && f.revenueGrowth != null && f.revenueGrowth < 0) {
-        return { status: 'Review first', reasons: [`down ${f.ddPct.toFixed(0)}% with shrinking revenue (${(f.revenueGrowth * 100).toFixed(1)}%)`] };
+    if (f.ddPct >= 10 && v.revenueGrowthPct != null && v.revenueGrowthPct < 0) {
+        return { status: 'Review first', reasons: [`down ${f.ddPct.toFixed(0)}% with shrinking revenue (${v.revenueGrowthPct.toFixed(1)}% YoY)`] };
     }
+    if (f.ddPct >= 10 && v.epsGrowthPct != null && v.epsGrowthPct < -10) {
+        return { status: 'Review first', reasons: [`down ${f.ddPct.toFixed(0)}% with falling earnings (EPS ${v.epsGrowthPct.toFixed(0)}% YoY)`] };
+    }
+    const valNote = v.peVsUsualPct == null ? 'no valuation data'
+        : v.peVsUsualPct <= -10 ? `P/E ${Math.abs(v.peVsUsualPct).toFixed(0)}% below its usual`
+        : v.peVsUsualPct > PRICEY_PCT ? `P/E ${v.peVsUsualPct.toFixed(0)}% above its usual`
+        : 'P/E around its usual';
     if (f.ddPct >= 10) {
-        reasons.push(`${f.ddPct.toFixed(0)}% below its 52-week high`);
-        if (f.above200 === false) reasons.push('below its 200-day average — consider buying in stages');
-        return { status: 'Good entry', reasons };
+        const reasons = [`${f.ddPct.toFixed(0)}% below its 52-week high`, valNote];
+        if (f.above200 === false) reasons.push('below its 200-day average — stages, not all at once');
+        if (v.peVsUsualPct == null) return { status: 'Dip — review fundamentals', reasons };
+        if (v.peVsUsualPct > PRICEY_PCT) return { status: 'Dip — but pricey', reasons };
+        return { status: 'Dip — valuation OK', reasons };
     }
-    reasons.push(f.ddPct >= 5 ? `${f.ddPct.toFixed(0)}% below its high` : 'near its 52-week high');
-    return { status: 'Fine to buy', reasons };
+    return { status: 'No dip', reasons: [f.ddPct >= 5 ? `${f.ddPct.toFixed(0)}% below its high` : 'near its 52-week high', valNote] };
 }
 
 async function _bars(symbol) {
@@ -68,35 +86,42 @@ async function _bars(symbol) {
 }
 
 async function _facts(symbol, now) {
+    const fh = require('../utils/finnhubEarnings');
     const bars = await _bars(symbol);
     if (bars.length < 200) throw new Error('not enough price history');
     const closes = bars.map(b => b.c);
     const price = closes[closes.length - 1];
-    const hi52 = Math.max(...closes.slice(-252));
+    const window = bars.slice(-252);
+    const hiBar = window.reduce((m, b) => (b.c > m.c ? b : m), window[0]);
     const sma200 = closes.slice(-200).reduce((s, v) => s + v, 0) / 200;
+    const asOf = String(bars[bars.length - 1].d).slice(0, 10);
+    const today = todayET(now);
     const scan = (await query(
-        `SELECT ai_score::float AS score,
+        `SELECT ai_score::float AS score, analysis_date::text AS d,
                 (SELECT substring(l from '^Gemini: ([+-]?[0-9]+)')::int FROM jsonb_array_elements_text(metadata->'scoringLog') l WHERE l LIKE 'Gemini:%' LIMIT 1) AS gem
          FROM daily_universe_analysis WHERE symbol = $1 ORDER BY analysis_date DESC LIMIT 1`, [symbol])).rows[0] || {};
-    const fund = (await query(`SELECT revenue_growth::float AS rg FROM fundamentals_cache WHERE symbol = $1`, [symbol]).catch(() => ({ rows: [] }))).rows[0] || {};
-    let daysToEarnings = null, earningsDate = null, earningsKnown = false;
+    let daysToEarnings = null, earningsDate = null, earningsKnown = false, lastEarningsDate = null, daysSinceEarnings = null;
     try {
-        earningsDate = await require('../utils/finnhubEarnings').nextEarningsDate(symbol, 120, now);
-        earningsKnown = true; // null here = no report in the next 120 days, not "unknown"
-        if (earningsDate) daysToEarnings = Math.max(0, Math.round((new Date(`${earningsDate}T12:00:00Z`) - new Date(`${todayET(now)}T12:00:00Z`)) / 86400000));
-    } catch (_) { /* unknown earnings → shown as unknown, not treated as safe */ }
+        earningsDate = await fh.nextEarningsDate(symbol, 120, now);       // null = none in the next 120 days
+        lastEarningsDate = await fh.lastEarningsDate(symbol, 5, now);
+        earningsKnown = true;
+        if (earningsDate) daysToEarnings = Math.max(0, dayDiff(earningsDate, today));
+        if (lastEarningsDate) daysSinceEarnings = dayDiff(today, lastEarningsDate);
+    } catch (_) { /* fail closed in classify() */ }
+    let valuation = null;
+    try { valuation = await fh.valuationSnapshot(symbol); } catch (_) { /* shown as "no valuation data" */ }
     return {
-        price, hi52, ddPct: (1 - price / hi52) * 100, above200: price >= sma200, sma200,
-        ret21Pct: closes.length > 21 ? (price / closes[closes.length - 22] - 1) * 100 : null,
-        score: scan.score ?? null, gemini: scan.gem ?? null, revenueGrowth: fund.rg ?? null,
-        daysToEarnings, earningsDate, earningsKnown, asOf: String(bars[bars.length - 1].d).slice(0, 10),
+        price, hi52: hiBar.c, hi52Date: String(hiBar.d).slice(0, 10), ddPct: (1 - price / hiBar.c) * 100,
+        above200: price >= sma200, sma200, asOf, staleDays: dayDiff(today, asOf),
+        score: scan.score ?? null, gemini: scan.gem ?? null, newsAsOf: scan.d ?? null,
+        daysToEarnings, earningsDate, lastEarningsDate, daysSinceEarnings, earningsKnown, valuation,
+        sources: SOURCES, checkedAt: now.toISOString(),
     };
 }
 
 async function evaluate(symbol, now = new Date()) {
     const f = await _facts(symbol, now);
     const { status, reasons } = classify(f);
-    if (!f.earningsKnown) reasons.push('earnings date unknown — check before buying');
     return { symbol, status, reasons, ...f };
 }
 
@@ -140,7 +165,7 @@ async function getWatchlist(userId) {
 }
 
 /** 10:15 AM ET on trading days: evaluate every watched symbol once, store, archive + notify each user. */
-async function runDaily(now = new Date()) {
+async function runDaily(now = new Date(), { notify = true } = {}) {
     try {
         const today = todayET(now);
         const dow = new Date(`${today}T12:00:00Z`).getUTCDay();
@@ -164,16 +189,16 @@ async function runDaily(now = new Date()) {
         const alert = require('./telegramAlertService');
         for (const u of users) {
             const mine = (await getList(u)).map(s => results[s]).filter(Boolean);
-            const good = mine.filter(r => r.status === 'Good entry');
-            const wait = mine.filter(r => ['Wait', 'Review first', 'Avoid today'].includes(r.status));
+            const good = mine.filter(r => r.status === 'Dip — valuation OK');
+            const wait = mine.filter(r => ['Wait', 'Reassess', 'Review first', 'Avoid today', 'Data unavailable'].includes(r.status));
             const text = [
                 `🏛️ *Core watchlist — ${today}*`,
-                good.length ? `On sale, no red flags: ${good.map(r => `${r.symbol} (−${r.ddPct.toFixed(0)}%)`).join(', ')}` : 'Nothing on sale today.',
+                good.length ? `Dip with reasonable valuation (review before buying): ${good.map(r => `${r.symbol} (−${r.ddPct.toFixed(0)}%, ${r.reasons[1]})`).join(', ')}` : 'No dip with reasonable valuation today.',
                 wait.length ? `Hold off: ${wait.map(r => `${r.symbol} (${r.reasons[0]})`).join('; ')}` : '',
-                '_Suggestions only — you decide. Buying these any day has historically done as well as waiting for dips._',
+                '_Suggestions only — you decide. In our 2020–2026 test, buying on dips did no better than buying on any day; valuation is a rough check vs the company\'s own usual P/E._',
             ].filter(Boolean).join('\n');
             await require('./reportArchiveService').save({ kind: 'core_watchlist', title: `Core watchlist — ${good.length} on sale`, body: text, userId: u });
-            if (good.length) {
+            if (notify && good.length) {
                 const chatId = await alert.getUserTelegramChatId(u).catch(() => null);
                 if (chatId) await alert.sendTelegramMessage(chatId, text).catch(() => {});
             }

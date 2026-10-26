@@ -110,7 +110,7 @@ async function lookupAsset(symbol) {
         if (a.class !== 'us_equity' || !a.tradable) throw Object.assign(new Error(`${symbol} (${a.name}) is not a tradable US stock or ETF.`), { status: 400 });
         return { name: a.name, exchange: a.exchange, fractionable: !!a.fractionable };
     } catch (err) {
-        if (err.status) throw err;
+        // Check the HTTP response first: axios errors carry their own `status` too.
         if (err.response?.status === 404) throw Object.assign(new Error(`${symbol}: no such US stock or ETF — check the ticker.`), { status: 400 });
         throw err;
     }

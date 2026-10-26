@@ -3,6 +3,7 @@
 import React from 'react';
 
 import CoreHoldingsView from '../components/CoreHoldingsView';
+import CoreWatchlist from '../components/CoreWatchlist';
 
 export default function CoreHoldingsPage() {
     return (
@@ -19,6 +20,7 @@ export default function CoreHoldingsPage() {
                 </div>
 
                 <CoreHoldingsView />
+                <CoreWatchlist />
             </main>
         </div>
     );

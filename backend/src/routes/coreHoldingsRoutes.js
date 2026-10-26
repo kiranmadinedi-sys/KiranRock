@@ -52,4 +52,19 @@ router.put('/config', async (req, res) => {
     }
 });
 
+/** Core watchlist (2026-10-26) — suggestions only, never places orders. */
+const watchlist = require('./../services/coreWatchlistService');
+router.get('/watchlist', async (req, res) => {
+    try { res.json({ rows: await watchlist.getWatchlist(req.userId) }); }
+    catch (error) { res.status(500).json({ error: error.message }); }
+});
+router.post('/watchlist', async (req, res) => {
+    try { await watchlist.addSymbol(req.userId, req.body?.symbol); res.json({ rows: await watchlist.getWatchlist(req.userId) }); }
+    catch (error) { res.status(400).json({ error: error.message }); }
+});
+router.delete('/watchlist/:symbol', async (req, res) => {
+    try { await watchlist.removeSymbol(req.userId, req.params.symbol); res.json({ rows: await watchlist.getWatchlist(req.userId) }); }
+    catch (error) { res.status(400).json({ error: error.message }); }
+});
+
 module.exports = router;

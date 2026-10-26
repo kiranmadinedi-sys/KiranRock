@@ -30,6 +30,7 @@ let morningCatchupJob       = null;
 let premarketJob            = null;
 let gapAlertJob             = null;
 let premarketSignalJob      = null;
+let coreWatchlistJob        = null;
 let dynamicUniverseJob      = null;
 let intradayJob             = null;
 let intradayMoverJob        = null;
@@ -40,6 +41,7 @@ const EVENING_CRON           = '0 20 * * 1-5';
 const NIGHTLY_SCAN_CRON      = '30 16 * * 1-5'; // 4:30 PM — dedicated nightly AI scan, runs ~75 min
 const MORNING_CATCHUP_CRON   = '0 8 * * 1-5';   // 8:00 AM — catch-up if prior-night scan was incomplete
 const PREMARKET_CRON         = '30 7 * * 1-5';
+const CORE_WATCHLIST_CRON    = '15 10 * * 1-5'; // 10:15 AM — core watchlist entry statuses (2026-10-26)
 const PREMARKET_SIGNAL_CRON  = '5 9 * * 1-5';   // 9:05 AM — overnight Asia/Europe/futures + event-day check (2026-10-26)
 const GAP_ALERT_CRON         = '30 8 * * 1-5';  // 8:30 AM — pre-market gap alert (~60 min before open)
 const DYNAMIC_UNIVERSE_CRON  = '45 8 * * 1-5';  // 8:45 AM — build scan universe before 9:30 open
@@ -298,6 +300,7 @@ function startAssetUniverseScheduler() {
     nightlyScanJob     = cron.schedule(NIGHTLY_SCAN_CRON,      runNightlyUniverseScanJob,    CRON_TZ);
     morningCatchupJob  = cron.schedule(MORNING_CATCHUP_CRON,   runMorningCatchupScan,        CRON_TZ);
     premarketJob       = cron.schedule(PREMARKET_CRON,         runPremarketRefresh,          CRON_TZ);
+    coreWatchlistJob   = cron.schedule(CORE_WATCHLIST_CRON, () => { require('./coreWatchlistService').runDaily(); }, CRON_TZ);
     premarketSignalJob = cron.schedule(PREMARKET_SIGNAL_CRON, () => { require('./premarketSignalService').runPremarketCheck(); }, CRON_TZ);
     gapAlertJob        = cron.schedule(GAP_ALERT_CRON,         () => {
         runPremarketGapAlert().catch(err =>
@@ -436,9 +439,9 @@ function startAssetUniverseScheduler() {
 
 function stopAssetUniverseScheduler() {
     schedulerActive = false;
-    [afterCloseJob, eveningJob, nightlyScanJob, morningCatchupJob, premarketJob, premarketSignalJob, gapAlertJob, dynamicUniverseJob, intradayJob, intradayMoverJob]
+    [afterCloseJob, eveningJob, nightlyScanJob, morningCatchupJob, premarketJob, premarketSignalJob, coreWatchlistJob, gapAlertJob, dynamicUniverseJob, intradayJob, intradayMoverJob]
         .forEach(j => j?.stop());
-    afterCloseJob = eveningJob = nightlyScanJob = morningCatchupJob = premarketJob = premarketSignalJob = gapAlertJob = intradayJob = intradayMoverJob = null;
+    afterCloseJob = eveningJob = nightlyScanJob = morningCatchupJob = premarketJob = premarketSignalJob = coreWatchlistJob = gapAlertJob = intradayJob = intradayMoverJob = null;
     logger.info('[AssetUniverseScheduler] Stopped');
 }
 

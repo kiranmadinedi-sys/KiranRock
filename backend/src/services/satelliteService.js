@@ -197,11 +197,11 @@ async function performance() {
     // daily_bars first (refreshed daily); history_bars only grows on Saturdays, which made this
     // read +0% vs +0% all week (2026-10-24).
     const close = async (sym, d) => (await query(
-        `SELECT c FROM (SELECT close::float AS c, timestamp::date AS d FROM daily_bars WHERE symbol = $1 AND timestamp::date <= $2::date
-                        UNION ALL SELECT c::float, d FROM history_bars WHERE symbol = $1 AND d <= $2::date) x
-         ORDER BY d DESC LIMIT 1`, [sym, d])).rows[0]?.c;
+        `SELECT c FROM (SELECT close::float AS c, (timestamp AT TIME ZONE 'UTC')::date AS d, 1 AS pri FROM daily_bars WHERE symbol = $1 AND (timestamp AT TIME ZONE 'UTC')::date <= $2::date
+                        UNION ALL SELECT c::float, d, 0 AS pri FROM history_bars WHERE symbol = $1 AND d <= $2::date) x
+         ORDER BY d DESC, pri LIMIT 1`, [sym, d])).rows[0]?.c;
     const latest = (await query(
-        `SELECT GREATEST((SELECT MAX(timestamp)::date FROM daily_bars WHERE symbol = 'SPY'), (SELECT MAX(d) FROM history_bars WHERE symbol = 'SPY'))::text AS d`)).rows[0].d;
+        `SELECT GREATEST((SELECT MAX(timestamp AT TIME ZONE 'UTC')::date FROM daily_bars WHERE symbol = 'SPY'), (SELECT MAX(d) FROM history_bars WHERE symbol = 'SPY'))::text AS d`)).rows[0].d;
     let basket = 1, spy = 1;
     for (let i = 0; i < r.rows.length; i++) {
         const from = r.rows[i].d, to = r.rows[i + 1]?.d || latest;

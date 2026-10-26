@@ -88,8 +88,12 @@ async function getRiskSizeMultiplier() {
             [_today()]
         );
         const level = res.rows[0]?.risk_level;
-        if (!level) return 1.0;
-        return SIZE_MULTIPLIER_BY_LEVEL[level] ?? 1.0;
+        const macroMult = level ? (SIZE_MULTIPLIER_BY_LEVEL[level] ?? 1.0) : 1.0;
+        // 2026-10-26: the 9:05 AM ET pre-market check (real overnight/futures data + event days)
+        // uses the same scale; the stricter of the two applies.
+        const pre = await require('./premarketSignalService').getTodayLevel();
+        const preMult = pre ? (SIZE_MULTIPLIER_BY_LEVEL[pre] ?? 1.0) : 1.0;
+        return Math.min(macroMult, preMult);
     } catch (err) {
         logger.debug('[MacroRisk] Could not read today\'s risk flag — proceeding with no adjustment', {
             error: err.message

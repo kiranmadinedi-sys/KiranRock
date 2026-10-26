@@ -15,6 +15,7 @@ const KINDS = {
     pnl_scoreboard: 'Weekly $/day scoreboard',
     daily_summary: 'Daily trading summary',
     macro_briefing: 'Macro briefing',
+    premarket_brief: 'Pre-market overnight check',
 };
 
 let _ready = false;

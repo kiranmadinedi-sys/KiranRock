@@ -62,6 +62,16 @@ router.post('/watchlist', async (req, res) => {
     try { await watchlist.addSymbol(req.userId, req.body?.symbol); res.json({ rows: await watchlist.getWatchlist(req.userId) }); }
     catch (error) { res.status(400).json({ error: error.message }); }
 });
+/** Add a watchlist symbol to core: paper applies now, live creates an approval request. */
+router.post('/watchlist/:symbol/core', async (req, res) => {
+    try { res.json(await require('./../services/coreAddonsService').addToCore(req.userId, req.params.symbol, req.body?.targetPct)); }
+    catch (error) { res.status(error.status || 400).json({ error: error.message }); }
+});
+/** Cash sweep on/off (paper only). */
+router.put('/sweep', async (req, res) => {
+    try { res.json(await require('./../services/coreAddonsService').setSweepEnabled(req.userId, !!req.body?.enabled)); }
+    catch (error) { res.status(error.status || 400).json({ error: error.message }); }
+});
 router.delete('/watchlist/:symbol', async (req, res) => {
     try { await watchlist.removeSymbol(req.userId, req.params.symbol); res.json({ rows: await watchlist.getWatchlist(req.userId) }); }
     catch (error) { res.status(400).json({ error: error.message }); }

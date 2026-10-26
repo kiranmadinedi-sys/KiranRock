@@ -91,6 +91,15 @@ const HANDLERS = {
         await core.setEnabled(userId, true);
         return `Core holdings enabled: ${payload.holdings.map(h => `${h.symbol} ${h.targetPct}%`).join(', ')}. First buys after 10:00 AM ET on the next trading day.`;
     },
+    // 2026-10-26: "Add to core" from the watchlist on a live account.
+    async core_add(userId, payload) {
+        const core = require('./coreHoldingsService');
+        const rows = await core.getCoreRows(userId);
+        const holdings = rows.filter(r => r.symbol !== payload.symbol).map(r => ({ symbol: r.symbol, targetPct: r.targetPct }));
+        holdings.push({ symbol: payload.symbol, targetPct: payload.targetPct });
+        await core.saveConfig(userId, { holdings });
+        return `${payload.symbol} added to core at ${payload.targetPct}%. Buys start after 10:00 AM ET on trading days.`;
+    },
 };
 
 /** Approve or reject one of the user's own pending requests. */

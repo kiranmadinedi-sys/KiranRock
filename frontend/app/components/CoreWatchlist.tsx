@@ -33,6 +33,18 @@ export default function CoreWatchlist() {
     };
     useEffect(() => { call(base()); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+    const [notice, setNotice] = useState<string | null>(null);
+    const addToCore = async (sym: string) => {
+        const pct = window.prompt(`Add ${sym} to core at what % of the account? (1-20)
+Paper: applied now. Live account: sends you an approval request.`, '5');
+        if (!pct) return;
+        try {
+            const res = await fetch(`${base()}/${sym}/core`, { method: 'POST', headers: headers(), body: JSON.stringify({ targetPct: Number(pct) }) });
+            const d = await res.json();
+            if (!res.ok) throw new Error(d.error || 'Failed');
+            setNotice(d.message); setError(null); call(base());
+        } catch (e: any) { setError(e.message); }
+    };
     const money = (v: number | undefined) => (v == null ? '—' : `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
 
     return (
@@ -50,6 +62,7 @@ export default function CoreWatchlist() {
                 <button className="px-4 py-2 rounded-lg bg-blue-600 text-white">Add</button>
             </form>
             {error && <div className="text-red-600 mb-2">Error: {error}</div>}
+            {notice && <div className="text-green-700 dark:text-green-400 mb-2">{notice}</div>}
             {!rows ? <div className="text-slate-500">Loading...</div> : (
                 <div className="overflow-x-auto"><table className="w-full text-sm">
                     <thead><tr>{['Stock', 'Status', 'Why', 'Price', 'From 52w high', 'P/E vs usual', 'Growth (rev / EPS)', 'Earnings', 'Data as of', ''].map(h => <th key={h} className="pb-2 text-left text-slate-500 dark:text-slate-400">{h}</th>)}</tr></thead>
@@ -64,7 +77,7 @@ export default function CoreWatchlist() {
                             <td className="py-2 whitespace-nowrap">{pct(r.valuation?.revenueGrowthPct)} / {pct(r.valuation?.epsGrowthPct)}</td>
                             <td className="py-2 whitespace-nowrap">{r.earningsDate || (r.earningsKnown ? 'none soon' : '—')}</td>
                             <td className="py-2 whitespace-nowrap text-xs text-slate-500" title={r.sources || ''}>{r.asOf || '—'}</td>
-                            <td className="py-2 text-right"><button className="text-xs text-red-600 hover:underline"
+                            <td className="py-2 text-right whitespace-nowrap">{!r.inCore && <button className="text-xs text-blue-600 hover:underline mr-3" onClick={() => addToCore(r.symbol)}>add to core</button>}<button className="text-xs text-red-600 hover:underline"
                                 onClick={() => call(`${base()}/${r.symbol}`, { method: 'DELETE' })}>remove</button></td>
                         </tr>))}
                     </tbody>

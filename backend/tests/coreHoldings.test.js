@@ -15,6 +15,7 @@ describe('coreHoldingsService', () => {
         jest.doMock('../src/services/dataProvider', () => ({ getQuote: jest.fn() }));
         jest.doMock('../src/services/tradingControlService', () => ({ getUserTradingControls: jest.fn().mockResolvedValue({ maxOrderNotional: 0 }) }));
         process.env.MAX_BOT_INVESTMENT_USD = '15000';
+        process.env.CORE_FRACTIONAL = 'off'; // whole-share cases below; fractional cases set 'on'
         core = require('../src/services/coreHoldingsService');
         query = require('../src/config/database').query;
         broker = require('../src/services/brokerService');
@@ -78,6 +79,33 @@ describe('coreHoldingsService', () => {
         dataProvider.getQuote.mockResolvedValue({ price: 700 });
         const actions = await core.rebalanceCore('u1');
         expect(broker.buyMarket).not.toHaveBeenCalled(); // $3,000 − $2,500 reserve = $500 < 1 share
+        expect(actions[0].action).toBe('no_cash');
+    });
+
+    // 2026-10-26: fractional core — targets are hit exactly and small accounts can hold SPY.
+    test('fractional mode buys the exact dollar amount (4 decimals)', async () => {
+        process.env.CORE_FRACTIONAL = 'on';
+        coreRows([{ symbol: 'SPY', targetPct: 50 }]);
+        broker.getAccountInfo.mockResolvedValue({ portfolioValue: 10000, cashBalance: 9000 });
+        broker.getPositions.mockResolvedValue([]);
+        dataProvider.getQuote.mockResolvedValue({ price: 700 });
+        broker.buyMarket.mockResolvedValue({ filledQty: 7.1073, filledAvgPrice: 700, status: 'filled' });
+        await core.rebalanceCore('u1');
+        expect(broker.buyMarket).toHaveBeenCalledWith('u1', 'SPY', 7.1073, expect.any(Object));
+    });
+    test('fractional mode: a small account can buy part of a share, but never under $50', async () => {
+        process.env.CORE_FRACTIONAL = 'on';
+        coreRows([{ symbol: 'SPY', targetPct: 40 }]);
+        broker.getAccountInfo.mockResolvedValue({ portfolioValue: 1000, cashBalance: 900 });
+        broker.getPositions.mockResolvedValue([]);
+        dataProvider.getQuote.mockResolvedValue({ price: 760 });
+        broker.buyMarket.mockResolvedValue({ filledQty: 0.5236, filledAvgPrice: 760, status: 'filled' });
+        await core.rebalanceCore('u1');
+        expect(broker.buyMarket).toHaveBeenCalledWith('u1', 'SPY', 0.5236, expect.any(Object)); // $400 target
+        broker.buyMarket.mockClear();
+        broker.getAccountInfo.mockResolvedValue({ portfolioValue: 1000, cashBalance: 280 }); // $30 above the reserve
+        const actions = await core.rebalanceCore('u1');
+        expect(broker.buyMarket).not.toHaveBeenCalled();
         expect(actions[0].action).toBe('no_cash');
     });
 

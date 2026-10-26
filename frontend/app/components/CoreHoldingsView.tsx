@@ -23,6 +23,13 @@ interface CoreStatus {
     holdings: CoreHolding[];
     totals: { value: number; unrealizedPl: number; cost: number };
     limits: { maxSymbols: number; maxTotalPct: number; maxSinglePct: number };
+    addons?: {
+        sweep?: { enabled: boolean; qty: number; symbol: string; allowed: boolean };
+        drawdown?: { peakIndex: number | null; alertedLevel: number };
+        dividends?: { total: number; bySymbol: Record<string, number>; error?: string };
+        longTerm?: Record<string, { firstBuy: string; longTermFrom: string }>;
+        error?: string;
+    };
 }
 
 interface EditRow { symbol: string; targetPct: string }
@@ -209,6 +216,8 @@ export default function CoreHoldingsView() {
                                     <th className="pb-2">Price</th>
                                     <th className="pb-2">Value</th>
                                     <th className="pb-2">P&L</th>
+                                    <th className="pb-2">Dividends</th>
+                                    <th className="pb-2" title="US long-term holding period: held more than one year (first lot). Not tax advice.">Long-term from</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -222,10 +231,48 @@ export default function CoreHoldingsView() {
                                         <td className="py-2">{money(h.price)}</td>
                                         <td className="py-2">{money(h.value)}</td>
                                         <td className={`py-2 ${h.unrealizedPl >= 0 ? 'text-green-600' : 'text-red-600'}`}>{h.qty > 0 ? money(h.unrealizedPl) : '—'}</td>
+                                        <td className="py-2">{money(status.addons?.dividends?.bySymbol?.[h.symbol] ?? 0)}</td>
+                                        <td className="py-2 whitespace-nowrap">{status.addons?.longTerm?.[h.symbol]?.longTermFrom ?? '—'}</td>
                                     </tr>
                                 ))}
                             </tbody>
                         </table>
+                    </div>
+                </div>
+            )}
+
+            {/* Income, cash sweep, drawdown (2026-10-26) */}
+            {status.addons && !status.addons.error && (
+                <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 p-6">
+                    <h3 className="text-md font-semibold text-slate-900 dark:text-white mb-4">Income &amp; protection</h3>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                        <div>
+                            <div className="text-xs text-slate-500 dark:text-slate-400">Dividends received (core)</div>
+                            <div className="text-xl font-semibold text-slate-900 dark:text-white">{money(status.addons.dividends?.total ?? 0)}</div>
+                            <div className="text-xs text-slate-500 dark:text-slate-400">{status.addons.dividends?.error || 'Reinvested by the daily top-up toward targets'}</div>
+                        </div>
+                        <div>
+                            <div className="text-xs text-slate-500 dark:text-slate-400">Drawdown alerts</div>
+                            <div className="text-slate-900 dark:text-white">Telegram at −10%, −15%, −20% from core&apos;s peak{status.addons.drawdown?.alertedLevel ? ` (last: −${status.addons.drawdown.alertedLevel}%)` : ''}</div>
+                            <div className="text-xs text-slate-500 dark:text-slate-400">Information only — core never sells automatically</div>
+                        </div>
+                        <div>
+                            <div className="text-xs text-slate-500 dark:text-slate-400">Cash sweep into {status.addons.sweep?.symbol} (T-bills)</div>
+                            {status.addons.sweep?.allowed ? (
+                                <label className="flex items-center gap-2 text-slate-900 dark:text-white">
+                                    <input type="checkbox" checked={!!status.addons.sweep?.enabled} onChange={async e => {
+                                        try {
+                                            const res = await fetch(`${getApiBaseUrl()}/api/core-holdings/sweep`, { method: 'PUT', headers: { ...authHeaders(), 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: e.target.checked }) });
+                                            const d = await res.json();
+                                            if (!res.ok) throw new Error(d.error || 'Failed');
+                                            loadData();
+                                        } catch (err: any) { setMessage({ type: 'error', text: err.message }); }
+                                    }} />
+                                    {status.addons.sweep?.enabled ? `On — ${(status.addons.sweep?.qty ?? 0).toFixed(2)} swept shares` : 'Off'}
+                                </label>
+                            ) : <div className="text-slate-500 dark:text-slate-400">Paper accounts only for now</div>}
+                            <div className="text-xs text-slate-500 dark:text-slate-400">Idle cash above reserve + 5% earns T-bill yield; sold back when swing trading needs it</div>
+                        </div>
                     </div>
                 </div>
             )}

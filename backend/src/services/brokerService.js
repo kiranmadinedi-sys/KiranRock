@@ -359,7 +359,7 @@ const alpacaBroker = (() => {
         // Found 2026-09-17 (same bug as sellMarket, fixed alongside it): this always
         // recorded the FULL requested quantity in the DB regardless of what actually
         // filled, so an unfilled or partially-filled buy was recorded as a complete one.
-        const buyMarketFilledQty = filled.filled_qty ? parseInt(filled.filled_qty) : 0;
+        const buyMarketFilledQty = filled.filled_qty ? parseFloat(filled.filled_qty) : 0;
         const buyFillPrice = filled.filled_avg_price ? parseFloat(filled.filled_avg_price) : null;
 
         // Mirror the trade in our DB for portfolio tracking. Only record what actually
@@ -450,7 +450,7 @@ const alpacaBroker = (() => {
         const filled = await waitForFill(client, order.id, 15000);
         const finalStatus = filled.status || 'submitted';
         const filledQty = filled.filled_qty
-            ? parseInt(filled.filled_qty)
+            ? parseFloat(filled.filled_qty)
             : (finalStatus === 'filled' ? quantity : 0);
         const fillPrice = filled.filled_avg_price ? parseFloat(filled.filled_avg_price) : quote.price;
         // Only a genuinely complete fill is recorded here — a 'partially_filled' status
@@ -641,7 +641,7 @@ const alpacaBroker = (() => {
         // is 0 rather than falling back to the requested quantity.  The open-order
         // guard (checked before every new buy) prevents re-submission while the
         // order sits live on Alpaca, so no phantom holding is needed here.
-        const filledQty = filled.filled_qty ? parseInt(filled.filled_qty) : (finalStatus === 'filled' ? quantity : 0);
+        const filledQty = filled.filled_qty ? parseFloat(filled.filled_qty) : (finalStatus === 'filled' ? quantity : 0);
         const fillPrice = filled.filled_avg_price ? parseFloat(filled.filled_avg_price) : entryLimit;
 
         if (finalStatus === 'partially_filled') {
@@ -951,7 +951,7 @@ const alpacaBroker = (() => {
         // ORIGINAL `quantity` to executeSellOrder below instead — every not-fully-filled
         // sell (including a completely unfilled one) was recorded as a full, immediate
         // sale. sellFillQty (now correctly used below) is the fix.
-        const sellFillQty  = filled.filled_qty ? parseInt(filled.filled_qty) : 0;
+        const sellFillQty  = filled.filled_qty ? parseFloat(filled.filled_qty) : 0;
         const sellFillPx   = filled.filled_avg_price ? parseFloat(filled.filled_avg_price) : sellPrice;
 
         const sellBroker   = isPaper ? 'alpaca-paper' : 'alpaca-live';

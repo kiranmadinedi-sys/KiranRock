@@ -193,8 +193,9 @@ async function saveConfig(userId, { cashReservePct, holdings = [], releaseSymbol
 const MIN_BUY_USD = 50;
 
 /**
- * Buy core positions up toward their target weights. Whole shares only (buyMarket
- * records filled qty as an integer). Returns a list of what it bought/skipped.
+ * Buy core positions up toward their target weights. Fractional shares since 2026-10-26
+ * (buyMarket used to parseInt the filled qty — fixed alongside; set CORE_FRACTIONAL=off to go
+ * back to whole shares). Returns a list of what it bought/skipped.
  */
 async function rebalanceCore(userId) {
     const rows = await getCoreRows(userId);
@@ -214,6 +215,16 @@ async function rebalanceCore(userId) {
     const maxOrderUsd = parseFloat(process.env.MAX_BOT_INVESTMENT_USD || '5000') * 0.98;
     const positions = await brokerService.getPositions(userId);
     const held = Object.fromEntries(positions.map(p => [String(p.symbol).toUpperCase(), parseFloat(p.marketValue || 0)]));
+    // Cash-sweep shares (coreAddonsService, paper only) sit in the same symbol but are not core —
+    // count only the core part toward the target.
+    const addons = require('./coreAddonsService');
+    const { sweepQty } = await addons.getAddonSettings(userId).catch(() => ({ sweepQty: 0 }));
+    if (sweepQty > 0 && held[addons.SWEEP_SYMBOL] != null) {
+        const pos = positions.find(p => String(p.symbol).toUpperCase() === addons.SWEEP_SYMBOL);
+        const px = pos && parseFloat(pos.qty) > 0 ? parseFloat(pos.marketValue) / parseFloat(pos.qty) : 0;
+        held[addons.SWEEP_SYMBOL] = Math.max(0, held[addons.SWEEP_SYMBOL] - sweepQty * px);
+    }
+    const fractional = String(process.env.CORE_FRACTIONAL || 'on').toLowerCase() !== 'off';
     const actions = [];
 
     for (const row of rows) {
@@ -229,8 +240,9 @@ async function rebalanceCore(userId) {
         const spendable = Math.min(gap, cash - reserve, maxOrderUsd);
         const quote = await dataProvider.getQuote(row.symbol);
         const price = quote?.price;
-        const qty = price > 0 ? Math.floor(spendable / (price * 1.005)) : 0;
-        if (qty < 1) { actions.push({ symbol: row.symbol, action: 'no_cash', current, target, cash, reserve }); continue; }
+        const raw = price > 0 ? spendable / (price * 1.005) : 0;
+        const qty = fractional ? Math.floor(raw * 10000) / 10000 : Math.floor(raw);
+        if (!(qty > 0) || qty * price < MIN_BUY_USD || (!fractional && qty < 1)) { actions.push({ symbol: row.symbol, action: 'no_cash', current, target, cash, reserve }); continue; }
         try {
             const res = await brokerService.buyMarket(userId, row.symbol, qty, {
                 executedBy: 'CORE', reason: 'Core holding rebalance',
@@ -261,9 +273,14 @@ async function runDailyRebalance(now = new Date()) {
     if (etMin < 10 * 60) return; // let the open settle
     const etDate = now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     for (const userId of ids) {
+        // Cash sweep (paper only) checks every tick: cash may be needed back for a swing buy any time.
+        await require('./coreAddonsService').runSweepTick(userId, now).catch(err =>
+            logger.warn('[CoreSweep] Tick failed', { userId, error: err.message }));
         const key = `${userId}:${etDate}`;
         if (_ranOn.has(key)) continue;
         _ranOn.add(key); // once a day even if it fails — a retry loop on a broker error is worse
+        await require('./coreAddonsService').runDrawdownCheck(userId).catch(err =>
+            logger.warn('[CoreDrawdown] Check failed', { userId, error: err.message }));
         try {
             const actions = await rebalanceCore(userId);
             const bought = actions.filter(a => a.action === 'bought');
@@ -292,6 +309,22 @@ async function coreSummary(userId) {
     return { positions: r.rows, value, unrealizedPl: pl, cost: value - pl };
 }
 
+async function _addonStatus(userId, symbols) {
+    try {
+        const addons = require('./coreAddonsService');
+        const [a, income] = await Promise.all([addons.getAddonSettings(userId), addons.incomeAndTax(userId, symbols)]);
+        let sweepAllowed = false;
+        try { sweepAllowed = (await require('./userDatabaseService').getUserAlpacaCredentials(userId)).isPaper !== false; } catch (_) {}
+        return {
+            sweep: { enabled: a.sweepEnabled, qty: a.sweepQty, symbol: addons.SWEEP_SYMBOL, allowed: sweepAllowed },
+            drawdown: { peakIndex: a.ddPeakIndex, alertedLevel: a.ddAlertLevel },
+            dividends: income.dividends, longTerm: income.longTerm,
+        };
+    } catch (err) {
+        return { error: err.message };
+    }
+}
+
 /** Everything the Settings screen shows. */
 async function getStatus(userId) {
     const [settings, rows] = await Promise.all([getSettings(userId), getCoreRows(userId)]);
@@ -318,6 +351,7 @@ async function getStatus(userId) {
         }),
         totals: summary ? { value: summary.value, unrealizedPl: summary.unrealizedPl, cost: summary.cost } : { value: 0, unrealizedPl: 0, cost: 0 },
         limits: { maxSymbols: MAX_SYMBOLS, maxTotalPct: MAX_TOTAL_PCT, maxSinglePct: MAX_SINGLE_PCT },
+        addons: await _addonStatus(userId, rows.map(r => r.symbol)),
     };
 }
 

@@ -88,7 +88,9 @@ async function paperCoreHealthy(paperId) {
     const summary = await core.coreSummary(paperId);
     if (!summary || !summary.value) return { ok: false, why: 'no core positions bought yet on paper' };
     const syms = rows.map(r => r.symbol);
-    const sold = await query(`SELECT COUNT(*)::int AS n FROM trades WHERE user_id = $1 AND action = 'SELL' AND symbol = ANY($2) AND trade_date >= $3`,
+    // Cash-sweep sells (coreAddonsService, tagged in notes) are planned, not a core sale.
+    const sold = await query(`SELECT COUNT(*)::int AS n FROM trades WHERE user_id = $1 AND action = 'SELL' AND symbol = ANY($2) AND trade_date >= $3
+                              AND COALESCE(notes, '') NOT LIKE 'CORE_SWEEP%'`,
         [paperId, syms, enabledAt]);
     if (sold.rows[0].n > 0) return { ok: false, why: `a core position was sold on paper (${sold.rows[0].n} sells) — investigate first` };
     const orders = await require('./brokerService').getOpenOrders(paperId).catch(() => null);
@@ -156,11 +158,14 @@ async function runWeeklyPromotion(now = new Date()) {
             try {
                 const eq0 = (await require('./brokerService').getAccountInfo(liveId)).portfolioValue;
                 const tooSmall = [];
+                const fractional = String(process.env.CORE_FRACTIONAL || 'on').toLowerCase() !== 'off';
                 for (const h of holdings) {
                     const px = (await query(`SELECT close::float AS c FROM daily_bars WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1`, [h.symbol])).rows[0]?.c;
-                    if (px && eq0 * h.targetPct / 100 < px) tooSmall.push(h.symbol);
+                    const slot = eq0 * h.targetPct / 100;
+                    // Fractional core (2026-10-26): only the $50 minimum order matters, not the share price.
+                    if (fractional ? slot < 50 : (px && slot < px)) tooSmall.push(h.symbol);
                 }
-                if (tooSmall.length) { lines.push(`⏳ Core on a live account skipped: too small for whole shares of ${tooSmall.join(', ')}.`); continue; }
+                if (tooSmall.length) { lines.push(`⏳ Core on a live account skipped: too small for ${fractional ? "a $50 order" : "whole shares"} of ${tooSmall.join(', ')}.`); continue; }
             } catch (_) { /* can't size → don't offer */ continue; }
             let equityTxt = '';
             try {

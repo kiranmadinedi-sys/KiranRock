@@ -59,7 +59,7 @@ router.get('/watchlist', async (req, res) => {
     catch (error) { res.status(500).json({ error: error.message }); }
 });
 router.post('/watchlist', async (req, res) => {
-    try { await watchlist.addSymbol(req.userId, req.body?.symbol); res.json({ rows: await watchlist.getWatchlist(req.userId) }); }
+    try { const added = await watchlist.addSymbol(req.userId, req.body?.symbol); res.json({ added, rows: await watchlist.getWatchlist(req.userId) }); }
     catch (error) { res.status(400).json({ error: error.message }); }
 });
 /** Add a watchlist symbol to core: paper applies now, live creates an approval request. */

@@ -20,6 +20,7 @@ export default function CoreWatchlist() {
     const [rows, setRows] = useState<any[] | null>(null);
     const [symbol, setSymbol] = useState('');
     const [error, setError] = useState<string | null>(null);
+    const [notice, setNotice] = useState<string | null>(null);
     const base = () => `${getApiBaseUrl()}/api/core-holdings/watchlist`;
     const headers = () => ({ 'Authorization': `Bearer ${localStorage.getItem('token')}`, 'Content-Type': 'application/json' });
 
@@ -29,11 +30,11 @@ export default function CoreWatchlist() {
             const d = await res.json();
             if (!res.ok) throw new Error(d.error || `Failed: ${res.status}`);
             setRows(d.rows); setError(null);
+            if (d.added) setNotice(`Added ${d.added.symbol} — ${d.added.name}. If that's not the company you meant, remove it and check the ticker.`);
         } catch (e: any) { setError(e.message); }
     };
     useEffect(() => { call(base()); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const [notice, setNotice] = useState<string | null>(null);
     const addToCore = async (sym: string) => {
         const pct = window.prompt(`Add ${sym} to core at what % of the account? (1-20)
 Paper: applied now. Live account: sends you an approval request.`, '5');

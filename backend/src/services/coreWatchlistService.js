@@ -76,7 +76,54 @@ function classify(f) {
     return { status: 'No dip', reasons: [f.ddPct >= 5 ? `${f.ddPct.toFixed(0)}% below its high` : 'near its 52-week high', valNote] };
 }
 
+// On-the-fly fallback (2026-10-26): symbols outside the nightly-scan universe have no local
+// history, so the watchlist fetched nothing ("not enough price history"). Alpaca's historical SIP
+// bars (split/dividend-adjusted, end >15 min ago so the free plan allows it), cached per day.
+const DATA_USER = '83f08677-e55a-48d1-bd31-f5b56fa79c23'; // market data only — any valid Alpaca key works
+const _remoteBars = new Map();
+async function _alpacaHeaders() {
+    const cr = await require('./userDatabaseService').getUserAlpacaCredentials(DATA_USER);
+    return { 'APCA-API-KEY-ID': cr.keyId, 'APCA-API-SECRET-KEY': cr.secretKey };
+}
+async function _alpacaBars(symbol) {
+    const day = new Date().toISOString().slice(0, 10);
+    const hit = _remoteBars.get(symbol);
+    if (hit && hit.day === day) return hit.rows;
+    const axios = require('axios');
+    const start = new Date(Date.now() - 420 * 86400000).toISOString().slice(0, 10);
+    const end = new Date(Date.now() - 20 * 60000).toISOString();
+    const r = (await axios.get(`https://data.alpaca.markets/v2/stocks/${encodeURIComponent(symbol)}/bars`, {
+        params: { timeframe: '1Day', start, end, adjustment: 'all', limit: 1000, feed: 'sip' },
+        headers: await _alpacaHeaders(), timeout: 20000,
+    })).data;
+    const rows = (r.bars || []).map(b => ({ d: b.t.slice(0, 10), c: b.c })).slice(-260);
+    _remoteBars.set(symbol, { day, rows });
+    return rows;
+}
+
+/** Name/tradability of a symbol from Alpaca, or throws a user-readable error. */
+async function lookupAsset(symbol) {
+    const axios = require('axios');
+    try {
+        const a = (await axios.get(`https://paper-api.alpaca.markets/v2/assets/${encodeURIComponent(symbol)}`, {
+            headers: await _alpacaHeaders(), timeout: 15000 })).data;
+        if (a.class !== 'us_equity' || !a.tradable) throw Object.assign(new Error(`${symbol} (${a.name}) is not a tradable US stock or ETF.`), { status: 400 });
+        return { name: a.name, exchange: a.exchange, fractionable: !!a.fractionable };
+    } catch (err) {
+        if (err.status) throw err;
+        if (err.response?.status === 404) throw Object.assign(new Error(`${symbol}: no such US stock or ETF — check the ticker.`), { status: 400 });
+        throw err;
+    }
+}
+
 async function _bars(symbol) {
+    const local = await _localBars(symbol);
+    if (local.length >= 200) return local;
+    const remote = await _alpacaBars(symbol).catch(() => []);
+    return remote.length > local.length ? remote : local;
+}
+
+async function _localBars(symbol) {
     // One row per trading day: history_bars first (clean, split-adjusted), daily_bars only for newer
     // days. daily_bars timestamps are UTC midnight-ish bars — read the date in UTC, or a Chicago
     // session shifts every bar back a day.
@@ -146,8 +193,22 @@ async function addSymbol(userId, symbol) {
     const s = String(symbol || '').trim().toUpperCase();
     if (!/^[A-Z][A-Z.]{0,5}$/.test(s)) throw new Error('Invalid symbol');
     await getList(userId);
-    if ((await _bars(s)).length < 200) throw new Error(`${s}: not enough price history in our data yet`);
+    const asset = await lookupAsset(s);
+    const bars = await _bars(s);
+    if (bars.length < 200) throw new Error(`${s} (${asset.name}): only ${bars.length} trading days of history — needs 200 for the 52-week and 200-day checks.`);
     await query(`INSERT INTO core_watchlist (user_id, symbol) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [String(userId), s]);
+    // Evaluate right away so the new row shows a status instead of "Not checked yet".
+    try {
+        const e = await evaluate(s);
+        const { symbol: _s, status, price, ddPct, ...details } = e;
+        const today = todayET();
+        await query(`INSERT INTO core_watchlist_signals (signal_date, symbol, status, price, dd_pct, details) VALUES ($1,$2,$3,$4,$5,$6)
+                     ON CONFLICT (signal_date, symbol) DO UPDATE SET status = EXCLUDED.status, price = EXCLUDED.price, dd_pct = EXCLUDED.dd_pct, details = EXCLUDED.details`,
+            [today, s, status, price, ddPct, JSON.stringify({ ...details, price, ddPct })]);
+    } catch (err) {
+        logger.warn('[CoreWatchlist] First evaluation failed', { symbol: s, error: err.message });
+    }
+    return { symbol: s, name: asset.name };
 }
 
 async function removeSymbol(userId, symbol) {
@@ -247,4 +308,4 @@ async function getOutcomes() {
     return out;
 }
 
-module.exports = { DEFAULT_LIST, classify, evaluate, getList, addSymbol, removeSymbol, getWatchlist, runDaily, getOutcomes, ensureTables };
+module.exports = { DEFAULT_LIST, classify, evaluate, lookupAsset, getList, addSymbol, removeSymbol, getWatchlist, runDaily, getOutcomes, ensureTables };

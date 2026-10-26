@@ -46,6 +46,13 @@ const REVIEWS = [
             const o = await require('./coreWatchlistService').getOutcomes().catch(() => ({}));
             const wl = Object.entries(o).flatMap(([h, rows]) => rows.map(x =>
                 `Watchlist ${h} — ${x.status}: ${pct(x.avg_pct)} vs SPY ${pct(x.spy_pct)} (${x.symbols} stocks, beat SPY ${Math.round(x.beat_spy_pct)}%)`));
+            // Core guidance scorecard (2026-10-26): decisions and outcomes by rule, all accounts.
+            const sc = await require('./coreGuidanceService').getScorecard().catch(() => null);
+            if (sc) {
+                for (const x of sc.counts) wl.push(`Guidance ${x.rule} — ${x.status}: ${x.n}`);
+                for (const [h, rows] of Object.entries(sc.outcomes)) for (const x of rows)
+                    wl.push(`Guidance ${h} ${x.rule}/${x.status}: ${pct(x.avg_pct)} vs SPY ${pct(x.spy_pct)} (${x.n})`);
+            }
             return [`Paper core: ${c.rows.map(x => x.symbol).join(', ')} · $${Math.round(v).toLocaleString()} · ${usd(pl)} (${pct(v - pl > 0 ? pl / (v - pl) * 100 : null)})`,
                     `SPY since ${first}: ${pct(first ? await _spyPct(first) : null)}`,
                     ...(wl.length ? wl : ['Watchlist record: no signal is a month old yet']) ];

@@ -4,6 +4,7 @@ import React from 'react';
 
 import CoreHoldingsView from '../components/CoreHoldingsView';
 import CoreWatchlist from '../components/CoreWatchlist';
+import CoreGuidance from '../components/CoreGuidance';
 
 export default function CoreHoldingsPage() {
     return (
@@ -20,6 +21,7 @@ export default function CoreHoldingsPage() {
                 </div>
 
                 <CoreHoldingsView />
+                <CoreGuidance />
                 <CoreWatchlist />
             </main>
         </div>

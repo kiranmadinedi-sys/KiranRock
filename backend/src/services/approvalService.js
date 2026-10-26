@@ -91,6 +91,15 @@ const HANDLERS = {
         await core.setEnabled(userId, true);
         return `Core holdings enabled: ${payload.holdings.map(h => `${h.symbol} ${h.targetPct}%`).join(', ')}. First buys after 10:00 AM ET on the next trading day.`;
     },
+    // 2026-10-26: core guidance "idle cash" — change one core target (add the symbol if missing).
+    async core_target(userId, payload) {
+        const core = require('./coreHoldingsService');
+        const rows = await core.getCoreRows(userId);
+        const holdings = rows.filter(r => r.symbol !== payload.symbol).map(r => ({ symbol: r.symbol, targetPct: r.targetPct }));
+        holdings.push({ symbol: payload.symbol, targetPct: payload.targetPct });
+        await core.saveConfig(userId, { holdings });
+        return `${payload.symbol} core target is now ${payload.targetPct}%. Buys toward it start after 10:00 AM ET on trading days.`;
+    },
     // 2026-10-26: "Add to core" from the watchlist on a live account.
     async core_add(userId, payload) {
         const core = require('./coreHoldingsService');
@@ -102,6 +111,11 @@ const HANDLERS = {
     },
 };
 
+/** Keep a core-guidance alert's decision in sync with its approval (never fails the decision). */
+async function _syncGuidance(id, status) {
+    try { await require('./coreGuidanceService').recordDecision(id, status); } catch (_) { /* table may not exist yet */ }
+}
+
 /** Approve or reject one of the user's own pending requests. */
 async function decide(userId, id, approve) {
     await ensureTable();
@@ -112,6 +126,7 @@ async function decide(userId, id, approve) {
     if (!approve) {
         await query(`UPDATE approval_requests SET status = 'rejected', decided_at = NOW() WHERE id = $1`, [id]);
         logger.info('[Approval] Rejected', { id, userId, kind: req.kind });
+        await _syncGuidance(id, 'rejected');
         return { status: 'rejected' };
     }
     const handler = HANDLERS[req.kind];
@@ -121,6 +136,7 @@ async function decide(userId, id, approve) {
         await query(`UPDATE approval_requests SET status = 'approved', decided_at = NOW(), result = $2 WHERE id = $1`, [id, result]);
         logger.info('[Approval] Approved and applied', { id, userId, kind: req.kind, result });
         await _telegram(userId, `✅ *Approved* — ${req.title}\n${result}`);
+        await _syncGuidance(id, 'approved');
         return { status: 'approved', result };
     } catch (err) {
         await query(`UPDATE approval_requests SET status = 'failed', decided_at = NOW(), result = $2 WHERE id = $1`, [id, err.message]);

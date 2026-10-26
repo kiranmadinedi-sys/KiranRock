@@ -17,6 +17,7 @@ const KINDS = {
     macro_briefing: 'Macro briefing',
     premarket_brief: 'Pre-market overnight check',
     core_watchlist: 'Core watchlist',
+    core_guidance: 'Core guidance',
 };
 
 let _ready = false;

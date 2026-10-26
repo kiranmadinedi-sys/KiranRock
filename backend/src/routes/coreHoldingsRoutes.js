@@ -67,6 +67,13 @@ router.post('/watchlist/:symbol/core', async (req, res) => {
     try { res.json(await require('./../services/coreAddonsService').addToCore(req.userId, req.params.symbol, req.body?.targetPct)); }
     catch (error) { res.status(error.status || 400).json({ error: error.message }); }
 });
+/** Core guidance (2026-10-26): recent alerts + the rule scorecard for this account. */
+router.get('/guidance', async (req, res) => {
+    try {
+        const g = require('./../services/coreGuidanceService');
+        res.json({ alerts: await g.listAlerts(req.userId), scorecard: await g.getScorecard(req.userId) });
+    } catch (error) { res.status(500).json({ error: error.message }); }
+});
 /** Cash sweep on/off (paper only). */
 router.put('/sweep', async (req, res) => {
     try { res.json(await require('./../services/coreAddonsService').setSweepEnabled(req.userId, !!req.body?.enabled)); }

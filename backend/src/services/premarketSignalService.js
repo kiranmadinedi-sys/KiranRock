@@ -68,13 +68,21 @@ async function ensureTable() {
     _ready = true;
 }
 
-async function _snapshots() {
+async function _snapshots(today) {
     const cr = await require('./userDatabaseService').getUserAlpacaCredentials(PAPER_DATA_USER);
     const symbols = Object.values(GROUPS).flat().join(',');
-    return (await axios.get('https://data.alpaca.markets/v2/stocks/snapshots', {
-        params: { symbols, feed: 'iex' }, timeout: 15000,
+    const get = feed => axios.get('https://data.alpaca.markets/v2/stocks/snapshots', {
+        params: { symbols, feed }, timeout: 15000,
         headers: { 'APCA-API-KEY-ID': cr.keyId, 'APCA-API-SECRET-KEY': cr.secretKey },
-    })).data;
+    }).then(r => r.data);
+    // IEX alone had no pre-market trades in EWJ/EWY/FXI/EWT/VGK on 2026-10-26, leaving Asia/Europe
+    // blank. Fall back per symbol to the free 15-minute-delayed full-market feed.
+    const iex = await get('iex');
+    const delayed = await get('delayed_sip').catch(() => ({}));
+    const hasToday = s => s?.latestTrade?.t && todayET(new Date(s.latestTrade.t)) === today;
+    const out = { ...iex };
+    for (const sym of Object.keys(delayed)) if (!hasToday(out[sym]) && hasToday(delayed[sym])) out[sym] = delayed[sym];
+    return out;
 }
 
 function formatBrief(today, ch, groups, event, { level, reasons }) {
@@ -100,7 +108,7 @@ async function runPremarketCheck(now = new Date()) {
         const dow = new Date(`${today}T12:00:00Z`).getUTCDay();
         if (dow === 0 || dow === 6 || cal.isTradingHoliday(now)) return { skipped: 'not a trading day' };
         await ensureTable();
-        const ch = changesFromSnapshots(await _snapshots(), today);
+        const ch = changesFromSnapshots(await _snapshots(today), today);
         const groups = Object.fromEntries(Object.entries(GROUPS).map(([g, syms]) => [g, avg(syms.map(s => ch[s]).filter(v => v != null))]));
         const event = EVENT_DAYS[today] || null;
         const verdict = classify(groups, event);

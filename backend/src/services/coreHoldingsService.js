@@ -108,6 +108,25 @@ async function setSatelliteSymbols(userId, symbols) {
     _cache.delete(uid);
 }
 
+/**
+ * Options sleeve (2026-10-26): an underlying with an open short put — and any shares delivered by
+ * assignment — is protected from the swing bot like core (no swing buys, stops or exits on it).
+ * Never overrides an existing core/satellite row.
+ */
+async function setOptionsProtected(userId, symbol, on, note = 'options income') {
+    await ensureTable();
+    const uid = String(userId), sym = String(symbol).toUpperCase();
+    if (on) {
+        await query(
+            `INSERT INTO core_holdings (user_id, symbol, target_pct, active, note, sleeve) VALUES ($1, $2, 0, true, $3, 'options')
+             ON CONFLICT (user_id, symbol) DO UPDATE SET active = true, sleeve = 'options', target_pct = 0, note = EXCLUDED.note
+             WHERE core_holdings.sleeve = 'options' OR NOT core_holdings.active`, [uid, sym, note]);
+    } else {
+        await query(`UPDATE core_holdings SET active = false WHERE user_id = $1 AND symbol = $2 AND sleeve = 'options'`, [uid, sym]);
+    }
+    _cache.delete(uid);
+}
+
 function _clearCache() { _cache.clear(); }
 
 async function getSettings(userId) {
@@ -356,6 +375,6 @@ async function getStatus(userId) {
 }
 
 module.exports = {
-    ensureTable, getCoreRows, getCoreSymbols, setSatelliteSymbols, getSettings, setEnabled, saveConfig, getStatus,
+    ensureTable, getCoreRows, getCoreSymbols, setSatelliteSymbols, setOptionsProtected, getSettings, setEnabled, saveConfig, getStatus,
     rebalanceCore, runDailyRebalance, coreSummary, _clearCache,
 };

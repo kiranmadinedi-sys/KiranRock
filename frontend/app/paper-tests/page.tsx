@@ -39,22 +39,25 @@ export default function PaperTestsPage() {
                 {!data ? <div className="text-slate-500">Loading...</div> : (<>
                     <div className={card}>
                         <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Options income — cash-secured puts</h2>
-                        <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">Sell 1 put ~1 month out on quality stocks; buy back at 50% profit, 7 days before expiry, or at 3× (stop).</p>
-                        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-4">
+                        <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">Sell 1 put ~1 month out on quality stocks; buy back at 50% profit, 7 days before expiry, or at 3× (stop). Max 2 per sector; no earnings before expiry; the stock is protected from the swing bot while the put is open and after assignment.</p>
+                        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4 mb-4">
                             {stat('Open / pending', `${data.options.summary.open} / ${data.options.summary.pending}`)}
                             {stat('Collateral in use', $(data.options.summary.collateral))}
                             {stat('Premium collected', $(data.options.summary.premiumCollected))}
                             {stat('Closed (won)', `${data.options.summary.closed} (${data.options.summary.wins})`)}
                             {stat('Closed P&L', $(data.options.summary.pnl), data.options.summary.pnl >= 0 ? 'text-green-600' : 'text-red-600')}
+                            {stat('Open P&L (today)', $(data.options.summary.unrealized), (data.options.summary.unrealized ?? 0) >= 0 ? 'text-green-600' : 'text-red-600')}
+                            {stat(`T-bills instead (${data.options.summary.riskFreePct ?? 4}%/yr)`, $(data.options.summary.tbillBenchmark))}
                         </div>
+                        <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">The fair test: closed + open P&amp;L should clearly beat what the same collateral would have earned in T-bills (SGOV) with no risk.</p>
                         <div className="overflow-x-auto"><table className="w-full text-sm">
-                            <thead><tr>{['Contract', 'Stock', 'Strike', 'Expiry', 'Premium', 'Delta', 'Collateral', 'Status', 'P&L'].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
+                            <thead><tr>{['Contract', 'Stock', 'Sector', 'Strike', 'Expiry', 'Premium', 'Delta', 'Collateral', 'Status', 'P&L'].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
                             <tbody>{data.options.trades.map((o: any) => (
                                 <tr key={o.contract + o.opened_at} className="border-t border-slate-100 dark:border-slate-700">
-                                    <td className="py-2 font-mono text-xs">{o.contract}</td><td>{o.underlying}</td><td>{$(o.strike)}</td><td>{o.expiry}</td>
+                                    <td className="py-2 font-mono text-xs">{o.contract}</td><td>{o.underlying}</td><td className="text-xs">{o.sector || '—'}</td><td>{$(o.strike)}</td><td>{o.expiry}</td>
                                     <td>{$(o.premium * 100)}</td><td>{o.delta?.toFixed(2) ?? '—'}</td><td>{$(o.collateral)}</td>
                                     <td>{o.status.replace('_', ' ')}{o.close_reason ? ` — ${o.close_reason}` : ''}</td>
-                                    <td className={o.pnl > 0 ? 'text-green-600' : o.pnl < 0 ? 'text-red-600' : ''}>{o.pnl == null ? '—' : $(o.pnl)}</td>
+                                    <td className={(o.pnl ?? o.unrealized) > 0 ? 'text-green-600' : (o.pnl ?? o.unrealized) < 0 ? 'text-red-600' : ''}>{o.pnl != null ? $(o.pnl) : o.unrealized != null ? `${$(o.unrealized)} (open)` : '—'}</td>
                                 </tr>))}
                             </tbody>
                         </table></div>

@@ -14,7 +14,7 @@ router.get('/status', async (req, res) => {
         const uid = String(req.userId);
         const opts = await query(
             `SELECT contract, underlying, strike::float, expiry::text, status, entry_premium::float AS premium,
-                    entry_delta::float AS delta, collateral::float, close_premium::float, close_reason, pnl::float,
+                    entry_delta::float AS delta, collateral::float, close_premium::float, close_reason, pnl::float, sector, reprice_count,
                     opened_at, closed_at
              FROM options_income_trades WHERE user_id = $1 ORDER BY opened_at DESC LIMIT 100`, [uid]).catch(() => ({ rows: [] }));
         const sat = await query(
@@ -25,6 +25,22 @@ router.get('/status', async (req, res) => {
              ORDER BY h.symbol`, [uid]).catch(() => ({ rows: [] }));
         const perf = await require('../services/satelliteService').performance().catch(() => null);
         const closed = opts.rows.filter(o => ['closed', 'expired', 'assigned'].includes(o.status));
+        // 2026-10-26: open puts marked at today's price (from the broker) + the T-bill benchmark on
+        // the same collateral — the fair "was the risk worth it" comparison.
+        let unrealized = null;
+        try {
+            const cr = await require('../services/userDatabaseService').getUserAlpacaCredentials(uid);
+            if (cr.isPaper !== false) {
+                const pos = (await require('axios').get('https://paper-api.alpaca.markets/v2/positions', {
+                    headers: { 'APCA-API-KEY-ID': cr.keyId, 'APCA-API-SECRET-KEY': cr.secretKey }, timeout: 15000 })).data;
+                const byContract = Object.fromEntries(pos.filter(p => p.asset_class === 'us_option').map(p => [p.symbol, parseFloat(p.unrealized_pl)]));
+                unrealized = 0;
+                for (const o of opts.rows) if (['open', 'pending_close'].includes(o.status) && byContract[o.contract] != null) {
+                    o.unrealized = byContract[o.contract]; unrealized += byContract[o.contract];
+                }
+            }
+        } catch (_) { /* page still loads without live marks */ }
+        const oiSum = await require('../services/optionsIncomeService').summary().catch(() => null);
         res.json({
             options: {
                 trades: opts.rows,
@@ -36,6 +52,9 @@ router.get('/status', async (req, res) => {
                     closed: closed.length,
                     wins: closed.filter(o => o.pnl > 0).length,
                     pnl: closed.reduce((s, o) => s + (o.pnl || 0), 0),
+                    unrealized,
+                    tbillBenchmark: oiSum?.tbill_benchmark ?? null,
+                    riskFreePct: oiSum?.riskFreePct ?? null,
                 },
             },
             satellite: { positions: sat.rows, performance: perf },

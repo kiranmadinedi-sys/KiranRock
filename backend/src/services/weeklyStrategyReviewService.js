@@ -89,8 +89,10 @@ const REVIEWS = [
                  FROM options_income_trades WHERE status NOT IN ('not_filled', 'pending_open')`);
             const closed = r.rows.filter(x => ['closed', 'expired', 'assigned'].includes(x.status));
             const grp = f => { const g = closed.filter(f); return `${g.length} closed, ${g.filter(x => x.pnl > 0).length} won, ${usd(g.reduce((s, x) => s + (x.pnl || 0), 0))}`; };
+            const s = await require('./optionsIncomeService').summary().catch(() => null);
             return [`Open: ${r.rows.length - closed.length} · Closed: ${grp(() => true)}`,
-                    `Held through earnings: ${grp(x => x.crossed)} · Earnings-free: ${grp(x => !x.crossed)}`];
+                    `Held through earnings: ${grp(x => x.crossed)} · Earnings-free: ${grp(x => !x.crossed)}`,
+                    ...(s ? [`Same collateral in T-bills (${s.riskFreePct}%/yr): ${usd(s.tbill_benchmark)} — the puts must clearly beat this to be worth the risk${s.assigned ? ` · ${s.assigned} assigned` : ''}`] : [])];
         },
     },
     {

@@ -16,6 +16,12 @@
  *   exit   — buy back at 50% of the premium (take the profit), or with ≤ 7 days left, or if the
  *            put costs ≥ 3× what we sold it for (stop). Day limit orders; reconciled each tick.
  *
+ * 2026-10-26 additions: max 2 open puts per sector; the underlying is protected from the swing bot
+ * while a put is open (and after assignment); assignment P&L is premium minus the strike-vs-market
+ * loss on the delivered shares (was: always booked as a full-premium win); unfilled entries step
+ * down from mid toward the bid (3 steps, never under the minimum premium); results are compared with
+ * what the same collateral would earn in T-bills (RISK_FREE_PCT, default 4%/yr).
+ *
  * HARD GUARD: refuses any account whose Alpaca credentials are not paper. Enabled per
  * account via OPTIONS_INCOME_USER_IDS. Results go to options_income_trades and the
  * Saturday report; anything for real money would go through an approval request.
@@ -35,7 +41,11 @@ const CFG = {
     takeProfitFrac: 0.5,         // buy back when the put costs ≤ 50% of the premium received
     stopMultiple: 3,             // buy back when the put costs ≥ 3× the premium received
     closeDte: 7,
+    maxPerSector: 2,
+    repriceAfterMin: 45,         // minutes an unfilled entry waits before stepping its price down
+    repriceSteps: 3,             // mid → mid − 1/3, 2/3, 3/3 of (mid − bid), floored at the min premium
 };
+const riskFreePct = () => parseFloat(process.env.RISK_FREE_PCT || '4');
 const maxCollateralTotal = () => parseFloat(process.env.OPTIONS_INCOME_MAX_COLLATERAL || '30000');
 const userIds = () => (process.env.OPTIONS_INCOME_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 
@@ -65,6 +75,11 @@ async function ensureTable() {
             pnl             NUMERIC
         )`);
     await query(`ALTER TABLE options_income_trades ADD COLUMN IF NOT EXISTS next_earnings DATE`);
+    await query(`ALTER TABLE options_income_trades
+        ADD COLUMN IF NOT EXISTS sector TEXT,
+        ADD COLUMN IF NOT EXISTS reprice_count INT NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS last_reprice_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS assigned_price NUMERIC`);
     _ready = true;
 }
 
@@ -177,10 +192,18 @@ async function runEntries(userId, now = new Date()) {
     let collateral = open.reduce((s, x) => s + Number(x.collateral || 0), 0);
     if (slots <= 0) return { opened: [], reason: 'max positions' };
     const held = new Set(open.map(x => x.underlying));
+    const sectorCount = {};
+    for (const x of open) if (x.sector) sectorCount[x.sector] = (sectorCount[x.sector] || 0) + 1;
+    // Stocks the account already owns (swing or core) — a put on them would double the exposure and
+    // tangle a swing stop with assigned shares.
+    const owned = new Set((await query(`SELECT UPPER(symbol) AS s FROM holdings WHERE user_id = $1 AND quantity > 0`, [String(userId)])).rows.map(r => r.s));
+    const coreSyms = await require('./coreHoldingsService').getCoreSymbols(userId).catch(() => null);
+    if (!coreSyms) return { opened: [], reason: 'could not read protected symbols' };
     const opened = [];
     for (const u of await candidateUnderlyings()) {
         if (slots <= 0) break;
-        if (held.has(u.symbol)) continue;
+        if (held.has(u.symbol) || owned.has(u.symbol) || coreSyms.has(u.symbol)) continue;
+        if ((sectorCount[u.sector] || 0) >= CFG.maxPerSector) continue;
         let pick;
         try { pick = await pickPut(client, u.symbol, u.price, now); } catch (err) { continue; }
         if (!pick) continue;
@@ -198,9 +221,11 @@ async function runEntries(userId, now = new Date()) {
                 symbol: pick.contract, qty: '1', side: 'sell', type: 'limit', limit_price: String(limit),
                 time_in_force: 'day', position_intent: 'sell_to_open',
             }, { headers: client.headers, timeout: 15000 })).data;
-            await query(`INSERT INTO options_income_trades (user_id, contract, underlying, strike, expiry, open_order_id, entry_premium, entry_delta, collateral, next_earnings)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-                [String(userId), pick.contract, u.symbol, pick.strike, pick.expiry, o.id, limit, pick.delta, need, nextEarn]);
+            await query(`INSERT INTO options_income_trades (user_id, contract, underlying, strike, expiry, open_order_id, entry_premium, entry_delta, collateral, next_earnings, sector)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+                [String(userId), pick.contract, u.symbol, pick.strike, pick.expiry, o.id, limit, pick.delta, need, nextEarn, u.sector]);
+            await require('./coreHoldingsService').setOptionsProtected(userId, u.symbol, true);
+            sectorCount[u.sector] = (sectorCount[u.sector] || 0) + 1;
             logger.info('[OptionsIncome] Sell-to-open placed', { userId, contract: pick.contract, limit, delta: pick.delta, dte: pick.dte, premiumPct: pick.premiumPct.toFixed(2) });
             opened.push({ contract: pick.contract, limit, collateral: need });
             held.add(u.symbol); slots--; collateral += need;
@@ -230,12 +255,17 @@ async function runManagement(userId, now = new Date()) {
                 t.status = 'open'; t.entry_premium = Number(o.filled_avg_price);
             } else if (t.status === 'pending_open' && dead) {
                 await query(`UPDATE options_income_trades SET status = 'not_filled', closed_at = NOW() WHERE id = $1`, [t.id]);
+                await _releaseIfDone(userId, t.underlying);
+                continue;
+            } else if (t.status === 'pending_open') {
+                await _maybeReprice(client, userId, t, o, now);
                 continue;
             } else if (t.status === 'pending_close' && filled) {
                 const close = Number(o.filled_avg_price);
                 await query(`UPDATE options_income_trades SET status = 'closed', close_premium = $2, closed_at = NOW(), pnl = ($3 - $2) * 100 * qty WHERE id = $1`,
                     [t.id, close, Number(t.entry_premium)]);
                 actions.push({ contract: t.contract, closed: close });
+                await _releaseIfDone(userId, t.underlying);
                 continue;
             } else if (t.status === 'pending_close' && dead) {
                 await query(`UPDATE options_income_trades SET status = 'open', close_order_id = NULL WHERE id = $1`, [t.id]);
@@ -248,9 +278,21 @@ async function runManagement(userId, now = new Date()) {
         if (dte < 0) {
             const pos = await axios.get(`${client.trade}/v2/positions/${t.contract}`, { headers: client.headers }).catch(() => null);
             if (!pos) {
-                const assigned = await axios.get(`${client.trade}/v2/positions/${t.underlying}`, { headers: client.headers }).catch(() => null);
-                await query(`UPDATE options_income_trades SET status = $2, closed_at = NOW(), close_premium = 0, pnl = $3 * 100 * qty, close_reason = $4 WHERE id = $1`,
-                    [t.id, assigned ? 'assigned' : 'expired', Number(t.entry_premium), assigned ? 'assigned (shares delivered)' : 'expired worthless']);
+                const assigned = (await axios.get(`${client.trade}/v2/positions/${t.underlying}`, { headers: client.headers }).catch(() => null))?.data;
+                if (assigned) {
+                    // Shares were bought at the strike; mark them at today's price (2026-10-26 — was
+                    // booked as a full-premium win however far the stock had fallen).
+                    const px = Number(assigned.current_price) || Number(t.strike);
+                    const pnl = assignmentPnl({ premium: Number(t.entry_premium), strike: Number(t.strike), price: px, qty: Number(t.qty) });
+                    await query(`UPDATE options_income_trades SET status = 'assigned', closed_at = NOW(), close_premium = 0, assigned_price = $2, pnl = $3,
+                                 close_reason = $4 WHERE id = $1`,
+                        [t.id, px, pnl, `assigned — 100 shares at $${Number(t.strike).toFixed(2)}, worth $${px.toFixed(2)} (held, protected from the swing bot)`]);
+                    await require('./coreHoldingsService').setOptionsProtected(userId, t.underlying, true, 'assigned from short put');
+                } else {
+                    await query(`UPDATE options_income_trades SET status = 'expired', closed_at = NOW(), close_premium = 0, pnl = $2 * 100 * qty,
+                                 close_reason = 'expired worthless' WHERE id = $1`, [t.id, Number(t.entry_premium)]);
+                    await _releaseIfDone(userId, t.underlying);
+                }
             }
             continue;
         }
@@ -277,6 +319,48 @@ async function runManagement(userId, now = new Date()) {
         }
     }
     return actions;
+}
+
+/** Pure: P&L of an assigned put marked at today's price: premium kept minus (strike − price) on the shares. */
+function assignmentPnl({ premium, strike, price, qty = 1 }) {
+    return Math.round((premium - Math.max(0, strike - price)) * 100 * qty * 100) / 100;
+}
+
+/** Pure: next limit for an unfilled sell-to-open, or null to leave it. */
+function stepDownLimit({ mid, bid, step, steps, floor, current }) {
+    if (!(mid > 0 && bid > 0) || step > steps) return null;
+    const next = roundTick(Math.max(floor, mid - (mid - bid) * step / steps));
+    return next < current ? next : null;
+}
+
+async function _maybeReprice(client, userId, t, order, now) {
+    if (Number(t.reprice_count) >= CFG.repriceSteps) return;
+    const since = new Date(t.last_reprice_at || t.opened_at).getTime();
+    if (now.getTime() - since < CFG.repriceAfterMin * 60000) return;
+    const s = (await axios.get(`${DATA}/v1beta1/options/snapshots`, {
+        headers: client.headers, params: { symbols: t.contract, feed: 'indicative' }, timeout: 15000,
+    }).catch(() => ({ data: {} }))).data?.snapshots?.[t.contract];
+    const bid = s?.latestQuote?.bp, ask = s?.latestQuote?.ap;
+    const floor = roundTick(Number(t.strike) * CFG.minPremiumPct / 100);
+    const next = stepDownLimit({ mid: (bid + ask) / 2, bid, step: Number(t.reprice_count) + 1, steps: CFG.repriceSteps,
+                                 floor, current: Number(order.limit_price || t.entry_premium) });
+    await query(`UPDATE options_income_trades SET reprice_count = reprice_count + 1, last_reprice_at = NOW() WHERE id = $1`, [t.id]);
+    if (next == null) return;
+    try {
+        const o = (await axios.patch(`${client.trade}/v2/orders/${t.open_order_id}`, { limit_price: String(next) },
+            { headers: client.headers, timeout: 15000 })).data;
+        await query(`UPDATE options_income_trades SET open_order_id = $2, entry_premium = $3 WHERE id = $1`, [t.id, o.id, next]);
+        logger.info('[OptionsIncome] Entry repriced', { userId, contract: t.contract, from: order.limit_price, to: next, step: Number(t.reprice_count) + 1 });
+    } catch (err) {
+        logger.warn('[OptionsIncome] Reprice failed', { userId, contract: t.contract, error: err.response?.data?.message || err.message });
+    }
+}
+
+/** Drop the swing-bot protection once no open/pending put remains on that underlying (never after assignment). */
+async function _releaseIfDone(userId, underlying) {
+    const r = await query(`SELECT 1 FROM options_income_trades WHERE user_id = $1 AND underlying = $2
+                           AND status IN ('pending_open', 'open', 'pending_close', 'assigned') LIMIT 1`, [String(userId), underlying]);
+    if (!r.rows.length) await require('./coreHoldingsService').setOptionsProtected(userId, underlying, false).catch(() => {});
 }
 
 /** Scheduler tick (every 5 min): management in market hours; entries once a day after 11:00 ET. */
@@ -312,9 +396,11 @@ async function summary() {
                COUNT(*) FILTER (WHERE status IN ('closed', 'expired', 'assigned'))::int AS done,
                COUNT(*) FILTER (WHERE status IN ('closed', 'expired', 'assigned') AND pnl > 0)::int AS wins,
                COALESCE(SUM(pnl) FILTER (WHERE status IN ('closed', 'expired', 'assigned')), 0)::float AS pnl,
-               COUNT(*) FILTER (WHERE status = 'assigned')::int AS assigned
-        FROM options_income_trades`);
-    return r.rows[0];
+               COUNT(*) FILTER (WHERE status = 'assigned')::int AS assigned,
+               COALESCE(SUM(collateral * GREATEST(1, EXTRACT(EPOCH FROM (COALESCE(closed_at, NOW()) - opened_at)) / 86400) / 365.0 * $1 / 100)
+                        FILTER (WHERE status IN ('open', 'pending_close', 'closed', 'expired', 'assigned')), 0)::float AS tbill_benchmark
+        FROM options_income_trades`, [riskFreePct()]);
+    return { ...r.rows[0], riskFreePct: riskFreePct() };
 }
 
-module.exports = { CFG, choosePut, nextEarnings, candidateUnderlyings, runEntries, runManagement, runTick, summary, ensureTable };
+module.exports = { CFG, choosePut, assignmentPnl, stepDownLimit, nextEarnings, candidateUnderlyings, runEntries, runManagement, runTick, summary, ensureTable };

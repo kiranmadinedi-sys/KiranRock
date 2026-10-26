@@ -78,8 +78,11 @@ async function paperCoreHealthy(paperId) {
     const core = require('./coreHoldingsService');
     const settings = await core.getSettings(paperId);
     if (!settings.enabled) return { ok: false, why: 'core not enabled on paper' };
-    const since = await query(`SELECT updated_at FROM core_settings WHERE user_id = $1`, [String(paperId)]);
-    const enabledAt = since.rows[0]?.updated_at ? new Date(since.rows[0].updated_at) : null;
+    // Soak clock = when core holdings were first set up (2026-10-26). It used core_settings.updated_at,
+    // which every settings save bumps — a save on 10-26 restarted the "one clean week" clock although
+    // paper core had run since 10-17, so the live approval was never offered.
+    const since = await query(`SELECT MIN(created_at) AS t FROM core_holdings WHERE user_id = $1 AND sleeve = 'core'`, [String(paperId)]);
+    const enabledAt = since.rows[0]?.t ? new Date(since.rows[0].t) : null;
     if (!enabledAt || Date.now() - enabledAt.getTime() < PAPER_SOAK_DAYS * 86400000) return { ok: false, why: 'paper core running for less than a week' };
     const rows = await core.getCoreRows(paperId);
     const summary = await core.coreSummary(paperId);
@@ -148,6 +151,17 @@ async function runWeeklyPromotion(now = new Date()) {
         for (const liveId of await liveApprovalUsers()) {
             const s = await core.getSettings(liveId);
             if (s.enabled) continue;
+            // Core buys whole shares: skip accounts too small to buy one share of every holding
+            // (2026-10-26: a ~$1K account can't buy SPY at 40% or V at 10%).
+            try {
+                const eq0 = (await require('./brokerService').getAccountInfo(liveId)).portfolioValue;
+                const tooSmall = [];
+                for (const h of holdings) {
+                    const px = (await query(`SELECT close::float AS c FROM daily_bars WHERE symbol = $1 ORDER BY timestamp DESC LIMIT 1`, [h.symbol])).rows[0]?.c;
+                    if (px && eq0 * h.targetPct / 100 < px) tooSmall.push(h.symbol);
+                }
+                if (tooSmall.length) { lines.push(`⏳ Core on a live account skipped: too small for whole shares of ${tooSmall.join(', ')}.`); continue; }
+            } catch (_) { /* can't size → don't offer */ continue; }
             let equityTxt = '';
             try {
                 const eq = (await require('./brokerService').getAccountInfo(liveId)).portfolioValue;

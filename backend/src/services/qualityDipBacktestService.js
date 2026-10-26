@@ -98,6 +98,30 @@ function analyze(data, symbols, spy) {
     return rows;
 }
 
+/**
+ * 95% bootstrap interval for mean(dip − random same-year) at horizon h, resampling whole
+ * CAMPAIGNS (not tranches) so overlapping tranches of one campaign aren't counted as independent.
+ */
+function bootstrapEdge(rows, h, iters = 2000) {
+    const byCampaign = {};
+    for (const r of rows) {
+        if (r[`r${h}`] == null || r[`rand${h}`] == null) continue;
+        (byCampaign[r.campaign] ||= []).push(r[`r${h}`] - r[`rand${h}`]);
+    }
+    const camps = Object.values(byCampaign);
+    if (camps.length < 10) return null;
+    const r = rng(12345); const means = [];
+    for (let k = 0; k < iters; k++) {
+        let s = 0, n = 0;
+        for (let i = 0; i < camps.length; i++) { const c = camps[Math.floor(r() * camps.length)]; for (const v of c) { s += v; n++; } }
+        means.push(s / n);
+    }
+    means.sort((a, b) => a - b);
+    const all = camps.flat();
+    const pct = v => Math.round(v * 1000) / 10;
+    return { campaigns: camps.length, edgePp: pct(mean(all)), ci95: [pct(means[Math.floor(iters * 0.025)]), pct(means[Math.floor(iters * 0.975)])] };
+}
+
 function summarize(rows, h) {
     const x = rows.filter(r => r[`r${h}`] != null);
     const pct = v => (v == null ? null : Math.round(v * 1000) / 10);
@@ -169,6 +193,7 @@ async function runValidation({ keyId, secretKey }) {
         const years = [...new Set(rows.map(r => r.year))].sort();
         out[name] = {
             overall: Object.fromEntries(HORIZONS.map(h => [`${h}d`, summarize(rows, h)])),
+            edgeVsRandom: Object.fromEntries(HORIZONS.map(h => [`${h}d`, bootstrapEdge(rows, h)])),
             byYear: Object.fromEntries(years.map(y => [y, summarize(rows.filter(r => r.year === y), 252)])),
             byTranche: Object.fromEntries([1, 2, 3].map(t => [`t${t}`, summarize(rows.filter(r => r.tranche === t), 252)])),
             portfolio: portfolioSim(data, list, spy),
@@ -177,4 +202,4 @@ async function runValidation({ keyId, secretKey }) {
     return out;
 }
 
-module.exports = { IN_SAMPLE, OUT_OF_SAMPLE, signalsFor, analyze, summarize, portfolioSim, runValidation };
+module.exports = { IN_SAMPLE, OUT_OF_SAMPLE, signalsFor, analyze, summarize, bootstrapEdge, portfolioSim, runValidation };

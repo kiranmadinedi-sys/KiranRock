@@ -60,7 +60,7 @@ export default function CoreWatchlist() {
                             <td className="py-2 text-slate-700 dark:text-slate-300">{(r.reasons || []).join(' · ')}</td>
                             <td className="py-2">{money(r.price)}</td>
                             <td className="py-2 whitespace-nowrap" title={r.hi52 ? `52w high ${money(r.hi52)} on ${r.hi52Date}` : ''}>{r.ddPct == null ? '—' : `−${Number(r.ddPct).toFixed(1)}%`}</td>
-                            <td className="py-2 whitespace-nowrap" title={r.valuation?.pe ? `P/E ${r.valuation.pe.toFixed(1)} vs usual ${r.valuation.usualPe?.toFixed(1) ?? '?'}` : ''}>{pct(r.valuation?.peVsUsualPct)}</td>
+                            <td className="py-2 whitespace-nowrap" title={r.valuation?.pe ? `P/E ${r.valuation.pe.toFixed(1)} vs usual ${r.valuation.usualPe?.toFixed(1) ?? '?'} · forward P/E ${r.valuation.forwardPe?.toFixed(1) ?? '?'}` : ''}>{pct(r.valuation?.peVsUsualPct)}</td>
                             <td className="py-2 whitespace-nowrap">{pct(r.valuation?.revenueGrowthPct)} / {pct(r.valuation?.epsGrowthPct)}</td>
                             <td className="py-2 whitespace-nowrap">{r.earningsDate || (r.earningsKnown ? 'none soon' : '—')}</td>
                             <td className="py-2 whitespace-nowrap text-xs text-slate-500" title={r.sources || ''}>{r.asOf || '—'}</td>

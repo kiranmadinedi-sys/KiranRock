@@ -65,6 +65,12 @@ function classify(f) {
         if (f.above200 === false) reasons.push('below its 200-day average — stages, not all at once');
         if (v.peVsUsualPct == null) return { status: 'Dip — review fundamentals', reasons };
         if (v.peVsUsualPct > PRICEY_PCT) return { status: 'Dip — but pricey', reasons };
+        // A low trailing P/E is a false bargain if analysts expect earnings to fall (forward P/E well
+        // above trailing) — review feedback 2026-10-26.
+        if (v.forwardPe != null && v.pe != null && v.forwardPe > v.pe * 1.15) {
+            reasons.push(`forward P/E ${v.forwardPe.toFixed(0)} vs trailing ${v.pe.toFixed(0)} — earnings expected to fall`);
+            return { status: 'Dip — review fundamentals', reasons };
+        }
         return { status: 'Dip — valuation OK', reasons };
     }
     return { status: 'No dip', reasons: [f.ddPct >= 5 ? `${f.ddPct.toFixed(0)}% below its high` : 'near its 52-week high', valNote] };
@@ -211,16 +217,34 @@ async function runDaily(now = new Date(), { notify = true } = {}) {
     }
 }
 
-/** Forward returns by status, for the weekly review: did "Good entry" days actually beat the rest? */
-async function getOutcomes(days = 63) {
+/**
+ * Prospective outcomes (review feedback 2026-10-26): for every stored signal old enough, the stock's
+ * return and SPY's return over the same 1/3/6/12-month window, by status. Rules are frozen while this
+ * accumulates — judge the watchlist on this record, not on how many dips it finds. A symbol repeats
+ * daily, so `symbols` (distinct stocks) is the honest sample size, not `n`.
+ */
+const OUTCOME_HORIZONS = { '1m': 30, '3m': 91, '6m': 182, '12m': 365 };
+async function getOutcomes() {
     await ensureTables();
-    const r = await query(
-        `SELECT s.status, COUNT(*)::int AS n,
-                AVG((SELECT close FROM daily_bars b WHERE b.symbol = s.symbol AND b.timestamp::date >= s.signal_date + $1::int ORDER BY b.timestamp LIMIT 1) / s.price - 1)::float * 100 AS avg_pct
-         FROM core_watchlist_signals s
-         WHERE s.signal_date <= CURRENT_DATE - $1::int AND s.price > 0
-         GROUP BY s.status`, [Math.round(days * 365 / 252)]);
-    return r.rows;
+    const px = `(SELECT close FROM daily_bars b WHERE b.symbol = %SYM% AND (b.timestamp AT TIME ZONE 'UTC')::date >= %DATE% ORDER BY b.timestamp LIMIT 1)`;
+    const at = (sym, date) => px.replace('%SYM%', sym).replace('%DATE%', date);
+    const out = {};
+    for (const [label, days] of Object.entries(OUTCOME_HORIZONS)) {
+        const r = await query(
+            `SELECT status, COUNT(*)::int AS n, COUNT(DISTINCT symbol)::int AS symbols,
+                    AVG(ret)::float * 100 AS avg_pct, AVG(spy)::float * 100 AS spy_pct,
+                    AVG(CASE WHEN ret > spy THEN 1 ELSE 0 END)::float * 100 AS beat_spy_pct
+             FROM (
+                 SELECT s.status, s.symbol,
+                        ${at('s.symbol', `s.signal_date + ${days}`)} / s.price - 1 AS ret,
+                        ${at("'SPY'", `s.signal_date + ${days}`)} / ${at("'SPY'", 's.signal_date')} - 1 AS spy
+                 FROM core_watchlist_signals s
+                 WHERE s.signal_date <= CURRENT_DATE - ${days} AND s.price > 0) x
+             WHERE ret IS NOT NULL AND spy IS NOT NULL
+             GROUP BY status ORDER BY status`);
+        out[label] = r.rows;
+    }
+    return out;
 }
 
 module.exports = { DEFAULT_LIST, classify, evaluate, getList, addSymbol, removeSymbol, getWatchlist, runDaily, getOutcomes, ensureTables };

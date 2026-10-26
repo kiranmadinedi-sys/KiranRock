@@ -42,8 +42,13 @@ const REVIEWS = [
                  WHERE h.user_id = $1 AND c.sleeve = 'core' AND c.active AND h.quantity > 0`, [PAPER]);
             const v = c.rows.reduce((s, x) => s + x.v, 0), pl = c.rows.reduce((s, x) => s + x.pl, 0);
             const first = (await query(`SELECT MIN(created_at)::date::text AS d FROM core_holdings WHERE user_id = $1 AND sleeve = 'core'`, [PAPER])).rows[0]?.d;
+            // Watchlist prospective record (2026-10-26): per status, stock vs SPY over the same window.
+            const o = await require('./coreWatchlistService').getOutcomes().catch(() => ({}));
+            const wl = Object.entries(o).flatMap(([h, rows]) => rows.map(x =>
+                `Watchlist ${h} — ${x.status}: ${pct(x.avg_pct)} vs SPY ${pct(x.spy_pct)} (${x.symbols} stocks, beat SPY ${Math.round(x.beat_spy_pct)}%)`));
             return [`Paper core: ${c.rows.map(x => x.symbol).join(', ')} · $${Math.round(v).toLocaleString()} · ${usd(pl)} (${pct(v - pl > 0 ? pl / (v - pl) * 100 : null)})`,
-                    `SPY since ${first}: ${pct(first ? await _spyPct(first) : null)}`];
+                    `SPY since ${first}: ${pct(first ? await _spyPct(first) : null)}`,
+                    ...(wl.length ? wl : ['Watchlist record: no signal is a month old yet']) ];
         },
     },
     {

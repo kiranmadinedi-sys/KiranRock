@@ -34,6 +34,12 @@ describe('coreWatchlistService.classify', () => {
         expect(st({ ddPct: 14, valuation: { ...base.valuation, revenueGrowthPct: -3 } })).toBe('Review first');
         expect(st({ ddPct: 14, valuation: { ...base.valuation, epsGrowthPct: -25 } })).toBe('Review first');
     });
+    test('cheap trailing P/E but earnings expected to fall → Dip — review fundamentals', () => {
+        const r = classify({ ...base, ddPct: 15, valuation: { ...base.valuation, peVsUsualPct: -30, pe: 20, forwardPe: 28 } });
+        expect(r.status).toBe('Dip — review fundamentals');
+        expect(r.reasons.join(' ')).toMatch(/expected to fall/);
+        expect(st({ ddPct: 15, valuation: { ...base.valuation, peVsUsualPct: -30, pe: 20, forwardPe: 18 } })).toBe('Dip — valuation OK');
+    });
     test('below the 200-day average adds a staged-buying note', () => {
         expect(classify({ ...base, ddPct: 16, above200: false }).reasons.join(' ')).toMatch(/stages/);
     });

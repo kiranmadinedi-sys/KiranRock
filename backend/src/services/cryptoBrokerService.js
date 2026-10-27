@@ -72,6 +72,18 @@ async function _getAuth(userId) {
     return { base, headers };
 }
 
+/** Cancel an entry order and wait for its final state; returns the last order snapshot. */
+async function _cancelAndSettle(base, headers, orderId, last) {
+    await axios.delete(`${base}/orders/${orderId}`, { headers }).catch(() => {}); // 422 if it filled meanwhile
+    for (let i = 0; i < 5; i++) {
+        await new Promise(r => setTimeout(r, 1000));
+        const o = (await axios.get(`${base}/orders/${orderId}`, { headers }).catch(() => ({}))).data;
+        if (o) last = o;
+        if (['filled', 'canceled', 'expired', 'rejected'].includes(last.status)) break;
+    }
+    return last;
+}
+
 /**
  * Crypto-specific stop order — always 'gtc', never 'day'. Kept separate from
  * brokerService.placeStopOrder rather than adding a crypto branch there,
@@ -128,6 +140,16 @@ async function buyCrypto(userId, symbol, quantity, { stopLossPercent, takeProfit
         });
         return null;
     }
+    // 2026-10-27: an earlier entry order can still be open (unfilled at the 9:30 open auction
+    // on paper) — the position check above can't see it yet. Found live: paper AMD/AVGO were
+    // bought twice 45s apart and both orders filled.
+    // Fails closed: if the order check itself fails, skip this cycle rather than risk a double buy.
+    const openOrders = await brokerService.getOpenOrders(userId, symbol).catch(() => null);
+    const openBuy = openOrders ? openOrders.find(o => o.symbol === symbol && o.side === 'buy') : { id: 'unknown — open-order check failed' };
+    if (openBuy) {
+        logger.warn('[CryptoBot] Skipping entry — a buy order for this symbol is still open', { userId, symbol, orderId: openBuy.id });
+        return null;
+    }
 
     const order = await axios.post(`${base}/orders`, {
         symbol, qty: String(quantity), side: 'buy', type: 'market', time_in_force: 'gtc'
@@ -143,8 +165,15 @@ async function buyCrypto(userId, symbol, quantity, { stopLossPercent, takeProfit
     }
 
     if (filled.status !== 'filled') {
-        logger.warn('[CryptoBot] Entry order not filled within poll window', { userId, symbol, status: filled.status });
-        return null;
+        // 2026-10-27: cancel instead of abandoning — an abandoned order filled later, untracked,
+        // and the next cycle bought again. Keep any part that filled before the cancel landed.
+        filled = await _cancelAndSettle(base, headers, order.data.id, filled);
+        if (!(parseFloat(filled.filled_qty) > 0.00000001)) {
+            logger.warn('[CryptoBot] Entry order not filled within poll window — cancelled', { userId, symbol, status: filled.status });
+            return null;
+        }
+        logger.warn('[CryptoBot] Entry order filled only partly within poll window — rest cancelled, tracking the filled part', {
+            userId, symbol, filledQty: filled.filled_qty, status: filled.status });
     }
 
     const fillPrice = parseFloat(filled.filled_avg_price);

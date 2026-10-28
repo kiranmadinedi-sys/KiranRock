@@ -29,6 +29,29 @@ async function _sells(userId, since) {
     return r.rows[0];
 }
 
+/**
+ * One closed put for the options review (2026-10-27): exit, sold → bought back, P&L, how far the
+ * fill landed past its trigger (an earnings gap shows here), days held and return on collateral
+ * per year vs T-bills.
+ */
+function putLine(t, riskFreePct = 4) {
+    const entry = Number(t.entry_premium), close = t.close_premium == null ? null : Number(t.close_premium);
+    const reason = t.close_reason || t.status;
+    const cfg = require('./optionsIncomeService').CFG;
+    const trigger = /^stop/.test(reason) ? entry * cfg.stopMultiple : /^take profit/.test(reason) ? entry * cfg.takeProfitFrac : null;
+    const days = Math.max(1, Math.round((new Date(t.closed_at) - new Date(t.opened_at)) / 86400000));
+    const annPct = t.pnl != null && t.collateral ? t.pnl / t.collateral * 365 / days * 100 : null;
+    const parts = [
+        `${t.underlying} $${Number(t.strike)}P${t.crossed ? ' (earnings)' : ''}: ${reason.split(' — ')[0]}`,
+        `sold $${entry.toFixed(2)} → ${t.status === 'assigned' ? `assigned, stock $${Number(t.assigned_price).toFixed(2)}` : `bought back $${(close ?? 0).toFixed(2)}`}`,
+        usd(t.pnl),
+        ...(trigger != null && close != null ? [`fill vs trigger $${trigger.toFixed(2)}: ${close - trigger > 0 ? '+' : ''}$${(close - trigger).toFixed(2)}/sh`] : []),
+        `${days}d held`,
+        `${pct(annPct)}/yr on collateral vs T-bills ${riskFreePct}%`,
+    ];
+    return parts.join(' · ');
+}
+
 const since28 = now => new Date(now.getTime() - 28 * 86400000).toISOString().slice(0, 10);
 
 const REVIEWS = [
@@ -85,13 +108,15 @@ const REVIEWS = [
         question: 'Are closed puts profitable, and did earnings-crossing ones do worse? → keep, change the 3× stop, or stop.',
         async data() {
             const r = await query(
-                `SELECT status, pnl::float AS pnl, (next_earnings IS NOT NULL AND next_earnings <= expiry) AS crossed
-                 FROM options_income_trades WHERE status NOT IN ('not_filled', 'pending_open')`);
+                `SELECT underlying, strike::float, status, pnl::float AS pnl, entry_premium::float, close_premium::float, close_reason, collateral::float,
+                        assigned_price::float, opened_at, closed_at, (next_earnings IS NOT NULL AND next_earnings <= expiry) AS crossed
+                 FROM options_income_trades WHERE status NOT IN ('not_filled', 'pending_open') ORDER BY closed_at NULLS LAST`);
             const closed = r.rows.filter(x => ['closed', 'expired', 'assigned'].includes(x.status));
             const grp = f => { const g = closed.filter(f); return `${g.length} closed, ${g.filter(x => x.pnl > 0).length} won, ${usd(g.reduce((s, x) => s + (x.pnl || 0), 0))}`; };
             const s = await require('./optionsIncomeService').summary().catch(() => null);
             return [`Open: ${r.rows.length - closed.length} · Closed: ${grp(() => true)}`,
                     `Held through earnings: ${grp(x => x.crossed)} · Earnings-free: ${grp(x => !x.crossed)}`,
+                    ...closed.map(x => putLine(x, s?.riskFreePct ?? 4)),
                     ...(s ? [`Same collateral in T-bills (${s.riskFreePct}%/yr): ${usd(s.tbill_benchmark)} — the puts must clearly beat this to be worth the risk${s.assigned ? ` · ${s.assigned} assigned` : ''}`] : [])];
         },
     },
@@ -158,4 +183,4 @@ async function buildSection(now = new Date()) {
             ...lines.map(esc), `Next week: ${esc(next.title)}`].join('\n');
 }
 
-module.exports = { REVIEWS, reviewForDate, buildSection };
+module.exports = { REVIEWS, reviewForDate, buildSection, putLine };

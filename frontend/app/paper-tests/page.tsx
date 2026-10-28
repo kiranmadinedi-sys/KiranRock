@@ -49,6 +49,25 @@ export default function PaperTestsPage() {
                             {stat('Open P&L (today)', $(data.options.summary.unrealized), (data.options.summary.unrealized ?? 0) >= 0 ? 'text-green-600' : 'text-red-600')}
                             {stat(`T-bills instead (${data.options.summary.riskFreePct ?? 4}%/yr)`, $(data.options.summary.tbillBenchmark))}
                         </div>
+                        {data.options.trades.some((o: any) => o.plan) && (<>
+                            <h3 className="text-sm font-semibold text-slate-900 dark:text-white mb-2">Open puts — exit plan &amp; risk</h3>
+                            <div className="overflow-x-auto mb-2"><table className="w-full text-sm">
+                                <thead><tr>{['Stock', 'Stock price', 'Strike', 'Cushion', 'Put now / sold at', 'Open P&L', 'Take profit at', 'Stop at', 'Earnings', 'Closes by', 'If assigned', 'Watch'].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
+                                <tbody>{data.options.trades.filter((o: any) => o.plan).map((o: any) => (
+                                    <tr key={'plan' + o.contract} className="border-t border-slate-100 dark:border-slate-700">
+                                        <td className="py-2 font-medium">{o.underlying}</td><td>{$(o.plan.stockPrice)}</td><td>{$(o.strike)}</td>
+                                        <td className={o.plan.cushionPct == null ? '' : o.plan.cushionPct < 0 ? 'text-red-600' : o.plan.cushionPct < 5 ? 'text-amber-600' : 'text-green-600'}>{o.plan.cushionPct == null ? '—' : `${o.plan.cushionPct > 0 ? '+' : ''}${o.plan.cushionPct}%`}</td>
+                                        <td>{$(o.plan.mark)} / {$(o.premium)}</td>
+                                        <td className={(o.unrealized ?? 0) >= 0 ? 'text-green-600' : 'text-red-600'}>{$(o.unrealized)}</td>
+                                        <td>{$(o.plan.takeProfitAt)}</td><td>{$(o.plan.stopAt)}</td>
+                                        <td className={o.plan.earningsBeforeClose ? 'text-red-600 font-medium' : ''}>{o.plan.earnings ?? '—'}</td>
+                                        <td>{o.plan.closeBy}</td><td>{$(o.plan.assignmentCost)}</td>
+                                        <td className="text-xs">{o.plan.flags.length ? o.plan.flags.map((x: string) => <span key={x} className="inline-block mr-1 mb-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300">{x}</span>) : <span className="text-green-600">ok</span>}</td>
+                                    </tr>))}
+                                </tbody>
+                            </table></div>
+                            <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">Prices are per share (×100 per contract). The stop is checked during market hours only — an overnight gap (e.g. on earnings) can fill well past it. Puts opened before the 10-21 earnings filter can still hold through earnings.</p>
+                        </>)}
                         <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">The fair test: closed + open P&amp;L should clearly beat what the same collateral would have earned in T-bills (SGOV) with no risk.</p>
                         <div className="overflow-x-auto"><table className="w-full text-sm">
                             <thead><tr>{['Contract', 'Stock', 'Sector', 'Strike', 'Expiry', 'Premium', 'Delta', 'Collateral', 'Status', 'P&L'].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>

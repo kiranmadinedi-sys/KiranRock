@@ -403,4 +403,31 @@ async function summary() {
     return { ...r.rows[0], riskFreePct: riskFreePct() };
 }
 
-module.exports = { CFG, choosePut, assignmentPnl, stepDownLimit, nextEarnings, candidateUnderlyings, runEntries, runManagement, runTick, summary, ensureTable };
+/**
+ * Exit plan + risk flags for one open put (2026-10-27): the prices and dates the management loop
+ * acts on, plus what assignment would cost. Note the stop is checked in market hours only — an
+ * earnings gap can fill well past it.
+ */
+function exitPlan(t, { mark = null, stockPrice = null } = {}) {
+    const entry = Number(t.premium ?? t.entry_premium), strike = Number(t.strike);
+    const exp = new Date(`${String(t.expiry).slice(0, 10)}T00:00:00Z`);
+    const closeBy = new Date(exp.getTime() - CFG.closeDte * 86400000).toISOString().slice(0, 10);
+    const earnings = t.next_earnings ? String(t.next_earnings).slice(0, 10) : null;
+    const plan = {
+        takeProfitAt: Math.round(entry * CFG.takeProfitFrac * 100) / 100,
+        stopAt: Math.round(entry * CFG.stopMultiple * 100) / 100,
+        closeBy, earnings,
+        earningsBeforeClose: !!earnings && earnings <= closeBy,
+        assignmentCost: strike * 100 * (t.qty || 1),
+        mark, stockPrice,
+        cushionPct: stockPrice ? Math.round((stockPrice / strike - 1) * 10000) / 100 : null,
+    };
+    plan.flags = [
+        ...(stockPrice != null && stockPrice < strike ? ['below strike'] : []),
+        ...(plan.earningsBeforeClose ? ['earnings before close'] : []),
+        ...(mark != null && mark >= entry * (CFG.stopMultiple - 1) ? ['near stop'] : []),
+    ];
+    return plan;
+}
+
+module.exports = { CFG, exitPlan, choosePut, assignmentPnl, stepDownLimit, nextEarnings, candidateUnderlyings, runEntries, runManagement, runTick, summary, ensureTable };

@@ -1092,6 +1092,8 @@ async function getSlippageSizeMultiplier(symbol) {
 
 // High-water mark per userId — reset on process restart (safe: resets protection to current value)
 const _portfolioPeaks = new Map();
+const _lastPortfolioValue = new Map(); // last accepted reading per user, for the jump guard
+const _pendingJump = new Map();
 
 /**
  * 3-level portfolio drawdown circuit breaker (PANTHEON RISK_POLICY).
@@ -1110,6 +1112,21 @@ async function checkMaxDrawdown(userId, currentPortfolioValue) {
         const HALT_PCT   = parseFloat(process.env.MAX_DRAWDOWN_PCT    || '15');
 
         const peak = _portfolioPeaks.get(userId) || currentPortfolioValue;
+
+        // 2026-10-29: a single bad reading must not become the peak — a real account doesn't gain
+        // 20%+ between two 5-minute cycles. A jump counts only once the next reading confirms it
+        // (within 5%), so a real deposit is still accepted one cycle later.
+        const last = _lastPortfolioValue.get(userId);
+        if (last && currentPortfolioValue > last * 1.2) {
+            const pending = _pendingJump.get(userId);
+            if (!(pending && Math.abs(currentPortfolioValue / pending - 1) < 0.05)) {
+                _pendingJump.set(userId, currentPortfolioValue);
+                logger.warn('[DrawdownBreaker] Ignoring unconfirmed jump in portfolio value', { userId, last, currentPortfolioValue });
+                return { halt: false, paperOnly: false, reduceSizing: false, drawdownPct: 0 };
+            }
+        }
+        _pendingJump.delete(userId);
+        _lastPortfolioValue.set(userId, currentPortfolioValue);
 
         if (currentPortfolioValue > peak) {
             _portfolioPeaks.set(userId, currentPortfolioValue);
@@ -3404,7 +3421,11 @@ async function executeAutonomousTrading(userId) {
                     buyingPower:    brokerAcct.buyingPower?.toFixed(2),
                 });
             } catch (bpErr) {
-                logger.warn('[CashGuard] Could not fetch Alpaca account — using DB balance', {
+                // 2026-10-29: the DB fallback is not a real account value (kmadined: $10,697 vs a real
+                // ~$7,510, cash $5,062 vs $1,879). It set the drawdown breaker's peak and halted every
+                // later cycle at a fake 30% drawdown. Now: no new buys and no peak update this cycle.
+                sessionRiskConfig._accountUnverified = true;
+                logger.warn('[CashGuard] Could not fetch Alpaca account — no new buys this cycle (DB balance is not trusted)', {
                     userId, err: bpErr.message
                 });
             }
@@ -3473,7 +3494,9 @@ async function executeAutonomousTrading(userId) {
         }
         
         // Max portfolio drawdown — 3-level PANTHEON circuit breaker
-        const drawdownState = await checkMaxDrawdown(userId, totalPortfolioValue);
+        const drawdownState = sessionRiskConfig._accountUnverified
+            ? { halt: false, paperOnly: false, reduceSizing: false, drawdownPct: 0 }
+            : await checkMaxDrawdown(userId, totalPortfolioValue);
         if (drawdownState.halt) {
             return { success: false, message: `Max drawdown exceeded (${drawdownState.drawdownPct.toFixed(1)}%) — all new buys halted` };
         }
@@ -4798,6 +4821,10 @@ async function executeAutonomousTrading(userId) {
             }
             
             if (shares > 0) {
+                if (sessionRiskConfig._accountUnverified) {
+                    logger.warn('[CashGuard] Skipping buy — broker account could not be read this cycle', { userId, symbol: opportunity.symbol });
+                    continue;
+                }
                 // DRAWDOWN Level 2: paper-only mode blocks live new buys
                 if (sessionRiskConfig._drawdownPaperOnly && brokerService.isLive) {
                     logger.warn('[DrawdownBreaker] Skipping live buy — paper-only mode (Level 2)', {
@@ -6044,6 +6071,7 @@ module.exports = {
 // Test-only exports — stripped from consideration in production because NODE_ENV !== 'test'
 if (process.env.NODE_ENV === 'test') {
     module.exports._test = {
+        checkMaxDrawdown,
         checkLossStreakBreaker,
         deriveStockSetupFamily,
         refreshSectorRotationCache,

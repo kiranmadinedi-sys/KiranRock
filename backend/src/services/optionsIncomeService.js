@@ -250,82 +250,87 @@ async function runManagement(userId, now = new Date()) {
     const today = etToday(now);
     const actions = [];
     for (const t of rows) {
-        // reconcile the pending order first
-        const oid = t.status === 'pending_close' ? t.close_order_id : t.status === 'pending_open' ? t.open_order_id : null;
-        if (oid) {
-            const o = (await axios.get(`${client.trade}/v2/orders/${oid}`, { headers: client.headers, timeout: 15000 }).catch(() => ({ data: null }))).data;
-            if (!o) continue;
-            const filled = o.status === 'filled', dead = ['canceled', 'expired', 'rejected'].includes(o.status);
-            if (t.status === 'pending_open' && filled) {
-                await query(`UPDATE options_income_trades SET status = 'open', entry_premium = $2 WHERE id = $1`, [t.id, Number(o.filled_avg_price)]);
-                t.status = 'open'; t.entry_premium = Number(o.filled_avg_price);
-            } else if (t.status === 'pending_open' && dead) {
-                await query(`UPDATE options_income_trades SET status = 'not_filled', closed_at = NOW() WHERE id = $1`, [t.id]);
-                await _releaseIfDone(userId, t.underlying);
-                continue;
-            } else if (t.status === 'pending_open') {
-                await _maybeReprice(client, userId, t, o, now);
-                continue;
-            } else if (t.status === 'pending_close' && filled) {
-                const close = Number(o.filled_avg_price);
-                await query(`UPDATE options_income_trades SET status = 'closed', close_premium = $2, closed_at = NOW(), pnl = ($3 - $2) * 100 * qty WHERE id = $1`,
-                    [t.id, close, Number(t.entry_premium)]);
-                actions.push({ contract: t.contract, closed: close });
-                await _releaseIfDone(userId, t.underlying);
-                continue;
-            } else if (t.status === 'pending_close' && dead) {
-                await query(`UPDATE options_income_trades SET status = 'open', close_order_id = NULL WHERE id = $1`, [t.id]);
-                t.status = 'open';
-            } else continue;
-        }
-        if (t.status !== 'open') continue;
-        const dte = dayDiff(ymd(t.expiry), today);
-        // expired / assigned: the contract is gone from positions
-        if (dte < 0) {
-            const pos = await axios.get(`${client.trade}/v2/positions/${t.contract}`, { headers: client.headers }).catch(() => null);
-            if (!pos) {
-                const assigned = (await axios.get(`${client.trade}/v2/positions/${t.underlying}`, { headers: client.headers }).catch(() => null))?.data;
-                if (assigned) {
-                    // Shares were bought at the strike; mark them at today's price (2026-10-26 — was
-                    // booked as a full-premium win however far the stock had fallen).
-                    const px = Number(assigned.current_price) || Number(t.strike);
-                    const pnl = assignmentPnl({ premium: Number(t.entry_premium), strike: Number(t.strike), price: px, qty: Number(t.qty) });
-                    await query(`UPDATE options_income_trades SET status = 'assigned', closed_at = NOW(), close_premium = 0, assigned_price = $2, pnl = $3,
-                                 close_reason = $4 WHERE id = $1`,
-                        [t.id, px, pnl, `assigned — 100 shares at $${Number(t.strike).toFixed(2)}, worth $${px.toFixed(2)} (held, protected from the swing bot)`]);
-                    await require('./coreHoldingsService').setOptionsProtected(userId, t.underlying, true, 'assigned from short put');
-                } else {
-                    await query(`UPDATE options_income_trades SET status = 'expired', closed_at = NOW(), close_premium = 0, pnl = $2 * 100 * qty,
-                                 close_reason = 'expired worthless' WHERE id = $1`, [t.id, Number(t.entry_premium)]);
-                    await _releaseIfDone(userId, t.underlying);
-                }
-            } else {
-                // Past expiry but the broker still holds it: never silent again (this is how the
-                // 10-30 date bug hid every open put from management for 10 days).
-                logger.warn('[OptionsIncome] Put past expiry still held at broker — not managed', { userId, contract: t.contract, expiry: ymd(t.expiry), dte });
-            }
-            continue;
-        }
-        const s = (await axios.get(`${DATA}/v1beta1/options/snapshots`, {
-            headers: client.headers, params: { symbols: t.contract, feed: 'indicative' }, timeout: 15000,
-        }).catch(() => ({ data: {} }))).data?.snapshots?.[t.contract];
-        const ask = s?.latestQuote?.ap;
-        if (!(ask > 0)) continue;
-        const entry = Number(t.entry_premium);
-        const reason = ask <= entry * CFG.takeProfitFrac ? 'take profit (50%)'
-            : ask >= entry * CFG.stopMultiple ? 'stop (3× premium)'
-            : dte <= CFG.closeDte ? `close near expiry (${dte}d)` : null;
-        if (!reason) continue;
+        // One put failing (bad data, DB error) must not stop the others being managed (2026-10-30).
         try {
-            const o = (await axios.post(`${client.trade}/v2/orders`, {
-                symbol: t.contract, qty: String(t.qty), side: 'buy', type: 'limit', limit_price: String(roundTick(ask)),
-                time_in_force: 'day', position_intent: 'buy_to_close',
-            }, { headers: client.headers, timeout: 15000 })).data;
-            await query(`UPDATE options_income_trades SET status = 'pending_close', close_order_id = $2, close_reason = $3 WHERE id = $1`, [t.id, o.id, reason]);
-            logger.info('[OptionsIncome] Buy-to-close placed', { userId, contract: t.contract, ask, entry, reason });
-            actions.push({ contract: t.contract, reason });
+            // reconcile the pending order first
+            const oid = t.status === 'pending_close' ? t.close_order_id : t.status === 'pending_open' ? t.open_order_id : null;
+            if (oid) {
+                const o = (await axios.get(`${client.trade}/v2/orders/${oid}`, { headers: client.headers, timeout: 15000 }).catch(() => ({ data: null }))).data;
+                if (!o) continue;
+                const filled = o.status === 'filled', dead = ['canceled', 'expired', 'rejected'].includes(o.status);
+                if (t.status === 'pending_open' && filled) {
+                    await query(`UPDATE options_income_trades SET status = 'open', entry_premium = $2 WHERE id = $1`, [t.id, Number(o.filled_avg_price)]);
+                    t.status = 'open'; t.entry_premium = Number(o.filled_avg_price);
+                } else if (t.status === 'pending_open' && dead) {
+                    await query(`UPDATE options_income_trades SET status = 'not_filled', closed_at = NOW() WHERE id = $1`, [t.id]);
+                    await _releaseIfDone(userId, t.underlying);
+                    continue;
+                } else if (t.status === 'pending_open') {
+                    await _maybeReprice(client, userId, t, o, now);
+                    continue;
+                } else if (t.status === 'pending_close' && filled) {
+                    const close = Number(o.filled_avg_price);
+                    await query(`UPDATE options_income_trades SET status = 'closed', close_premium = $2::numeric, closed_at = NOW(), pnl = ($3::numeric - $2::numeric) * 100 * qty WHERE id = $1`,
+                        [t.id, close, Number(t.entry_premium)]);
+                    actions.push({ contract: t.contract, closed: close });
+                    await _releaseIfDone(userId, t.underlying);
+                    continue;
+                } else if (t.status === 'pending_close' && dead) {
+                    await query(`UPDATE options_income_trades SET status = 'open', close_order_id = NULL WHERE id = $1`, [t.id]);
+                    t.status = 'open';
+                } else continue;
+            }
+            if (t.status !== 'open') continue;
+            const dte = dayDiff(ymd(t.expiry), today);
+            // expired / assigned: the contract is gone from positions
+            if (dte < 0) {
+                const pos = await axios.get(`${client.trade}/v2/positions/${t.contract}`, { headers: client.headers }).catch(() => null);
+                if (!pos) {
+                    const assigned = (await axios.get(`${client.trade}/v2/positions/${t.underlying}`, { headers: client.headers }).catch(() => null))?.data;
+                    if (assigned) {
+                        // Shares were bought at the strike; mark them at today's price (2026-10-26 — was
+                        // booked as a full-premium win however far the stock had fallen).
+                        const px = Number(assigned.current_price) || Number(t.strike);
+                        const pnl = assignmentPnl({ premium: Number(t.entry_premium), strike: Number(t.strike), price: px, qty: Number(t.qty) });
+                        await query(`UPDATE options_income_trades SET status = 'assigned', closed_at = NOW(), close_premium = 0, assigned_price = $2, pnl = $3,
+                                     close_reason = $4 WHERE id = $1`,
+                            [t.id, px, pnl, `assigned — 100 shares at $${Number(t.strike).toFixed(2)}, worth $${px.toFixed(2)} (held, protected from the swing bot)`]);
+                        await require('./coreHoldingsService').setOptionsProtected(userId, t.underlying, true, 'assigned from short put');
+                    } else {
+                        await query(`UPDATE options_income_trades SET status = 'expired', closed_at = NOW(), close_premium = 0, pnl = $2::numeric * 100 * qty,
+                                     close_reason = 'expired worthless' WHERE id = $1`, [t.id, Number(t.entry_premium)]);
+                        await _releaseIfDone(userId, t.underlying);
+                    }
+                } else {
+                    // Past expiry but the broker still holds it: never silent again (this is how the
+                    // 10-30 date bug hid every open put from management for 10 days).
+                    logger.warn('[OptionsIncome] Put past expiry still held at broker — not managed', { userId, contract: t.contract, expiry: ymd(t.expiry), dte });
+                }
+                continue;
+            }
+            const s = (await axios.get(`${DATA}/v1beta1/options/snapshots`, {
+                headers: client.headers, params: { symbols: t.contract, feed: 'indicative' }, timeout: 15000,
+            }).catch(() => ({ data: {} }))).data?.snapshots?.[t.contract];
+            const ask = s?.latestQuote?.ap;
+            if (!(ask > 0)) continue;
+            const entry = Number(t.entry_premium);
+            const reason = ask <= entry * CFG.takeProfitFrac ? 'take profit (50%)'
+                : ask >= entry * CFG.stopMultiple ? 'stop (3× premium)'
+                : dte <= CFG.closeDte ? `close near expiry (${dte}d)` : null;
+            if (!reason) continue;
+            try {
+                const o = (await axios.post(`${client.trade}/v2/orders`, {
+                    symbol: t.contract, qty: String(t.qty), side: 'buy', type: 'limit', limit_price: String(roundTick(ask)),
+                    time_in_force: 'day', position_intent: 'buy_to_close',
+                }, { headers: client.headers, timeout: 15000 })).data;
+                await query(`UPDATE options_income_trades SET status = 'pending_close', close_order_id = $2, close_reason = $3 WHERE id = $1`, [t.id, o.id, reason]);
+                logger.info('[OptionsIncome] Buy-to-close placed', { userId, contract: t.contract, ask, entry, reason });
+                actions.push({ contract: t.contract, reason });
+            } catch (err) {
+                logger.warn('[OptionsIncome] Close rejected', { userId, contract: t.contract, error: err.response?.data?.message || err.message });
+            }
         } catch (err) {
-            logger.warn('[OptionsIncome] Close rejected', { userId, contract: t.contract, error: err.response?.data?.message || err.message });
+            logger.warn('[OptionsIncome] Managing put failed — others continue', { userId, contract: t.contract, error: err.message });
         }
     }
     return actions;

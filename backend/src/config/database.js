@@ -70,17 +70,30 @@ async function disconnect() {
 }
 
 
+// 2026-10-29: the remaining bursts (10-23 18:35, 10-26 02:35, 10-27 18:00, 10-28 00:25 —
+// 7-20 errors each, all inside ~15s) are machine-wide stalls: the local LLM holds ~20 GB of
+// the 31 GB RAM and Windows pages hard, so every process waiting for a connection times out
+// together. A connect timeout means the query was never sent, so retrying it is safe even for
+// writes. Any other error is not retried.
+let CONNECT_RETRY_DELAYS_MS = [2000, 5000];
+function isConnectTimeout(error) {
+    return /timeout exceeded when trying to connect|Connection terminated due to connection timeout/i.test(error?.message || '');
+}
+
 // Helper function to execute queries
 async function query(text, params) {
-    const start = Date.now();
-    try {
-        const res = await pool.query(text, params);
-        const duration = Date.now() - start;
-        // logger.debug('Executed query', { text, duration, rows: res.rowCount });
-        return res;
-    } catch (error) {
-        logger.error('Database query error', { text, error: error.message });
-        throw error;
+    const _retryDelays = CONNECT_RETRY_DELAYS_MS;
+    for (let attempt = 0; ; attempt++) {
+        try {
+            return await pool.query(text, params);
+        } catch (error) {
+            if (isConnectTimeout(error) && attempt < _retryDelays.length) {
+                await new Promise(r => setTimeout(r, _retryDelays[attempt]));
+                continue;
+            }
+            logger.error('Database query error', { text, error: error.message, attempts: attempt + 1 });
+            throw error;
+        }
     }
 }
 
@@ -106,5 +119,6 @@ module.exports = {
     query,
     transaction,
     connect,
-    disconnect
+    disconnect,
+    _setConnectRetryDelays: (d) => { CONNECT_RETRY_DELAYS_MS = d; }, // tests only
 };

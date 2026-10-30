@@ -1096,6 +1096,16 @@ const _lastPortfolioValue = new Map(); // last accepted reading per user, for th
 const _pendingJump = new Map();
 
 /**
+ * Drawdown Level 2 (paper-only mode) applies to live accounts only. Uses the account's own
+ * paper/live flag, not the server-wide ALPACA_PAPER env; unreadable credentials count as live.
+ */
+async function drawdownBlocksLiveBuys(userId, drawdownState) {
+    if (!drawdownState?.paperOnly) return false;
+    const creds = await userDb.getUserAlpacaCredentials(userId).catch(() => ({ isPaper: false }));
+    return creds?.isPaper === false;
+}
+
+/**
  * 3-level portfolio drawdown circuit breaker (PANTHEON RISK_POLICY).
  *
  * Level 1 — REDUCE  (drawdown_reduce_pct,  default  5%): halve new position sizes.
@@ -3500,8 +3510,11 @@ async function executeAutonomousTrading(userId) {
         if (drawdownState.halt) {
             return { success: false, message: `Max drawdown exceeded (${drawdownState.drawdownPct.toFixed(1)}%) — all new buys halted` };
         }
-        // Level 2: paper-only mode — block live new buys but allow the session to manage exits
-        if (drawdownState.paperOnly && brokerService.isLive) {
+        // Level 2: paper-only mode — block live new buys but allow the session to manage exits.
+        // 2026-10-29: was brokerService.isLive, which reads the server-wide ALPACA_PAPER env
+        // (true) — so Level 2 never applied to the per-user live accounts. Use the account's own
+        // flag; if it can't be read, treat the account as live (fail closed).
+        if (await drawdownBlocksLiveBuys(userId, drawdownState)) {
             logger.warn('[DrawdownBreaker] Live new buys blocked — paper-only mode active', {
                 drawdownPct: drawdownState.drawdownPct.toFixed(2)
             });
@@ -4826,7 +4839,7 @@ async function executeAutonomousTrading(userId) {
                     continue;
                 }
                 // DRAWDOWN Level 2: paper-only mode blocks live new buys
-                if (sessionRiskConfig._drawdownPaperOnly && brokerService.isLive) {
+                if (sessionRiskConfig._drawdownPaperOnly) { // only ever set for live accounts (above)
                     logger.warn('[DrawdownBreaker] Skipping live buy — paper-only mode (Level 2)', {
                         symbol: opportunity.symbol, drawdownPct: drawdownState.drawdownPct.toFixed(2)
                     });
@@ -6071,7 +6084,7 @@ module.exports = {
 // Test-only exports — stripped from consideration in production because NODE_ENV !== 'test'
 if (process.env.NODE_ENV === 'test') {
     module.exports._test = {
-        checkMaxDrawdown,
+        checkMaxDrawdown, drawdownBlocksLiveBuys,
         checkLossStreakBreaker,
         deriveStockSetupFamily,
         refreshSectorRotationCache,

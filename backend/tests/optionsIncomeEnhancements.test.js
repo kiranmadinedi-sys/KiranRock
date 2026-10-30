@@ -47,3 +47,14 @@ describe('exitPlan', () => {
         expect(p).toMatchObject({ mark: null, cushionPct: null, earnings: null, closeBy: '2026-11-06', flags: [] });
     });
 });
+
+describe('ymd (2026-10-30: pg DATE objects made every open put look expired)', () => {
+    const { ymd, exitPlan } = require('../src/services/optionsIncomeService');
+    test('a pg DATE (local-midnight Date) becomes YYYY-MM-DD, not "Fri Nov 20"', () => {
+        expect(ymd(new Date(2026, 10, 20))).toBe('2026-11-20');
+        expect(ymd('2026-11-20')).toBe('2026-11-20');
+    });
+    test('exitPlan accepts a Date expiry', () => {
+        expect(exitPlan({ premium: 0.71, strike: 30, expiry: new Date(2026, 10, 20) }).closeBy).toBe('2026-11-13');
+    });
+});

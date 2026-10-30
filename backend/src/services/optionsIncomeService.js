@@ -96,6 +96,12 @@ const DATA = 'https://data.alpaca.markets';
 const dayDiff = (a, b) => Math.round((new Date(a) - new Date(b)) / 86400000);
 const roundTick = p => (p >= 3 ? Math.round(p * 20) / 20 : Math.round(p * 100) / 100);
 const etToday = (now = new Date()) => now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+// A DATE column comes back from pg as a local-midnight Date object; String(date).slice(0, 10) gave
+// "Fri Nov 20", parsed as Nov 20 2001 — so every open put looked expired and was never managed
+// (no stop, take-profit or 7-day close from the first entry on 10-20 until the fix on 10-30).
+const ymd = v => v instanceof Date
+    ? `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`
+    : String(v).slice(0, 10);
 
 /** Pick the best put to sell on one underlying, or null. Pure apart from the snapshot fetch. */
 async function pickPut(client, underlying, price, now = new Date()) {
@@ -273,7 +279,7 @@ async function runManagement(userId, now = new Date()) {
             } else continue;
         }
         if (t.status !== 'open') continue;
-        const dte = dayDiff(String(t.expiry).slice(0, 10), today);
+        const dte = dayDiff(ymd(t.expiry), today);
         // expired / assigned: the contract is gone from positions
         if (dte < 0) {
             const pos = await axios.get(`${client.trade}/v2/positions/${t.contract}`, { headers: client.headers }).catch(() => null);
@@ -293,6 +299,10 @@ async function runManagement(userId, now = new Date()) {
                                  close_reason = 'expired worthless' WHERE id = $1`, [t.id, Number(t.entry_premium)]);
                     await _releaseIfDone(userId, t.underlying);
                 }
+            } else {
+                // Past expiry but the broker still holds it: never silent again (this is how the
+                // 10-30 date bug hid every open put from management for 10 days).
+                logger.warn('[OptionsIncome] Put past expiry still held at broker — not managed', { userId, contract: t.contract, expiry: ymd(t.expiry), dte });
             }
             continue;
         }
@@ -410,7 +420,7 @@ async function summary() {
  */
 function exitPlan(t, { mark = null, stockPrice = null } = {}) {
     const entry = Number(t.premium ?? t.entry_premium), strike = Number(t.strike);
-    const exp = new Date(`${String(t.expiry).slice(0, 10)}T00:00:00Z`);
+    const exp = new Date(`${ymd(t.expiry)}T00:00:00Z`);
     const closeBy = new Date(exp.getTime() - CFG.closeDte * 86400000).toISOString().slice(0, 10);
     const earnings = t.next_earnings ? String(t.next_earnings).slice(0, 10) : null;
     const plan = {
@@ -430,4 +440,4 @@ function exitPlan(t, { mark = null, stockPrice = null } = {}) {
     return plan;
 }
 
-module.exports = { CFG, exitPlan, choosePut, assignmentPnl, stepDownLimit, nextEarnings, candidateUnderlyings, runEntries, runManagement, runTick, summary, ensureTable };
+module.exports = { CFG, ymd, exitPlan, choosePut, assignmentPnl, stepDownLimit, nextEarnings, candidateUnderlyings, runEntries, runManagement, runTick, summary, ensureTable };

@@ -408,7 +408,8 @@ async function getVerdictWithDBHistory(data) {
             const header = 'Date       |  Open  |  High  |   Low  | Close  |   Volume';
             const sep    = '-----------+--------+--------+--------+--------+----------';
             const lines  = rows.map(r => {
-                const dt  = String(r.date).slice(0, 10);
+                // pg DATE is a Date object: String() gave "Mon Mar 09" (no year) in the model's price table (fixed 2026-10-30)
+                const dt  = r.date instanceof Date ? r.date.toLocaleDateString('en-CA') : String(r.date).slice(0, 10);
                 const o   = Number(r.open ).toFixed(2).padStart(6);
                 const h   = Number(r.high ).toFixed(2).padStart(6);
                 const l   = Number(r.low  ).toFixed(2).padStart(6);

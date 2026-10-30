@@ -1191,7 +1191,7 @@ function buildTickerBlock(tc) {
                 const scanAgeDays = (Date.now() - new Date(s.date).getTime()) / 86_400_000;
                 if (scanAgeDays > 5) {
                     lines.push('');
-                    lines.push(`⚠ DATA COHERENCE NOTE: Scan is ${Math.round(scanAgeDays)} days old (last run: ${String(s.date).slice(0, 10)}).`);
+                    lines.push(`⚠ DATA COHERENCE NOTE: Scan is ${Math.round(scanAgeDays)} days old (last run: ${s.date instanceof Date ? s.date.toLocaleDateString('en-CA') : String(s.date).slice(0, 10)}).`);
                     lines.push('  Factor scores may not reflect current market conditions.');
                     lines.push('  Trade levels have been rebased from live price where applicable, but qualitative signals should be treated with lower confidence.');
                 }

@@ -2092,10 +2092,11 @@ async function runWeeklyParameterHealthCheck() {
         try {
             const { runBacktest } = require('./historicalBacktestEngine');
             const topSymbolsRes = await query(`
-                SELECT DISTINCT symbol FROM asset_universe_daily
+                SELECT symbol FROM asset_universe_daily
                 WHERE universe_date >= CURRENT_DATE - INTERVAL '3 days'
                   AND rs_score IS NOT NULL
-                ORDER BY rs_score DESC NULLS LAST LIMIT 20
+                GROUP BY symbol
+                ORDER BY MAX(rs_score) DESC LIMIT 20 -- was SELECT DISTINCT … ORDER BY rs_score: invalid SQL, failed every Friday
             `);
             const btSymbols = topSymbolsRes.rows.map(r => r.symbol);
             if (btSymbols.length >= 5) {

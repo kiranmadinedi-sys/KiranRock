@@ -397,6 +397,22 @@ async function runNightlyUniverseScan(opts = {}) {
                 _timeout(getVixLevel(), 15000, 15),                          // fallback VIX=15 if Yahoo hangs
                 _timeout(marketRegimeService.getMarketRegime(), 15000, null) // fallback regime=null → NEUTRAL
             ]);
+            // getStockUniverse() returns only the top HERMES_MAX_STOCKS (1000), while the resume
+            // path above scans every qualified symbol (~2,750). Found 2026-10-30: restarts killed
+            // the daytime build, the scan built it itself, and covered 978 symbols instead of
+            // ~2,750. Scan the full qualified list here too. The build writes its completion
+            // marker without awaiting it, so give it a few seconds.
+            if (fullUniverse.length > 0) {
+                for (let i = 0; i < 5; i++) {
+                    const all = await marketScreenerService.getCompletedHermesSymbols(today).catch(() => null);
+                    if (all && all.length > fullUniverse.length) {
+                        console.log(`[NightlyScan] Fresh HERMES build: scanning all ${all.length} qualified symbols, not just the top ${fullUniverse.length}`);
+                        fullUniverse = all.filter(s => s.tier !== 1).map(s => ({ symbol: s.symbol, isETF: false }));
+                        break;
+                    }
+                    await new Promise(r => setTimeout(r, 2000));
+                }
+            }
         }
         if (fullUniverse.length === 0) {
             const elapsedMin = ((Date.now() - startTime) / 60000).toFixed(1);

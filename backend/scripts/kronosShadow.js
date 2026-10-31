@@ -116,7 +116,7 @@ async function report() {
     await ensureTable();
     const rows = (await query(`SELECT run_date::text run_date, as_of_date::text as_of, symbol, ai_rank, kronos_rank
                                  FROM kronos_shadow_picks WHERE kronos_rank IS NOT NULL ORDER BY run_date`)).rows;
-    if (!rows.length) { console.log('No shadow days recorded yet.'); return; }
+    if (!rows.length) return 'Kronos shadow test — no days recorded yet.';
     const symbols = [...new Set(rows.map(r => r.symbol))];
     await require('../src/services/historyBarsService').backfill(symbols, { start: rows[0].as_of });
     const bars = (await query(`SELECT symbol, d::text d, o, c FROM history_bars WHERE symbol = ANY($1) AND d >= $2 ORDER BY symbol, d`,
@@ -142,8 +142,8 @@ async function report() {
         daily.push({ d, kronos: top('kronos_rank'), ai: top('ai_rank'), all: mean(ok.map(x => x.ret)) - COST });
     }
     const pct = x => `${x >= 0 ? '+' : ''}${(x * 100).toFixed(2)}%`;
-    console.log(`Kronos shadow test — ${byDay.size} days recorded, ${daily.length} with 5-day outcomes (${pending} still open)`);
-    if (!daily.length) return;
+    const out = [`Kronos shadow test (log only) — ${byDay.size} days recorded, ${daily.length} with 5-day outcomes (${pending} still open)`];
+    if (!daily.length) return out.join('\n');
     const boot = xs => {
         const m = [];
         for (let k = 0; k < 2000; k++) m.push(mean(xs.map(() => xs[Math.floor(Math.random() * xs.length)])));
@@ -152,10 +152,20 @@ async function report() {
     };
     const dk = daily.map(x => x.kronos - x.ai), dr = daily.map(x => x.kronos - x.all);
     const [lo, hi] = boot(dk), [lo2, hi2] = boot(dr);
-    console.log(`Average 5-day return per trade   Kronos ${pct(mean(daily.map(x => x.kronos)))}   AI order ${pct(mean(daily.map(x => x.ai)))}   all 40 ${pct(mean(daily.map(x => x.all)))}`);
-    console.log(`Kronos − AI order per trade      ${pct(mean(dk))}  (95% CI ${pct(lo)} to ${pct(hi)})  Kronos better on ${Math.round(100 * dk.filter(x => x > 0).length / dk.length)}% of days`);
-    console.log(`Kronos − all 40 per trade        ${pct(mean(dr))}  (95% CI ${pct(lo2)} to ${pct(hi2)})`);
-    console.log('Decision rule: ~20+ days with outcomes, and both CIs above zero, before any paper trading arm.');
+    out.push(
+        `Average 5-day return per trade: Kronos ${pct(mean(daily.map(x => x.kronos)))}, AI order ${pct(mean(daily.map(x => x.ai)))}, all 40 ${pct(mean(daily.map(x => x.all)))}`,
+        `Kronos vs AI order: ${pct(mean(dk))} per trade (95% CI ${pct(lo)} to ${pct(hi)}), better on ${Math.round(100 * dk.filter(x => x > 0).length / dk.length)}% of days`,
+        `Kronos vs all 40: ${pct(mean(dr))} per trade (95% CI ${pct(lo2)} to ${pct(hi2)})`,
+        daily.length >= 20 && lo > 0 && lo2 > 0
+            ? 'PASSES the decision rule (20+ days, both CIs above zero) — worth a paper trading arm.'
+            : 'Decision rule: 20+ days with outcomes and both CIs above zero before any paper trading arm.');
+    return out.join('\n');
+}
+
+// Admin chat only — this is platform research, not any account's trades.
+async function telegram(text) {
+    const ok = await require('../src/services/telegramAlertService').sendAdminMessage(text); // Markdown, falls back to plain text
+    if (!ok) throw new Error('Telegram send failed');
 }
 
 (async () => {
@@ -163,7 +173,11 @@ async function report() {
     const runDate = process.argv[3] || chicagoDate();
     if (mode === 'export') process.exitCode = (await exportDay(runDate)) ? 0 : 3; // 3 = nothing to do
     else if (mode === 'import') await importDay(runDate);
-    else if (mode === 'report') await report();
-    else { console.log('usage: node scripts/kronosShadow.js export|import|report [YYYY-MM-DD]'); process.exitCode = 1; }
+    else if (mode === 'report') {
+        const text = await report();
+        console.log(text);
+        if (process.argv.includes('--telegram')) await telegram(text);
+    } else if (mode === 'alert') await telegram(`Kronos shadow run failed: ${process.argv.slice(3).join(' ')}`);
+    else { console.log('usage: node scripts/kronosShadow.js export|import|report [--telegram]|alert <message> [YYYY-MM-DD]'); process.exitCode = 1; }
 })().catch(err => { console.error('FAILED', err.message); process.exitCode = 1; })
     .finally(() => setTimeout(() => process.exit(), 100));

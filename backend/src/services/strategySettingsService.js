@@ -24,6 +24,18 @@ const METHODS = ['control', 'oversold', 'steady', 'insider', 'oil', 'sector'];
  *              2025 and 2026. Paper first; a live account changes only by approval.
  */
 const EXIT_PROFILES = ['standard', 'wide'];
+/**
+ * Swing position sizing (2026-10-31, swing review of kmadined Aug–Oct, 99 sells):
+ *   conviction — Kelly × score tier × signal clarity × confidence cap (every account's default).
+ *                Dollar-weighted it returned +0.27%/trade vs +1.01% equal-weighted: trades of
+ *                $300+ lost −0.16%, smaller ones made +0.62% — bigger bets went to worse trades.
+ *                The Kronos test found the same: the AI-score top 5 lagged a random 5 of the top 40.
+ *   equal      — every swing position gets the same share of the swing sleeve (cash + open swing
+ *                positions, core excluded); only market-wide risk (regime, VIX, macro, drawdown,
+ *                earnings, losing streak) and the per-trade risk/heat caps change the size.
+ * Paper may switch by itself; a live account only by approval.
+ */
+const SIZING_METHODS = ['conviction', 'equal'];
 const CACHE_MS = 60 * 1000;
 const _cache = new Map();
 
@@ -38,6 +50,9 @@ async function ensureTable() {
             updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )`);
     await query(`ALTER TABLE strategy_settings ADD COLUMN IF NOT EXISTS exit_profile TEXT NOT NULL DEFAULT 'standard'`);
+    await query(`ALTER TABLE strategy_settings ADD COLUMN IF NOT EXISTS sizing_method TEXT NOT NULL DEFAULT 'conviction'`);
+    await query(`ALTER TABLE strategy_settings ADD COLUMN IF NOT EXISTS equal_weight_slots INT`); // null = the account's max positions
+    await query(`ALTER TABLE strategy_settings ADD COLUMN IF NOT EXISTS blocked_setups TEXT[] NOT NULL DEFAULT '{}'`);
     // methods list widened 2026-10-17 (oil, sector) — keep the constraint in step with METHODS
     await query(`ALTER TABLE strategy_settings DROP CONSTRAINT IF EXISTS strategy_settings_selection_method_check`);
     await query(`ALTER TABLE strategy_settings ADD CONSTRAINT strategy_settings_selection_method_check
@@ -95,6 +110,57 @@ async function setExitProfile(userId, profile, source) {
     _exitCache.delete(String(userId));
 }
 
+const _sizingCache = new Map();
+/**
+ * { method, slots, blockedSetups } — 'conviction' / no blocks unless the account was switched.
+ * Never throws: a read error keeps the last known value, else the defaults.
+ */
+async function getSizingSettings(userId) {
+    const key = String(userId);
+    const hit = _sizingCache.get(key);
+    if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
+    const fallback = { method: 'conviction', slots: null, blockedSetups: [] };
+    try {
+        await ensureTable();
+        const r = await query(`SELECT sizing_method, equal_weight_slots, blocked_setups FROM strategy_settings WHERE user_id = $1`, [key]);
+        const row = r.rows[0];
+        const value = row ? {
+            method: SIZING_METHODS.includes(row.sizing_method) ? row.sizing_method : 'conviction',
+            slots: row.equal_weight_slots > 0 ? row.equal_weight_slots : null,
+            blockedSetups: row.blocked_setups || [],
+        } : fallback;
+        _sizingCache.set(key, { at: Date.now(), value });
+        return value;
+    } catch (_) {
+        return hit ? hit.value : fallback;
+    }
+}
+
+async function setSizingMethod(userId, method, slots, source) {
+    if (!SIZING_METHODS.includes(method)) throw new Error(`Unknown sizing method: ${method}`);
+    if (slots != null && !(Number.isInteger(slots) && slots >= 1 && slots <= 20)) throw new Error('Slots must be 1-20');
+    await ensureTable();
+    await query(
+        `INSERT INTO strategy_settings (user_id, sizing_method, equal_weight_slots, source) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (user_id) DO UPDATE SET sizing_method = EXCLUDED.sizing_method, equal_weight_slots = EXCLUDED.equal_weight_slots,
+                                            source = EXCLUDED.source, updated_at = NOW()`,
+        [String(userId), method, slots ?? null, source || null]
+    );
+    _sizingCache.delete(String(userId));
+}
+
+/** Setup families this account no longer enters (exits of open positions are unaffected). */
+async function setBlockedSetups(userId, setups, source) {
+    if (!Array.isArray(setups) || setups.some(s => typeof s !== 'string' || !/^[a-z_]+$/.test(s))) throw new Error('Invalid setup list');
+    await ensureTable();
+    await query(
+        `INSERT INTO strategy_settings (user_id, blocked_setups, source) VALUES ($1, $2, $3)
+         ON CONFLICT (user_id) DO UPDATE SET blocked_setups = EXCLUDED.blocked_setups, source = EXCLUDED.source, updated_at = NOW()`,
+        [String(userId), [...new Set(setups)], source || null]
+    );
+    _sizingCache.delete(String(userId));
+}
+
 async function getSettingsRow(userId) {
     await ensureTable();
     const r = await query(`SELECT selection_method AS method, source, updated_at FROM strategy_settings WHERE user_id = $1`, [String(userId)]);
@@ -112,4 +178,7 @@ async function setSelectionMethod(userId, method, source) {
     _cache.delete(String(userId));
 }
 
-module.exports = { METHODS, EXIT_PROFILES, getSelectionMethod, getSettingsRow, setSelectionMethod, getExitProfile, setExitProfile, ensureTable };
+module.exports = {
+    METHODS, EXIT_PROFILES, SIZING_METHODS, getSelectionMethod, getSettingsRow, setSelectionMethod,
+    getExitProfile, setExitProfile, getSizingSettings, setSizingMethod, setBlockedSetups, ensureTable,
+};

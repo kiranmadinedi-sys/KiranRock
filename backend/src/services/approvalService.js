@@ -10,6 +10,8 @@
  * Kinds:
  *   selection_method — payload { method }: switch the account's stock-picking method
  *   core_enable      — payload { holdings: [{symbol, targetPct}], cashReservePct }: turn on core holdings
+ *   sizing_method    — payload { method, slots? }: swing position sizing (conviction | equal)
+ *   blocked_setups   — payload { setups: [...] }: setup families the swing bot stops entering
  */
 const { query } = require('../config/database');
 const { logger } = require('../utils/logger');
@@ -84,6 +86,20 @@ const HANDLERS = {
     async exit_profile(userId, payload) {
         await require('./strategySettingsService').setExitProfile(userId, payload.profile, 'approved');
         return `Exit profile is now "${payload.profile}".`;
+    },
+    // 2026-10-31 swing review: same-size swing positions instead of conviction sizing.
+    async sizing_method(userId, payload) {
+        await require('./strategySettingsService').setSizingMethod(userId, payload.method, payload.slots ?? null, 'approved');
+        return payload.method === 'equal'
+            ? `Swing positions are now equal-sized${payload.slots ? ` (swing money split into ${payload.slots})` : ''}. Applies to the next buy.`
+            : `Swing sizing is back to "${payload.method}".`;
+    },
+    // 2026-10-31 swing review: stop entering setup families that lose money on this account.
+    async blocked_setups(userId, payload) {
+        await require('./strategySettingsService').setBlockedSetups(userId, payload.setups, 'approved');
+        return payload.setups.length
+            ? `No new ${payload.setups.join(', ')} entries. Open positions are managed as before.`
+            : 'All setup types are allowed again.';
     },
     async core_enable(userId, payload) {
         const core = require('./coreHoldingsService');

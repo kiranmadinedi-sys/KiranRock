@@ -13,10 +13,13 @@ const r2 = v => (v == null || !isFinite(v) ? null : Math.round(v * 100) / 100);
 const pct = v => (v == null ? 'n/a' : `${v >= 0 ? '+' : ''}${r2(v)}%`);
 const usd = v => (v == null ? 'n/a' : `${v < 0 ? '−' : '+'}$${Math.abs(v).toFixed(2)}`);
 
+// history_bars, not daily_bars: daily_bars' newest SPY row can be an intraday price (2026-10-30
+// held 760.69 — the real close was ~755.7 after the late selloff). The Saturday market study tops
+// history_bars up just before this section is built.
 async function _spyPct(fromDate) {
     const r = await query(
-        `SELECT (SELECT close FROM daily_bars WHERE symbol = 'SPY' AND timestamp >= $1::date ORDER BY timestamp LIMIT 1)::float AS a,
-                (SELECT close FROM daily_bars WHERE symbol = 'SPY' ORDER BY timestamp DESC LIMIT 1)::float AS b`, [fromDate]);
+        `SELECT (SELECT c FROM history_bars WHERE symbol = 'SPY' AND d >= $1::date ORDER BY d LIMIT 1)::float AS a,
+                (SELECT c FROM history_bars WHERE symbol = 'SPY' ORDER BY d DESC LIMIT 1)::float AS b`, [fromDate]);
     const { a, b } = r.rows[0] || {};
     return a && b ? (b / a - 1) * 100 : null;
 }
@@ -157,15 +160,42 @@ const REVIEWS = [
     {
         key: 'swing_vs_spy', title: 'Swing bot vs SPY (kmadined)',
         question: 'Did the swing bot beat SPY on the same capital since the 10-24 fixes? → keep live, shrink, or move the money to core.',
-        async data() {
-            const s = await _sells(KMADINED, '2026-10-24');
-            const sum = await require('./dailyPnlTargetService').buildAccountSummary(KMADINED).catch(() => null);
-            const spy = await _spyPct('2026-10-24');
-            return [`Since 2026-10-24: ${s.n} exits, ${s.wins} won, realized ${usd(s.pnl)}`,
-                    `Same capital in SPY: ${spy != null && sum?.equity ? usd(sum.equity * spy / 100) : 'n/a'} (SPY ${pct(spy)})`];
-        },
+        data: () => swingVsSpyLines(),
     },
 ];
+
+const SWING_TEST_FROM = '2026-10-24';
+
+/**
+ * Swing bot vs SPY on the swing bot's OWN money (2026-10-31). Was: realized swing P&L vs SPY on the
+ * whole account — but core now holds ~70% of kmadined, so the swing bot trades ~$2.3K of a ~$7.5K
+ * account and that comparison could never be fair. Swing money = cash (core's reserve, which is
+ * the swing bot's to use) + open swing positions; swing P&L = realized since the start + unrealized
+ * on swing positions opened since then. Shown every Saturday until the Dec 19 decision.
+ */
+async function swingVsSpyLines(userId = KMADINED, since = SWING_TEST_FROM) {
+    const core = await require('./coreHoldingsService').getCoreSymbols(userId).catch(() => new Set());
+    const s = await _sells(userId, since);
+    const h = (await query(
+        `SELECT symbol, quantity::float * COALESCE(current_price, average_price)::float AS value,
+                COALESCE(gain_loss, 0)::float AS unrealized, purchase_date
+         FROM holdings WHERE user_id::text = $1 AND quantity > 0`, [userId])).rows
+        .filter(x => !core.has(String(x.symbol).toUpperCase()));
+    const cash = (await query(
+        `SELECT cash_balance::float AS cash FROM portfolio_snapshots WHERE user_id::text = $1 ORDER BY captured_at DESC LIMIT 1`, [userId])).rows[0]?.cash;
+    const swingMoney = (cash || 0) + h.reduce((t, x) => t + x.value, 0);
+    const unrealized = h.filter(x => !x.purchase_date || new Date(x.purchase_date) >= new Date(since)).reduce((t, x) => t + x.unrealized, 0);
+    const swingPnl = s.pnl + unrealized;
+    const swingPct = swingMoney > 0 ? swingPnl / swingMoney * 100 : null;
+    const spy = await _spyPct(since);
+    const sizing = await require('./strategySettingsService').getSizingSettings(userId);
+    const verdict = swingPct == null || spy == null ? '' : swingPct > spy ? ' → AHEAD of SPY' : ' → BEHIND SPY';
+    return [
+        `Swing money: $${swingMoney.toFixed(0)} (cash reserve + ${h.length} open swing positions; core excluded)`,
+        `Since ${since}: ${s.n} exits, ${s.wins} won, realized ${usd(s.pnl)}, open ${usd(unrealized)} → ${pct(swingPct)} on swing money vs SPY ${pct(spy)}${verdict}`,
+        `Sizing: ${sizing.method}${sizing.slots ? ` (${sizing.slots} slots)` : ''}${sizing.blockedSetups.length ? ` · blocked: ${sizing.blockedSetups.join(', ')}` : ''} · decision at the Dec 19 review`,
+    ];
+}
 
 function reviewForDate(now = new Date()) {
     const weeks = Math.floor((now.getTime() - new Date(`${ROTATION_START}T00:00:00Z`).getTime()) / (7 * 86400000));
@@ -179,8 +209,15 @@ async function buildSection(now = new Date()) {
     const { review, next } = reviewForDate(now);
     let lines;
     try { lines = await review.data(now); } catch (err) { lines = [`(data unavailable: ${err.message})`]; }
-    return [`<b>📋 This week's strategy review: ${esc(review.title)}</b>`, `<i>${esc(review.question)}</i>`,
-            ...lines.map(esc), `Next week: ${esc(next.title)}`].join('\n');
+    const out = [`<b>📋 This week's strategy review: ${esc(review.title)}</b>`, `<i>${esc(review.question)}</i>`,
+                 ...lines.map(esc), `Next week: ${esc(next.title)}`];
+    // The Dec 19 swing-vs-SPY decision needs a weekly track record, not one look per 8-week rotation.
+    if (review.key !== 'swing_vs_spy' && now < new Date('2026-12-20T00:00:00Z')) {
+        let sw;
+        try { sw = await swingVsSpyLines(); } catch (err) { sw = [`(data unavailable: ${err.message})`]; }
+        out.push('', '<b>🎯 Swing bot vs SPY (weekly until the Dec 19 decision)</b>', ...sw.map(esc));
+    }
+    return out.join('\n');
 }
 
-module.exports = { REVIEWS, reviewForDate, buildSection, putLine };
+module.exports = { REVIEWS, reviewForDate, buildSection, putLine, swingVsSpyLines };

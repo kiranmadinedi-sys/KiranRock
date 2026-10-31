@@ -197,6 +197,13 @@ function rotateScanList(list, cursor, keepTop = SCAN_ROTATION_KEEP_TOP) {
     return [...top, ...rest.slice(off), ...rest.slice(0, off)];
 }
 
+/** Pure: equal sizing (2026-10-31) — the swing sleeve split into slots, scaled by market-wide
+ *  risk, never more than the cash still unspent this cycle. */
+function equalPositionSize({ sleeve, slots, riskMult = 1, remainingCapital = Infinity }) {
+    if (!(sleeve > 0) || !(slots >= 1)) return 0;
+    return Math.max(0, Math.min((sleeve / slots) * riskMult, remainingCapital));
+}
+
 /** Call once per scheduler tick, before dispatching to users — see ORACLE_MAX_PER_CYCLE comment. */
 function resetOracleCycleBudget() {
     _oracleCycleCount = 0;
@@ -3960,6 +3967,8 @@ async function executeAutonomousTrading(userId) {
         // Execute trades
         const trades = [];
         let remainingCapital = availableToInvest;
+        // Per-account sizing method + blocked setup families (strategySettingsService, 2026-10-31).
+        const _sizing = await require('./strategySettingsService').getSizingSettings(userId);
         // IMPROVEMENT: fetch bleeding symbols once per session to block chronically losing stocks
         const bleedingSymbols = await getBleedingSymbols(userId);
 
@@ -4047,6 +4056,10 @@ async function executeAutonomousTrading(userId) {
                 _bumpGateStat(userId, 'regimeCap');
                 _recordRejectionForRemaining(_oppIdx, 'regime_cap', `${regime.regime} cap=${regimeNewPosCap}`);
                 break;
+            }
+            if (opportunity.setupFamily && _sizing.blockedSetups.includes(opportunity.setupFamily)) {
+                _recordRejection(opportunity, userId, 'setup_blocked', opportunity.setupFamily);
+                continue;
             }
 
             // Skip earnings-flagged stocks entirely (0-4 days — too close)
@@ -4502,6 +4515,11 @@ async function executeAutonomousTrading(userId) {
             // to fill its one slot, not size down as if it were splitting risk across four.
             const _baseConcentrationScale = Math.max(1, 4 / Math.max(1, sessionRiskConfig.maxOpenPositions || 4));
             let positionFraction = kellyFraction * combinedMultiplier * _baseConcentrationScale;
+            // Equal sizing keeps only market-wide/risk factors (regime, losing streak, execution
+            // cost; VIX and macro are applied below) — no Kelly, score tier, signal clarity or
+            // expectancy, which the 2026-10-31 review found sized up the WORSE trades.
+            const _equalSizing = _sizing.method === 'equal';
+            let _equalRiskMult = effectiveSizeMultiplier * streakBreaker.multiplier * slippageMultiplier;
 
             // VIX-level size reduction — EXTREME/PANIC already blocks entries upstream.
             // ELEVATED (VIX ~20–25): trade at 75% size — fear is rising, reduce exposure.
@@ -4516,6 +4534,7 @@ async function executeAutonomousTrading(userId) {
                     vixAtSpike: _spikeState.vixAtSpike, multiplier: _vixSizeMult
                 });
                 positionFraction *= _vixSizeMult;
+                _equalRiskMult *= _vixSizeMult;
             }
 
             // Macro/news risk dampener — added 2026-09-14. Derived from a daily
@@ -4530,10 +4549,22 @@ async function executeAutonomousTrading(userId) {
                     userId, symbol: opportunity.symbol, multiplier: _macroSizeMult
                 });
                 positionFraction *= _macroSizeMult;
+                _equalRiskMult *= _macroSizeMult;
             }
 
             // Calculate the dollar amount for the position.
-            let positionSize = accountTotalValue * positionFraction;
+            // Equal: the swing sleeve (accountTotalValue here = swing cash + open swing positions,
+            // core excluded) split into equal slots, so the whole sleeve can be put to work.
+            const _equalSlots = _sizing.slots || sessionRiskConfig.maxOpenPositions || 6;
+            let positionSize = _equalSizing
+                ? equalPositionSize({ sleeve: accountTotalValue, slots: _equalSlots, riskMult: _equalRiskMult, remainingCapital })
+                : accountTotalValue * positionFraction;
+            // Risk limits (per-trade risk, portfolio heat) are a share of the WHOLE account. In
+            // conviction mode they still use accountTotalValue, which excludes core — since core
+            // went live (Oct 2026) that shrank kmadined's swing buys ~3× ($300-500 → $56-135).
+            // Left as is for conviction accounts so a live account changes only by approval;
+            // switching to equal sizing fixes it.
+            const _riskBase = _equalSizing && totalPortfolioValue > 0 ? totalPortfolioValue : accountTotalValue;
 
             // Cap at remaining sector room and max order notional.
             positionSize = Math.min(positionSize, sectorLimit - sectorCurrent);
@@ -4548,7 +4579,7 @@ async function executeAutonomousTrading(userId) {
             //
             // Result: high-ATR stocks get smaller positions; low-confidence or bad-regime
             // trades shrink through the same formula rather than as a separate multiplier.
-            if (opportunity.atr && opportunity.atr > 0) {
+            if (!_equalSizing && opportunity.atr && opportunity.atr > 0) {
                 const baseRisk         = riskConfig.minPositionSize || 0.02;
                 const confidenceFactor = Math.max(0.3, (opportunity.confidence || 50) / 100);
                 const regimeFactor     = effectiveSizeMultiplier; // regime.positionSizeMultiplier (0.25–1.0)
@@ -4587,7 +4618,8 @@ async function executeAutonomousTrading(userId) {
 
             logger.info('Position sizing', {
                 userId, symbol: opportunity.symbol,
-                method: 'Kelly+ATR unified',
+                method: _equalSizing ? `equal (${_equalSlots} slots)` : 'Kelly+ATR unified',
+                equalRiskMult: _equalSizing ? _equalRiskMult.toFixed(3) : undefined,
                 kellyFraction: kellyFraction.toFixed(4),
                 confidence: ((opportunity.confidence || 50) / 100).toFixed(2),
                 streakMultiplier: streakBreaker.multiplier,
@@ -4629,7 +4661,7 @@ async function executeAutonomousTrading(userId) {
             const _concentrationScale = Math.max(1, 4 / Math.max(1, sessionRiskConfig.maxOpenPositions || 4));
             const maxByConf = Math.min(1, _baseMaxByConf * _concentrationScale);
             const confCap = accountTotalValue * maxByConf;
-            if (positionSize > confCap) {
+            if (!_equalSizing && positionSize > confCap) {
                 logger.info('Position size clipped by confidence cap', {
                     userId, symbol: opportunity.symbol,
                     confPct, maxByConf: (maxByConf * 100).toFixed(0) + '%',
@@ -4646,9 +4678,9 @@ async function executeAutonomousTrading(userId) {
             const _riskPerTrade = Math.min(
                 Math.max(
                     riskConfig.maxRiskPerTrade || 15,
-                    accountTotalValue * 0.003    // 0.3% of equity — scales with account growth
+                    _riskBase * 0.003    // 0.3% of equity — scales with account growth
                 ),
-                accountTotalValue * 0.01         // hard ceiling: never risk more than 1% per trade
+                _riskBase * 0.01         // hard ceiling: never risk more than 1% per trade
             );
             // Use the actual stop distance for this specific opportunity rather than the global config.
             // Opportunity.stop comes from ATR-based calc; using config default (5%) would undersize
@@ -4672,7 +4704,7 @@ async function executeAutonomousTrading(userId) {
             // positions this cycle. Shrinks this trade to fit remaining budget rather than
             // skipping outright; if budget is already exhausted, stop opening new positions entirely.
             {
-                const _maxHeatUsd = accountTotalValue * (_maxPortfolioRiskPct / 100);
+                const _maxHeatUsd = _riskBase * (_maxPortfolioRiskPct / 100);
                 const _heatRemaining = _maxHeatUsd - runningHeatUsd;
                 if (_heatRemaining <= 0) {
                     logger.info('[HeatGate] Portfolio risk budget exhausted — no more new entries this cycle', {
@@ -4999,6 +5031,7 @@ async function executeAutonomousTrading(userId) {
                             return {
                                 shares: actualShares,
                                 requestedShares: shares,
+                                sizingMethod: _sizing.method,
                                 sector: opportunity.sector,
                                 baseAiScore: opportunity.baseAiScore,
                                 recommendation: opportunity.recommendation,
@@ -6113,7 +6146,7 @@ module.exports = {
 // Test-only exports — stripped from consideration in production because NODE_ENV !== 'test'
 if (process.env.NODE_ENV === 'test') {
     module.exports._test = {
-        checkMaxDrawdown, drawdownBlocksLiveBuys, rotateScanList,
+        checkMaxDrawdown, drawdownBlocksLiveBuys, rotateScanList, equalPositionSize,
         checkLossStreakBreaker,
         deriveStockSetupFamily,
         refreshSectorRotationCache,

@@ -217,6 +217,17 @@ async function buildSection(now = new Date()) {
         try { sw = await swingVsSpyLines(); } catch (err) { sw = [`(data unavailable: ${err.message})`]; }
         out.push('', '<b>🎯 Swing bot vs SPY (weekly until the Dec 19 decision)</b>', ...sw.map(esc));
     }
+    // 2026-11-01: the week's worst exits with a verdict, and wash sales (admin's own accounts only —
+    // this report goes to the admin chat, so never another owner's trades).
+    const lookback = require('./tradeLookbackService');
+    for (const [label, uid] of [['kmadined', KMADINED], ['paper', PAPER]]) {
+        let wl;
+        try { wl = await lookback.reportLines(uid, now); } catch (err) { wl = [`(data unavailable: ${err.message})`]; }
+        out.push('', `<b>🔎 Worst exits this week — ${label}</b>`, ...wl.map(esc));
+    }
+    let ws;
+    try { ws = await require('./washSaleService').reportLines(KMADINED, now.getFullYear()); } catch (err) { ws = [`(data unavailable: ${err.message})`]; }
+    out.push('', '<b>🧾 Wash sales — kmadined</b>', ...ws.map(esc));
     return out.join('\n');
 }
 

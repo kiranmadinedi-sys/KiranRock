@@ -179,6 +179,24 @@ let _oracleCycleCount = 0;
 const LIVE_ORACLE_CUTOFF_MS = parseInt(process.env.LIVE_ORACLE_CUTOFF_MS || '120000', 10);
 const LIVE_SCAN_CUTOFF_MS   = parseInt(process.env.LIVE_SCAN_CUTOFF_MS   || '150000', 10);
 
+// Candidate rotation (2026-10-31). Each cycle runs out of time after ~8 of its 40 candidates,
+// and every cycle restarts at the top of the same score-ordered list, so kmadined analyzed only
+// 8-18 distinct stocks a day (414 analyses on 14 symbols on 10-26) and never looked at the rest.
+// With rotation, the top SCAN_ROTATION_KEEP_TOP are still re-checked every cycle, and the rest
+// continue from where the previous cycle stopped, so the whole list is covered every few cycles.
+// Opt-in per account (SCAN_ROTATION_USER_IDS). A live account is added only after the user approves.
+const SCAN_ROTATION_KEEP_TOP = parseInt(process.env.SCAN_ROTATION_KEEP_TOP || '5', 10);
+const _scanCursor = new Map(); // userId -> position in the rotating tail
+const scanRotationEnabled = (userId) => (process.env.SCAN_ROTATION_USER_IDS || '')
+    .split(',').map(s => s.trim()).filter(Boolean).includes(String(userId));
+/** Pure: keep the first keepTop in place, rotate the rest to start at cursor. */
+function rotateScanList(list, cursor, keepTop = SCAN_ROTATION_KEEP_TOP) {
+    const top = list.slice(0, keepTop), rest = list.slice(keepTop);
+    if (!rest.length) return list.slice();
+    const off = ((cursor % rest.length) + rest.length) % rest.length;
+    return [...top, ...rest.slice(off), ...rest.slice(0, off)];
+}
+
 /** Call once per scheduler tick, before dispatching to users — see ORACLE_MAX_PER_CYCLE comment. */
 function resetOracleCycleBudget() {
     _oracleCycleCount = 0;
@@ -2856,7 +2874,7 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
     const CANDIDATE_CAP = (riskConfig.maxOpenPositions || 1) <= 1
         ? 8
         : Math.max(15, (riskConfig.maxOpenPositions || 1) * 10);
-    const scanList = qualified.length > CANDIDATE_CAP ? qualified.slice(0, CANDIDATE_CAP) : qualified;
+    let scanList = qualified.length > CANDIDATE_CAP ? qualified.slice(0, CANDIDATE_CAP) : qualified;
     if (scanList.length < qualified.length) {
         logger.info('[LiveCandidateCap] Trimmed live-scan candidates to fit cycle budget', {
             userId, qualified: qualified.length, capped: scanList.length, maxOpenPositions: riskConfig.maxOpenPositions
@@ -2867,6 +2885,10 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
     const opportunities = [];
     const allAnalyzed = []; // all fulfilled results — used to build sector rotation cache
     const batchSize = 5;  // Reduced from 20 to 5 to respect rate limits
+
+    const _rotating = scanRotationEnabled(userId);
+    if (_rotating) scanList = rotateScanList(scanList, _scanCursor.get(String(userId)) || 0);
+    let _attempted = 0; // symbols actually sent for analysis this cycle (advances the rotation)
 
     for (let i = 0; i < scanList.length; i += batchSize) {
         // See LIVE_SCAN_CUTOFF_MS — act on what's already scored rather than let the
@@ -2879,6 +2901,7 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
             break;
         }
         const batch = scanList.slice(i, i + batchSize);
+        _attempted += batch.length;
         const results = await Promise.allSettled(
             batch.map(stock => analyzeStockWithAICached(stock.symbol, vixLevel, regime, oracleDeadline))
         );
@@ -2938,6 +2961,12 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
         }
     }
     
+    if (_rotating) {
+        const _uid = String(userId);
+        _scanCursor.set(_uid, (_scanCursor.get(_uid) || 0) + Math.max(0, _attempted - SCAN_ROTATION_KEEP_TOP));
+        logger.info('[ScanRotation] Cycle coverage', { userId, attempted: _attempted, listSize: scanList.length, nextCursor: _scanCursor.get(_uid) });
+    }
+
     // Per-user scan outcome summary — analyzeStockWithAI itself is shared/cached across
     // users (its own "AI Decision" log line carries no userId, by design, so the same
     // analysis isn't redone per user), which made it impossible to tell whether a given
@@ -6084,7 +6113,7 @@ module.exports = {
 // Test-only exports — stripped from consideration in production because NODE_ENV !== 'test'
 if (process.env.NODE_ENV === 'test') {
     module.exports._test = {
-        checkMaxDrawdown, drawdownBlocksLiveBuys,
+        checkMaxDrawdown, drawdownBlocksLiveBuys, rotateScanList,
         checkLossStreakBreaker,
         deriveStockSetupFamily,
         refreshSectorRotationCache,

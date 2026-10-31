@@ -184,6 +184,9 @@ async function reconcileFillHistory(userId, { trigger = 'SCHEDULED', lookbackHou
             // never reconcile it into the stock `trades` table. Alpaca crypto symbols
             // always carry a '/' (e.g. "BTC/USD"); equities never do.
             .filter(o => !o.symbol.includes('/'))
+            // Options (the paper options-income test) are tracked in options_income_trades, not
+            // `trades` — flagged HPQ's buy-to-close as a missing fill on 2026-10-31.
+            .filter(o => o.asset_class !== 'us_option')
             // Blitz (intraday bot) also has its own complete, separately-correct ledger —
             // see reconcilePositions' identical exclusion for the real incident this fixes
             // (META round-tripped 5x under Blitz on 2026-09-21; every fill correctly in

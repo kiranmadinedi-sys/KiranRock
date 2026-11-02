@@ -106,11 +106,11 @@ function _combineReason(code, detail) {
  * `reason` is the combined display string, kept for the exclusion_reason TEXT
  * column so existing readers of that field see no format change.
  */
-async function _analyzeWithRetry(symbol, vixLevel, regime, maxRetries = 1) {
+async function _analyzeWithRetry(symbol, vixLevel, regime, maxRetries = 1, liveMode = false) {
     let lastCode = SCAN_SKIP_REASONS.UNKNOWN, lastDetail = null;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-            const result = await analyzeStockWithAI(symbol, vixLevel, null, regime, false, (code, detail) => { lastCode = code; lastDetail = detail; });
+            const result = await analyzeStockWithAI(symbol, vixLevel, null, regime, liveMode, (code, detail) => { lastCode = code; lastDetail = detail; });
 
             if (result != null) return { analysis: result, code: null, detail: null, reason: null }; // success
 
@@ -715,7 +715,9 @@ async function rescanSymbol(symbol, reason = 'news') {
     const today = _todayET();
     try {
         const vixLevel = await getVixLevel().catch(() => 15);
-        const { analysis, reason: skipReason } = await _analyzeWithRetry(symbol, vixLevel, null);
+        // liveMode: this runs during market hours, so use the fast model on the live
+        // queue — the 27B here loaded 18 GB mid-session and timed out (JPM, 2026-11-02).
+        const { analysis, reason: skipReason } = await _analyzeWithRetry(symbol, vixLevel, null, 1, true);
         if (!analysis) return { symbol, changed: false, reason: skipReason || 'no_analysis' };
 
         // Read previous recommendation before overwriting

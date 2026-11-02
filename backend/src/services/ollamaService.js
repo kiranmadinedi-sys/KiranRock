@@ -436,7 +436,7 @@ async function getVerdictWithDBHistory(data) {
  *
  * Only fires when daysToEarnings is within [PROPHET_WINDOW_MIN, PROPHET_WINDOW_MAX].
  */
-async function forecastEarnings(symbol, daysToEarnings, headlines = [], fundamentals = null) {
+async function forecastEarnings(symbol, daysToEarnings, headlines = [], fundamentals = null, options = {}) {
     if (!BASE_URL) return null;
 
     const WINDOW_MIN = parseInt(process.env.PROPHET_WINDOW_MIN_DAYS || '15', 10);
@@ -463,7 +463,10 @@ async function forecastEarnings(symbol, daysToEarnings, headlines = [], fundamen
         `Be conservative — default to IN_LINE when evidence is weak.`;
 
     try {
-        const raw    = await generate(prompt, '', { maxTokens: 130, temperature: 0.1 });
+        // 2026-11-02: options.fast from live cycles. Without it every live PROPHET call ran on the
+        // 27B (up to 196s, KR 108s), kept it loaded next to the 7B all market day (0.5 GB free,
+        // heavy paging) and spent the live scan budget — kmadined got through 5 of 40 per cycle.
+        const raw    = await generate(prompt, '', { maxTokens: 130, temperature: 0.1, fast: !!options.fast });
         const parsed = _extractJSON(raw);
 
         const verdict    = ['BEAT', 'IN_LINE', 'MISS'].includes(parsed.verdict) ? parsed.verdict : 'IN_LINE';

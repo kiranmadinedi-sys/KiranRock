@@ -1737,7 +1737,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
 
         // PROPHET — earnings direction forecast (only fires 15-45 days before earnings)
         const _tProphetStart = Date.now();
-        const prophetResult = await prophetService.forecastEarnings(symbol, daysToEarnings, headlines, fundamentals).catch(() => null);
+        const prophetResult = await prophetService.forecastEarnings(symbol, daysToEarnings, headlines, fundamentals, { fast: liveMode }).catch(() => null);
         _stepTimes.prophetMs = Date.now() - _tProphetStart;
 
         // ORACLE patterns — synchronous, uses already-fetched OHLCV

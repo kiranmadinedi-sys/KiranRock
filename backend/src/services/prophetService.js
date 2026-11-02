@@ -36,13 +36,13 @@ if (ollamaService.isEnabled()) {
  * @returns {Promise<{verdict,confidence,thesis,scoreAdj,source}|null>}
  *   scoreAdj: -8 to +8. null when outside window or key absent.
  */
-async function forecastEarnings(symbol, daysToEarnings, headlines = [], fundamentals = null) {
+async function forecastEarnings(symbol, daysToEarnings, headlines = [], fundamentals = null, options = {}) {
     // Route to local Ollama — no API charges
     if (ollamaService.isEnabled()) {
         const cacheKey = `prophet_ollama_${symbol}_${Math.floor(Date.now() / CACHE_TTL)}`;
         const cached   = cacheService.get(cacheKey);
         if (cached) return cached;
-        const result = await ollamaService.forecastEarnings(symbol, daysToEarnings, headlines, fundamentals);
+        const result = await ollamaService.forecastEarnings(symbol, daysToEarnings, headlines, fundamentals, options);
         if (result) cacheService.set(cacheKey, result, CACHE_TTL);
         return result;
     }

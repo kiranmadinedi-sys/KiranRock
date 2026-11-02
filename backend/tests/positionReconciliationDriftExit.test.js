@@ -77,3 +77,29 @@ describe('_backfillPartialExit', () => {
         expect(await p).toEqual({ recorded: 0, unexplained: 2 });
     });
 });
+
+/**
+ * 2026-11-02 (paper KR/AKRE): bracket buys filled in pieces at the open; the BUY rows kept the
+ * first piece (6 of 7, 1 of 8). A DRIFT increase now brings those rows up to the final fill.
+ */
+describe('_syncPartialBuys', () => {
+    const { query } = require('../src/config/database');
+    const { _syncPartialBuys } = require('../src/services/positionReconciliationService');
+    beforeEach(() => query.mockReset());
+
+    test('updates a BUY row to the order\'s final filled quantity and price', async () => {
+        query.mockResolvedValueOnce({ rows: [{ id: 1407, quantity: '1', broker_order_id: 'c506e42d' }] })
+             .mockResolvedValueOnce({ rows: [] });
+        const r = await _syncPartialBuys('u1', 'AKRE', { fetchOrder: async () => ({ filled_qty: '8', filled_avg_price: '60.12' }) });
+        expect(r.updated).toBe(1);
+        expect(query.mock.calls[1][1]).toEqual([8, 60.12, 8 * 60.12, 1407]);
+    });
+
+    test('leaves a row alone when it already matches the fill (or the order has no fill)', async () => {
+        query.mockResolvedValueOnce({ rows: [{ id: 1, quantity: '7', broker_order_id: 'a' }, { id: 2, quantity: '3', broker_order_id: 'b' }] });
+        const fills = { a: { filled_qty: '7', filled_avg_price: '66.81' }, b: { filled_qty: '0', filled_avg_price: null } };
+        const r = await _syncPartialBuys('u1', 'KR', { fetchOrder: async id => fills[id] });
+        expect(r.updated).toBe(0);
+        expect(query).toHaveBeenCalledTimes(1);
+    });
+});

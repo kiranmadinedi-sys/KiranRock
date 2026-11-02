@@ -773,6 +773,9 @@ async function reconcilePositions(userId, { trigger = 'SCHEDULED' } = {}) {
             if (soldSome) {
                 await _backfillPartialExit(userId, symbol, dbQty - alpacaQty, avgCost)
                     .catch(e => logger.warn('[Reconcile] DRIFT exit backfill failed (holdings already fixed)', { userId, symbol, err: e.message }));
+            } else {
+                await _syncPartialBuys(userId, symbol)
+                    .catch(e => logger.warn('[Reconcile] DRIFT buy-row sync failed (holdings already fixed)', { userId, symbol, err: e.message }));
             }
             await _auditLog(userId, 'DRIFT', symbol, dbQty, alpacaQty, 'UPDATED',
                 `DB qty ${dbQty} corrected to Alpaca qty ${alpacaQty}`, trigger);
@@ -1084,10 +1087,46 @@ async function _backfillPartialExit(userId, symbol, qtyGone, avgCost, deps = {})
     return { recorded, unexplained: Math.max(remaining, 0) };
 }
 
+/**
+ * DRIFT increase after a buy that filled in pieces (2026-11-02). The bot's fill-wait returns on
+ * 'partially_filled', so the BUY row keeps only the first piece (paper KR 6 of 7, AKRE 1 of 8 at
+ * the open); holdings got fixed here, the trades ledger never did. Re-reads each recent BUY's
+ * broker order and brings the row up to the final filled quantity and average price.
+ */
+async function _syncPartialBuys(userId, symbol, deps = {}) {
+    const fetchOrder = deps.fetchOrder || (async (orderId) => {
+        const axios = require('axios');
+        const creds = await require('./userDatabaseService').getUserAlpacaCredentials(userId);
+        const base = (creds?.isPaper !== false) ? 'https://paper-api.alpaca.markets' : 'https://api.alpaca.markets';
+        const res = await axios.get(`${base}/v2/orders/${orderId}`, {
+            headers: { 'APCA-API-KEY-ID': creds?.keyId || process.env.ALPACA_KEY_ID, 'APCA-API-SECRET-KEY': creds?.secretKey || process.env.ALPACA_SECRET_KEY },
+            timeout: 10000
+        });
+        return res.data;
+    });
+    const rows = (await query(
+        `SELECT id, quantity, broker_order_id FROM trades
+         WHERE user_id = $1 AND UPPER(symbol) = $2 AND action = 'BUY' AND broker_order_id IS NOT NULL
+           AND status IS DISTINCT FROM 'VOIDED' AND trade_date >= NOW() - INTERVAL '26 hours'`,
+        [userId, symbol]
+    )).rows;
+    let updated = 0;
+    for (const r of rows) {
+        const o = await fetchOrder(r.broker_order_id);
+        const qty = parseFloat(o?.filled_qty), px = parseFloat(o?.filled_avg_price);
+        if (!(qty > 0) || !(px > 0) || qty <= parseFloat(r.quantity) + 0.0001) continue;
+        await query(`UPDATE trades SET quantity = $1, price = $2, total = $3 WHERE id = $4`, [qty, px, qty * px, r.id]);
+        updated++;
+        logger.info('[Reconcile] DRIFT buy row brought up to the final fill', { userId, symbol, tradeId: r.id, from: parseFloat(r.quantity), to: qty, price: px });
+    }
+    return { updated };
+}
+
 module.exports = {
     reconcilePositions,
     runMorningReconciliation,
     reconcileFillHistory, // exported 2026-09-17 for testability
     _backfillPartialExit,   // exported 2026-09-21 for testability
+    _syncPartialBuys,       // exported 2026-11-02 for testability
     _getBlitzManagedSymbols // exported 2026-09-21 for testability
 };

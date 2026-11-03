@@ -179,6 +179,22 @@ let _oracleCycleCount = 0;
 const LIVE_ORACLE_CUTOFF_MS = parseInt(process.env.LIVE_ORACLE_CUTOFF_MS || '120000', 10);
 const LIVE_SCAN_CUTOFF_MS   = parseInt(process.env.LIVE_SCAN_CUTOFF_MS   || '150000', 10);
 
+// Event-loop delay probe (2026-11-03, observability only): if this process is CPU-starved,
+// every await — timeouts included — runs late, which would explain slow data gathering.
+// Logs at most once a minute, only when the loop was delayed by more than 1s.
+if (process.env.NODE_ENV !== 'test') {
+    let _lagMax = 0, _lagTick = Date.now(), _lagLogAt = Date.now();
+    setInterval(() => {
+        const now = Date.now();
+        _lagMax = Math.max(_lagMax, now - _lagTick - 500);
+        _lagTick = now;
+        if (now - _lagLogAt >= 60000) {
+            if (_lagMax > 1000) logger.info('[EventLoop] Delayed', { maxLagMs: _lagMax });
+            _lagMax = 0; _lagLogAt = now;
+        }
+    }, 500).unref();
+}
+
 // Candidate rotation (2026-10-31). Each cycle runs out of time after ~8 of its 40 candidates,
 // and every cycle restarts at the top of the same score-ordered list, so kmadined analyzed only
 // 8-18 distinct stocks a day (414 analyses on 14 symbols on 10-26) and never looked at the rest.
@@ -1675,8 +1691,13 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         // Each external call has a 10s hard timeout so a single stalled Yahoo request cannot
         // block the entire scan batch (and starve the DB connection pool).
         const _tDataStart = Date.now();
+        // Per-call finish times (2026-11-03): live data gathering took a median 42s per stock
+        // while the same calls run standalone finish in <4s — logged below when slow, to find
+        // which call is waiting (observability only).
+        const _callMs = {};
+        const _timedCall = (name, p) => Promise.resolve(p).finally(() => { _callMs[name] = Date.now() - _tDataStart; });
         const [quote, historicalData, spyReturn, spyReturn5d, daysToEarnings, newsData, smartMoneyScore, fundamentals, redditData, globalSentiment, shortInterestData] = await Promise.all([
-            _withQuoteTimeout(dataProvider.getQuote(symbol), null).catch(() => null),
+            _timedCall('quote', _withQuoteTimeout(dataProvider.getQuote(symbol), null).catch(() => null)),
             // 250, not 220: the 200-day SMA itself needs 200 bars, but deriveWeinSteinStage's
             // sma200Rising check (below) needs a SECOND 200-day SMA computed 30 bars further
             // back, i.e. 230 bars minimum. Found 2026-09-25: at 220 this was structurally
@@ -1686,20 +1707,21 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             // never distinguishing a genuinely declining SMA from one still rising while price
             // just dipped under it. The data was there the whole time (confirmed live: asking
             // for 260 days back returns 235) — the window was just never wide enough to reach it.
-            _withQuoteTimeout(dataProvider.getBars(symbol, '1d', 250), []).catch(() => []),
-            getSPY20DayReturn(),
-            getSPY5DayReturn(),
-            getDaysToEarnings(symbol, yahooFinanceInstance),
-            AI_NEWS_SCORING_ENABLED
+            _timedCall('bars', _withQuoteTimeout(dataProvider.getBars(symbol, '1d', 250), []).catch(() => [])),
+            _timedCall('spy20', getSPY20DayReturn()),
+            _timedCall('spy5', getSPY5DayReturn()),
+            _timedCall('earnings', getDaysToEarnings(symbol, yahooFinanceInstance)),
+            _timedCall('news', AI_NEWS_SCORING_ENABLED
                 ? newsSentimentService.getNewsSentiment(symbol).catch(() => null)
-                : Promise.resolve(null),
-            sonarService.getSmartMoneyScore(symbol).catch(() => 0.5),
-            getFundamentalsQuick(symbol).catch(() => null),        // CANSLIM — 4hr cache
-            redditAltDataService.getMentionScore(symbol).catch(() => null), // alt data — 15min cache
-            globalSentimentService.getGlobalSentiment().catch(() => null),  // ATLAS — 15min cache
-            getShortInterestData(symbol).catch(() => null),        // squeeze potential — 4hr cache
+                : Promise.resolve(null)),
+            _timedCall('sonar', sonarService.getSmartMoneyScore(symbol).catch(() => 0.5)),
+            _timedCall('fundamentals', getFundamentalsQuick(symbol).catch(() => null)),        // CANSLIM — 4hr cache
+            _timedCall('reddit', redditAltDataService.getMentionScore(symbol).catch(() => null)), // alt data — 15min cache
+            _timedCall('global', globalSentimentService.getGlobalSentiment().catch(() => null)),  // ATLAS — 15min cache
+            _timedCall('shortInt', getShortInterestData(symbol).catch(() => null)),        // squeeze potential — 4hr cache
         ]);
         _stepTimes.dataGatherMs = Date.now() - _tDataStart;
+        if (_stepTimes.dataGatherMs > 15000) logger.info('[Timing] slow data gather', { symbol, totalMs: _stepTimes.dataGatherMs, callMs: _callMs });
 
         if (!quote || !quote.price) {
             if (onSkip) onSkip(SKIP_REASONS.NO_QUOTE_DATA, null);

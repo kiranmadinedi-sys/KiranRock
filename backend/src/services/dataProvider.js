@@ -264,11 +264,17 @@ const alpacaProvider = (() => {
     const ALPACA_RATE_LIMIT_PER_MIN = parseInt(process.env.ALPACA_RATE_LIMIT_PER_MIN || '170', 10);
     const ALPACA_MIN_INTERVAL_MS    = 60000 / Math.max(1, ALPACA_RATE_LIMIT_PER_MIN);
     let _nextAlpacaSlot = 0;
+    let _lastThrottleLog = 0;
     async function _throttleAlpaca() {
         const now  = Date.now();
         const slot = Math.max(now, _nextAlpacaSlot);
         _nextAlpacaSlot = slot + ALPACA_MIN_INTERVAL_MS;
         const wait = slot - now;
+        // 2026-11-03: live data gathering was ~42s/stock — log long queue waits (≤ once/30s)
+        if (wait > 5000 && now - _lastThrottleLog > 30000) {
+            _lastThrottleLog = now;
+            logger.info('[AlpacaThrottle] Long queue wait', { waitMs: Math.round(wait), queued: Math.round(wait / ALPACA_MIN_INTERVAL_MS) });
+        }
         if (wait > 0) await new Promise(r => setTimeout(r, wait));
     }
 

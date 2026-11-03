@@ -29,6 +29,7 @@ describe('strategySettingsService sizing settings', () => {
                 if (/SELECT sizing_method/.test(sql)) return { rows: row ? [row] : [] };
                 if (/INSERT INTO strategy_settings \(user_id, sizing_method/.test(sql)) { row = { ...(row || {}), sizing_method: p[1], equal_weight_slots: p[2], blocked_setups: row?.blocked_setups || [] }; }
                 if (/INSERT INTO strategy_settings \(user_id, blocked_setups/.test(sql)) { row = { sizing_method: 'conviction', ...(row || {}), blocked_setups: p[1] }; }
+                if (/INSERT INTO strategy_settings \(user_id, scan_rotation/.test(sql)) { row = { sizing_method: 'conviction', blocked_setups: [], ...(row || {}), scan_rotation: p[1] }; }
                 return { rows: [] };
             }),
         }));
@@ -36,13 +37,19 @@ describe('strategySettingsService sizing settings', () => {
     });
 
     test('defaults to conviction with nothing blocked', async () => {
-        expect(await svc.getSizingSettings('u1')).toEqual({ method: 'conviction', slots: null, blockedSetups: [] });
+        expect(await svc.getSizingSettings('u1')).toEqual({ method: 'conviction', slots: null, blockedSetups: [], scanRotation: false });
     });
 
     test('set and read back equal sizing and a blocked setup', async () => {
         await svc.setSizingMethod('u1', 'equal', 6, 'test');
         await svc.setBlockedSetups('u1', ['news_momentum', 'news_momentum'], 'test');
-        expect(await svc.getSizingSettings('u1')).toEqual({ method: 'equal', slots: 6, blockedSetups: ['news_momentum'] });
+        expect(await svc.getSizingSettings('u1')).toEqual({ method: 'equal', slots: 6, blockedSetups: ['news_momentum'], scanRotation: false });
+    });
+
+    test('scan rotation is off by default and turns on per account', async () => {
+        expect((await svc.getSizingSettings('u1')).scanRotation).toBe(false);
+        await svc.setScanRotation('u1', true, 'test');
+        expect((await svc.getSizingSettings('u1')).scanRotation).toBe(true);
     });
 
     test('rejects bad input', async () => {
@@ -63,5 +70,8 @@ describe('approval handlers', () => {
         expect(strat.setSizingMethod).toHaveBeenCalledWith('live-1', 'equal', 6, 'approved');
         expect(await HANDLERS.blocked_setups('live-1', { setups: ['news_momentum'] })).toMatch(/No new news_momentum/);
         expect(strat.setBlockedSetups).toHaveBeenCalledWith('live-1', ['news_momentum'], 'approved');
+        strat.setScanRotation = jest.fn(async () => {});
+        expect(await HANDLERS.scan_rotation('live-1', { enabled: true })).toMatch(/all its candidates/);
+        expect(strat.setScanRotation).toHaveBeenCalledWith('live-1', true, 'approved');
     });
 });

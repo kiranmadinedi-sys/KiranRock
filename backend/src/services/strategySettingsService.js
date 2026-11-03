@@ -53,6 +53,7 @@ async function ensureTable() {
     await query(`ALTER TABLE strategy_settings ADD COLUMN IF NOT EXISTS sizing_method TEXT NOT NULL DEFAULT 'conviction'`);
     await query(`ALTER TABLE strategy_settings ADD COLUMN IF NOT EXISTS equal_weight_slots INT`); // null = the account's max positions
     await query(`ALTER TABLE strategy_settings ADD COLUMN IF NOT EXISTS blocked_setups TEXT[] NOT NULL DEFAULT '{}'`);
+    await query(`ALTER TABLE strategy_settings ADD COLUMN IF NOT EXISTS scan_rotation BOOLEAN NOT NULL DEFAULT FALSE`);
     // methods list widened 2026-10-17 (oil, sector) — keep the constraint in step with METHODS
     await query(`ALTER TABLE strategy_settings DROP CONSTRAINT IF EXISTS strategy_settings_selection_method_check`);
     await query(`ALTER TABLE strategy_settings ADD CONSTRAINT strategy_settings_selection_method_check
@@ -112,22 +113,23 @@ async function setExitProfile(userId, profile, source) {
 
 const _sizingCache = new Map();
 /**
- * { method, slots, blockedSetups } — 'conviction' / no blocks unless the account was switched.
- * Never throws: a read error keeps the last known value, else the defaults.
+ * { method, slots, blockedSetups, scanRotation } — 'conviction' / no blocks / no rotation unless
+ * the account was switched. Never throws: a read error keeps the last known value, else the defaults.
  */
 async function getSizingSettings(userId) {
     const key = String(userId);
     const hit = _sizingCache.get(key);
     if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
-    const fallback = { method: 'conviction', slots: null, blockedSetups: [] };
+    const fallback = { method: 'conviction', slots: null, blockedSetups: [], scanRotation: false };
     try {
         await ensureTable();
-        const r = await query(`SELECT sizing_method, equal_weight_slots, blocked_setups FROM strategy_settings WHERE user_id = $1`, [key]);
+        const r = await query(`SELECT sizing_method, equal_weight_slots, blocked_setups, scan_rotation FROM strategy_settings WHERE user_id = $1`, [key]);
         const row = r.rows[0];
         const value = row ? {
             method: SIZING_METHODS.includes(row.sizing_method) ? row.sizing_method : 'conviction',
             slots: row.equal_weight_slots > 0 ? row.equal_weight_slots : null,
             blockedSetups: row.blocked_setups || [],
+            scanRotation: row.scan_rotation === true,
         } : fallback;
         _sizingCache.set(key, { at: Date.now(), value });
         return value;
@@ -161,6 +163,17 @@ async function setBlockedSetups(userId, setups, source) {
     _sizingCache.delete(String(userId));
 }
 
+/** Candidate rotation in the live entry scan (2026-11-03) — see enhancedAITradingBot rotateScanList. */
+async function setScanRotation(userId, enabled, source) {
+    await ensureTable();
+    await query(
+        `INSERT INTO strategy_settings (user_id, scan_rotation, source) VALUES ($1, $2, $3)
+         ON CONFLICT (user_id) DO UPDATE SET scan_rotation = EXCLUDED.scan_rotation, source = EXCLUDED.source, updated_at = NOW()`,
+        [String(userId), !!enabled, source || null]
+    );
+    _sizingCache.delete(String(userId));
+}
+
 async function getSettingsRow(userId) {
     await ensureTable();
     const r = await query(`SELECT selection_method AS method, source, updated_at FROM strategy_settings WHERE user_id = $1`, [String(userId)]);
@@ -180,5 +193,5 @@ async function setSelectionMethod(userId, method, source) {
 
 module.exports = {
     METHODS, EXIT_PROFILES, SIZING_METHODS, getSelectionMethod, getSettingsRow, setSelectionMethod,
-    getExitProfile, setExitProfile, getSizingSettings, setSizingMethod, setBlockedSetups, ensureTable,
+    getExitProfile, setExitProfile, getSizingSettings, setSizingMethod, setBlockedSetups, setScanRotation, ensureTable,
 };

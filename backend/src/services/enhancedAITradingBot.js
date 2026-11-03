@@ -184,7 +184,8 @@ const LIVE_SCAN_CUTOFF_MS   = parseInt(process.env.LIVE_SCAN_CUTOFF_MS   || '150
 // 8-18 distinct stocks a day (414 analyses on 14 symbols on 10-26) and never looked at the rest.
 // With rotation, the top SCAN_ROTATION_KEEP_TOP are still re-checked every cycle, and the rest
 // continue from where the previous cycle stopped, so the whole list is covered every few cycles.
-// Opt-in per account (SCAN_ROTATION_USER_IDS). A live account is added only after the user approves.
+// Opt-in per account: SCAN_ROTATION_USER_IDS (paper), or strategy_settings.scan_rotation, which a
+// live account gets only through an approved scan_rotation request (approvalService).
 const SCAN_ROTATION_KEEP_TOP = parseInt(process.env.SCAN_ROTATION_KEEP_TOP || '5', 10);
 const _scanCursor = new Map(); // userId -> position in the rotating tail
 const scanRotationEnabled = (userId) => (process.env.SCAN_ROTATION_USER_IDS || '')
@@ -2893,7 +2894,9 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
     const allAnalyzed = []; // all fulfilled results — used to build sector rotation cache
     const batchSize = 5;  // Reduced from 20 to 5 to respect rate limits
 
-    const _rotating = scanRotationEnabled(userId);
+    // env list (paper) or an approved per-account setting (strategy_settings.scan_rotation)
+    const _rotating = scanRotationEnabled(userId)
+        || (await require('./strategySettingsService').getSizingSettings(userId)).scanRotation;
     if (_rotating) scanList = rotateScanList(scanList, _scanCursor.get(String(userId)) || 0);
     let _attempted = 0; // symbols actually sent for analysis this cycle (advances the rotation)
 

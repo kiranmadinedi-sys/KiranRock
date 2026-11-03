@@ -12,7 +12,7 @@
  *   core_enable      — payload { holdings: [{symbol, targetPct}], cashReservePct }: turn on core holdings
  *   sizing_method    — payload { method, slots? }: swing position sizing (conviction | equal)
  *   blocked_setups   — payload { setups: [...] }: setup families the swing bot stops entering
- *   scan_rotation    — payload { enabled }: rotate the live entry scan through all candidates
+ *   scan_rotation    — payload { enabled, keepTop? }: rotate the live entry scan through all candidates
  */
 const { query } = require('../config/database');
 const { logger } = require('../utils/logger');
@@ -104,9 +104,10 @@ const HANDLERS = {
     },
     // 2026-11-03: live entry scan works through the whole candidate list instead of the top ~8.
     async scan_rotation(userId, payload) {
-        await require('./strategySettingsService').setScanRotation(userId, payload.enabled !== false, 'approved');
+        const keepTop = Number.isInteger(payload.keepTop) ? payload.keepTop : null;
+        await require('./strategySettingsService').setScanRotation(userId, payload.enabled !== false, 'approved', keepTop);
         return payload.enabled !== false
-            ? 'The bot now works through all its candidates across cycles (top 5 still checked every cycle). Applies from the next cycle.'
+            ? `The bot now works through all its candidates across cycles (top ${keepTop ?? 5} still checked every cycle). Applies from the next cycle.`
             : 'Candidate rotation is off.';
     },
     async core_enable(userId, payload) {

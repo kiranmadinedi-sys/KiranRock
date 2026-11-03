@@ -54,6 +54,7 @@ async function ensureTable() {
     await query(`ALTER TABLE strategy_settings ADD COLUMN IF NOT EXISTS equal_weight_slots INT`); // null = the account's max positions
     await query(`ALTER TABLE strategy_settings ADD COLUMN IF NOT EXISTS blocked_setups TEXT[] NOT NULL DEFAULT '{}'`);
     await query(`ALTER TABLE strategy_settings ADD COLUMN IF NOT EXISTS scan_rotation BOOLEAN NOT NULL DEFAULT FALSE`);
+    await query(`ALTER TABLE strategy_settings ADD COLUMN IF NOT EXISTS scan_rotation_keep_top INT`); // null = env default
     // methods list widened 2026-10-17 (oil, sector) — keep the constraint in step with METHODS
     await query(`ALTER TABLE strategy_settings DROP CONSTRAINT IF EXISTS strategy_settings_selection_method_check`);
     await query(`ALTER TABLE strategy_settings ADD CONSTRAINT strategy_settings_selection_method_check
@@ -120,16 +121,17 @@ async function getSizingSettings(userId) {
     const key = String(userId);
     const hit = _sizingCache.get(key);
     if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
-    const fallback = { method: 'conviction', slots: null, blockedSetups: [], scanRotation: false };
+    const fallback = { method: 'conviction', slots: null, blockedSetups: [], scanRotation: false, scanRotationKeepTop: null };
     try {
         await ensureTable();
-        const r = await query(`SELECT sizing_method, equal_weight_slots, blocked_setups, scan_rotation FROM strategy_settings WHERE user_id = $1`, [key]);
+        const r = await query(`SELECT sizing_method, equal_weight_slots, blocked_setups, scan_rotation, scan_rotation_keep_top FROM strategy_settings WHERE user_id = $1`, [key]);
         const row = r.rows[0];
         const value = row ? {
             method: SIZING_METHODS.includes(row.sizing_method) ? row.sizing_method : 'conviction',
             slots: row.equal_weight_slots > 0 ? row.equal_weight_slots : null,
             blockedSetups: row.blocked_setups || [],
             scanRotation: row.scan_rotation === true,
+            scanRotationKeepTop: Number.isInteger(row.scan_rotation_keep_top) ? row.scan_rotation_keep_top : null,
         } : fallback;
         _sizingCache.set(key, { at: Date.now(), value });
         return value;
@@ -164,12 +166,15 @@ async function setBlockedSetups(userId, setups, source) {
 }
 
 /** Candidate rotation in the live entry scan (2026-11-03) — see enhancedAITradingBot rotateScanList. */
-async function setScanRotation(userId, enabled, source) {
+// keepTop: how many top candidates are re-checked every cycle (null = SCAN_ROTATION_KEEP_TOP).
+async function setScanRotation(userId, enabled, source, keepTop = null) {
+    if (keepTop != null && !(Number.isInteger(keepTop) && keepTop >= 0 && keepTop <= 10)) throw new Error('keepTop must be 0-10');
     await ensureTable();
     await query(
-        `INSERT INTO strategy_settings (user_id, scan_rotation, source) VALUES ($1, $2, $3)
-         ON CONFLICT (user_id) DO UPDATE SET scan_rotation = EXCLUDED.scan_rotation, source = EXCLUDED.source, updated_at = NOW()`,
-        [String(userId), !!enabled, source || null]
+        `INSERT INTO strategy_settings (user_id, scan_rotation, scan_rotation_keep_top, source) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (user_id) DO UPDATE SET scan_rotation = EXCLUDED.scan_rotation, scan_rotation_keep_top = EXCLUDED.scan_rotation_keep_top,
+                                            source = EXCLUDED.source, updated_at = NOW()`,
+        [String(userId), !!enabled, keepTop ?? null, source || null]
     );
     _sizingCache.delete(String(userId));
 }

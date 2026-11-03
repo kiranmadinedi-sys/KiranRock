@@ -2895,9 +2895,12 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
     const batchSize = 5;  // Reduced from 20 to 5 to respect rate limits
 
     // env list (paper) or an approved per-account setting (strategy_settings.scan_rotation)
-    const _rotating = scanRotationEnabled(userId)
-        || (await require('./strategySettingsService').getSizingSettings(userId)).scanRotation;
-    if (_rotating) scanList = rotateScanList(scanList, _scanCursor.get(String(userId)) || 0);
+    const _rotSettings = await require('./strategySettingsService').getSizingSettings(userId);
+    const _rotating = scanRotationEnabled(userId) || _rotSettings.scanRotation;
+    // per-account keep-top (approved setting) — kmadined 2026-11-03: with one 5-stock batch per
+    // cycle, keeping the top 5 meant the rest of the list almost never advanced
+    const _keepTop = _rotSettings.scanRotationKeepTop ?? SCAN_ROTATION_KEEP_TOP;
+    if (_rotating) scanList = rotateScanList(scanList, _scanCursor.get(String(userId)) || 0, _keepTop);
     let _attempted = 0; // symbols actually sent for analysis this cycle (advances the rotation)
 
     for (let i = 0; i < scanList.length; i += batchSize) {
@@ -2973,8 +2976,8 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
     
     if (_rotating) {
         const _uid = String(userId);
-        _scanCursor.set(_uid, (_scanCursor.get(_uid) || 0) + Math.max(0, _attempted - SCAN_ROTATION_KEEP_TOP));
-        logger.info('[ScanRotation] Cycle coverage', { userId, attempted: _attempted, listSize: scanList.length, nextCursor: _scanCursor.get(_uid) });
+        _scanCursor.set(_uid, (_scanCursor.get(_uid) || 0) + Math.max(0, _attempted - _keepTop));
+        logger.info('[ScanRotation] Cycle coverage', { userId, attempted: _attempted, keepTop: _keepTop, listSize: scanList.length, nextCursor: _scanCursor.get(_uid) });
     }
 
     // Per-user scan outcome summary — analyzeStockWithAI itself is shared/cached across

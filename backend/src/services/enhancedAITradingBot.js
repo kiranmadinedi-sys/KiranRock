@@ -67,6 +67,7 @@ const globalSentimentService    = require('./globalSentimentService');
 
 const AI_NEWS_SCORING_ENABLED = (process.env.AI_NEWS_SCORING_ENABLED || 'true').toLowerCase() === 'true';
 const SHORT_INTEREST_ENABLED = (process.env.SHORT_INTEREST_ENABLED || 'false').toLowerCase() === 'true';
+const _stopMonotonicityLogged = new Map(); // `${userId}:${sym}` → `${day}:${existingStop}` last logged
 const AI_NEWS_SCORE_WEIGHT = Math.max(0, Math.min(1, parseFloat(process.env.AI_NEWS_SCORE_WEIGHT || '1')));
 const AI_NEWS_MAX_IMPACT = Math.max(0, parseFloat(process.env.AI_NEWS_MAX_IMPACT || '8'));
 
@@ -5402,9 +5403,16 @@ async function manageExistingPositions(userId) {
                     // A trailing stop that calculates a lower stop (e.g. from a code bug or data glitch)
                     // must be silently ignored — only moves upward (locking in more profit) are allowed.
                     if (expectedStop < existing.stopPrice) {
-                        logger.warn('[StopMonotonicity] Rejected downward stop move — preserving existing stop', {
-                            userId, sym, existing: existing.stopPrice, rejected: expectedStop
-                        });
+                        // Once per position per day (or when the stop changes) — this repeats every
+                        // cycle for the same position and was ~1,100 log lines a day (2026-11-03).
+                        const _monoKey = `${userId}:${sym}`;
+                        const _monoTag = `${new Date().toDateString()}:${existing.stopPrice}`;
+                        if (_stopMonotonicityLogged.get(_monoKey) !== _monoTag) {
+                            _stopMonotonicityLogged.set(_monoKey, _monoTag);
+                            logger.warn('[StopMonotonicity] Rejected downward stop move — preserving existing stop', {
+                                userId, sym, existing: existing.stopPrice, rejected: expectedStop
+                            });
+                        }
                     } else {
                         // STALE stop — check if price diverged >0.2% from expected
                         const drift = Math.abs(existing.stopPrice - expectedStop) / expectedStop;

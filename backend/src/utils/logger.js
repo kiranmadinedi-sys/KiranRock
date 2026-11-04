@@ -17,8 +17,12 @@ const logFormat = winston.format.combine(
     winston.format.json()
 );
 
+// Tests (jest sets NODE_ENV=test) log to the console only. Found 2026-11-03: test runs wrote
+// fake "[DrawdownBreaker] HALT" and SQL errors for made-up users into the live application log.
+const WRITE_FILES = process.env.NODE_ENV !== 'test';
+
 // Daily rotate file transport for all logs
-const dailyRotateFileTransport = new DailyRotateFile({
+const dailyRotateFileTransport = WRITE_FILES && new DailyRotateFile({
     filename: path.join(logsDir, 'application-%DATE%.log'),
     datePattern: 'YYYY-MM-DD',
     zippedArchive: true,
@@ -28,7 +32,7 @@ const dailyRotateFileTransport = new DailyRotateFile({
 });
 
 // Daily rotate file transport for AI trading logs
-const aiTradingRotateTransport = new DailyRotateFile({
+const aiTradingRotateTransport = WRITE_FILES && new DailyRotateFile({
     filename: path.join(logsDir, 'ai-trading-%DATE%.log'),
     datePattern: 'YYYY-MM-DD',
     zippedArchive: true,
@@ -39,7 +43,7 @@ const aiTradingRotateTransport = new DailyRotateFile({
 });
 
 // Daily rotate file transport for errors only
-const errorRotateTransport = new DailyRotateFile({
+const errorRotateTransport = WRITE_FILES && new DailyRotateFile({
     filename: path.join(logsDir, 'error-%DATE%.log'),
     datePattern: 'YYYY-MM-DD',
     zippedArchive: true,
@@ -54,8 +58,7 @@ const logger = winston.createLogger({
     level: process.env.LOG_LEVEL || 'info',
     format: logFormat,
     transports: [
-        dailyRotateFileTransport,
-        errorRotateTransport,
+        ...(WRITE_FILES ? [dailyRotateFileTransport, errorRotateTransport] : []),
         new winston.transports.Console({
             format: winston.format.combine(
                 winston.format.colorize(),
@@ -77,7 +80,7 @@ const aiTradingLogger = winston.createLogger({
     level: 'info',
     format: logFormat,
     transports: [
-        aiTradingRotateTransport,
+        ...(WRITE_FILES ? [aiTradingRotateTransport] : []),
         new winston.transports.Console({
             format: winston.format.combine(
                 winston.format.colorize(),

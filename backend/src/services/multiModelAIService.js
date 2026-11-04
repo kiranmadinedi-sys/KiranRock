@@ -44,6 +44,7 @@ const ENSEMBLE_TIMEOUT = 7000;     // 7s hard cap for the whole ensemble
 const PROVIDER_429_THRESHOLD = Number(process.env.AI_PROVIDER_429_THRESHOLD || 3);
 const PROVIDER_COOLDOWN_MS = Number(process.env.AI_PROVIDER_COOLDOWN_MS || 10 * 60 * 1000);
 const PROVIDER_LOG_THROTTLE_MS = Number(process.env.AI_PROVIDER_LOG_THROTTLE_MS || 60 * 1000);
+const HF_SENTIMENT_ENABLED = (process.env.HF_SENTIMENT_ENABLED || 'false').toLowerCase() === 'true';
 
 const providerState = {
     FINBERT: {
@@ -155,8 +156,10 @@ const getMultiModelPrediction = async (symbol, newsData = null) => {
                 technicalAgentResult,
                 momentumAgentResult
             ] = await Promise.allSettled([
-                callFinBERT(symbol, stockData, newsData),
-                callDistilBERT(symbol, stockData, newsData),
+                // FinBERT/DistilBERT are off (2026-11-03): api-inference.huggingface.co no longer
+                // resolves, so they failed on every call. HF_SENTIMENT_ENABLED=true brings them back.
+                HF_SENTIMENT_ENABLED ? callFinBERT(symbol, stockData, newsData) : Promise.resolve(null),
+                HF_SENTIMENT_ENABLED ? callDistilBERT(symbol, stockData, newsData) : Promise.resolve(null),
                 runTechnicalAgent(symbol, stockData),
                 runMomentumAgent(symbol, stockData)
             ]);

@@ -58,6 +58,12 @@ async function buyIntraday(userId, symbol, quantity, { stopLossPercent, takeProf
     const { base, headers } = await _getAuth(userId);
     const existing = (await brokerService.getPositions(userId)).find(p => p.symbol === symbol);
     if (existing && Math.abs(parseFloat(existing.qty)) > 0.001) {
+        // A core holding is tracked, just not by Blitz — say so instead of sounding like an orphan.
+        const coreSymbols = await require('./coreHoldingsService').getCoreSymbols(userId).catch(() => new Set());
+        if (coreSymbols.has(symbol)) {
+            logger.info('[Blitz] Skipping entry — symbol is a core holding', { userId, symbol, realQty: existing.qty });
+            return null;
+        }
         logger.warn('[Blitz] Skipping entry — a real Alpaca position already exists outside our tracking', {
             userId, symbol, realQty: existing.qty
         });

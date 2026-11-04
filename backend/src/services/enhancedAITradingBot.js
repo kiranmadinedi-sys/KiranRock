@@ -66,6 +66,7 @@ const evolveService             = require('./evolveService');
 const globalSentimentService    = require('./globalSentimentService');
 
 const AI_NEWS_SCORING_ENABLED = (process.env.AI_NEWS_SCORING_ENABLED || 'true').toLowerCase() === 'true';
+const SHORT_INTEREST_ENABLED = (process.env.SHORT_INTEREST_ENABLED || 'false').toLowerCase() === 'true';
 const AI_NEWS_SCORE_WEIGHT = Math.max(0, Math.min(1, parseFloat(process.env.AI_NEWS_SCORE_WEIGHT || '1')));
 const AI_NEWS_MAX_IMPACT = Math.max(0, parseFloat(process.env.AI_NEWS_MAX_IMPACT || '8'));
 
@@ -1423,7 +1424,7 @@ async function getDaysToEarnings(symbol, yahooFinanceInstance = null) {
  * Cache hierarchy (fastest → most expensive):
  *   1. In-process memory (cacheService)  — 4-hour TTL, zero latency
  *   2. PostgreSQL fundamentals_cache     — 7-day TTL, survives restarts
- *   3. Yahoo Finance quoteSummary        — live fetch, writes back to both caches
+ *   3. Finnhub /stock/metric             — live fetch, writes back to both caches
  *
  * Fundamentals change quarterly; 7 days is safe and eliminates most API calls.
  */
@@ -1453,51 +1454,13 @@ async function getFundamentalsQuick(symbol) {
         }
     } catch { /* non-fatal — proceed to live fetch */ }
 
-    // Live fetch — Polygon first (no Yahoo crumb/rate-limit dependency, verified live
-    // 2026-08-22), Yahoo as fallback only if Polygon has no key or fails. Polygon returns
-    // growth/margins as percentages (17.79 = 17.79%); normalize to Yahoo's decimal-fraction
-    // convention (0.1779) so this function's contract to callers is unchanged.
+    // Live fetch — Finnhub /stock/metric (2026-11-03). Polygon's financials endpoint has
+    // returned 404 since ~10-09 and Yahoo is 429-blocked, so CANSLIM scored 0 for every stock
+    // from 10-16. Symbols with no fundamentals (ETFs) are cached as all-null like real data, so
+    // they aren't refetched every call; a failed lookup is retried after an hour.
     try {
-        const dataProvider = require('./dataProvider');
-        const poly = await dataProvider.getFundamentals(symbol);
-        if (poly && (poly.revenueGrowth != null || poly.grossMargin != null || poly.earningsGrowth != null)) {
-            const result = {
-                earningsGrowth: poly.earningsGrowth != null ? poly.earningsGrowth / 100 : null,
-                revenueGrowth:  poly.revenueGrowth  != null ? poly.revenueGrowth  / 100 : null,
-                grossMargins:   poly.grossMargin    != null ? poly.grossMargin    / 100 : null,
-            };
-            cacheService.set(memKey, result, 4 * 60 * 60 * 1000);
-            setImmediate(async () => {
-                try {
-                    const { query: dbQuery } = require('../config/database');
-                    await dbQuery(
-                        `INSERT INTO fundamentals_cache
-                             (symbol, fetched_at, earnings_growth, revenue_growth, gross_margins)
-                         VALUES ($1, NOW(), $2, $3, $4)
-                         ON CONFLICT (symbol) DO UPDATE SET
-                             fetched_at      = NOW(),
-                             earnings_growth = EXCLUDED.earnings_growth,
-                             revenue_growth  = EXCLUDED.revenue_growth,
-                             gross_margins   = EXCLUDED.gross_margins`,
-                        [symbol, result.earningsGrowth, result.revenueGrowth, result.grossMargins]
-                    );
-                } catch { /* non-fatal */ }
-            });
-            return result;
-        }
-    } catch { /* non-fatal — fall through to Yahoo */ }
-
-    // Live fetch from Yahoo Finance (fallback)
-    try {
-        const summary = await yahooFinance.quoteSummary(symbol, { modules: ['financialData'] });
-        const fd      = summary?.financialData || {};
-        const result  = {
-            earningsGrowth: typeof fd.earningsGrowth === 'number' ? fd.earningsGrowth : null,
-            revenueGrowth:  typeof fd.revenueGrowth  === 'number' ? fd.revenueGrowth  : null,
-            grossMargins:   typeof fd.grossMargins   === 'number' ? fd.grossMargins   : null,
-        };
+        const result = await require('../utils/finnhubEarnings').fundamentalsSnapshot(symbol);
         cacheService.set(memKey, result, 4 * 60 * 60 * 1000);
-        // Write-through to DB (fire-and-forget)
         setImmediate(async () => {
             try {
                 const { query: dbQuery } = require('../config/database');
@@ -1516,7 +1479,9 @@ async function getFundamentalsQuick(symbol) {
         });
         return result;
     } catch {
-        return null;
+        const miss = { earningsGrowth: null, revenueGrowth: null, grossMargins: null };
+        cacheService.set(memKey, miss, 60 * 60 * 1000);
+        return miss;
     }
 }
 
@@ -1718,7 +1683,9 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             _timedCall('fundamentals', getFundamentalsQuick(symbol).catch(() => null)),        // CANSLIM — 4hr cache
             _timedCall('reddit', redditAltDataService.getMentionScore(symbol).catch(() => null)), // alt data — 15min cache
             _timedCall('global', globalSentimentService.getGlobalSentiment().catch(() => null)),  // ATLAS — 15min cache
-            _timedCall('shortInt', getShortInterestData(symbol).catch(() => null)),        // squeeze potential — 4hr cache
+            // Off by default (2026-11-03): Yahoo is 429-blocked, this took ~40s per stock and the
+            // squeeze score hadn't fired once since August. SHORT_INTEREST_ENABLED=true brings it back.
+            _timedCall('shortInt', SHORT_INTEREST_ENABLED ? getShortInterestData(symbol).catch(() => null) : Promise.resolve(null)),
         ]);
         _stepTimes.dataGatherMs = Date.now() - _tDataStart;
         if (_stepTimes.dataGatherMs > 15000) logger.info('[Timing] slow data gather', { symbol, totalMs: _stepTimes.dataGatherMs, callMs: _callMs });

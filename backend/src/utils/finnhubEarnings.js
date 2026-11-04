@@ -50,4 +50,33 @@ async function valuationSnapshot(symbol) {
     };
 }
 
-module.exports = { nextEarningsDate, lastEarningsDate, valuationSnapshot };
+// Free tier allows 60 calls/min across the whole key; fundamentals lookups are spaced so
+// a nightly-scan burst leaves room for the earnings and news calls.
+const FUNDAMENTALS_SPACING_MS = 1200;
+let _nextFundamentalsAt = 0;
+
+/**
+ * CANSLIM growth inputs from Finnhub /stock/metric (2026-11-03). Replaces Polygon's
+ * /vX/reference/financials, which started returning 404 around 2026-10-09 — CANSLIM scored 0
+ * for every stock from 10-16 once the 7-day cache ran out. Quarterly year-over-year first (what
+ * Yahoo's financialData gave), trailing-12-month if the quarter is missing. Decimal fractions
+ * (0.2377 = 23.77%). All-null for symbols without fundamentals (ETFs). Throws on a failed lookup.
+ */
+async function fundamentalsSnapshot(symbol) {
+    const now = Date.now();
+    const waitMs = Math.max(0, _nextFundamentalsAt - now);
+    _nextFundamentalsAt = Math.max(now, _nextFundamentalsAt) + FUNDAMENTALS_SPACING_MS;
+    if (waitMs) await new Promise(r => setTimeout(r, waitMs));
+    const resp = await axios.get('https://finnhub.io/api/v1/stock/metric', {
+        params: { symbol, metric: 'all', token: process.env.FINNHUB_KEY }, timeout: 15000 });
+    const m = resp.data?.metric;
+    if (!m) throw new Error('bad Finnhub metric response');
+    const pct = (...vals) => { const v = vals.find(x => typeof x === 'number' && Number.isFinite(x)); return v != null ? v / 100 : null; };
+    return {
+        earningsGrowth: pct(m.epsGrowthQuarterlyYoy, m.epsGrowthTTMYoy),
+        revenueGrowth:  pct(m.revenueGrowthQuarterlyYoy, m.revenueGrowthTTMYoy),
+        grossMargins:   pct(m.grossMarginTTM),
+    };
+}
+
+module.exports = { nextEarningsDate, lastEarningsDate, valuationSnapshot, fundamentalsSnapshot };

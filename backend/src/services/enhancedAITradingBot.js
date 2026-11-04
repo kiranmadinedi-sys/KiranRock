@@ -67,6 +67,7 @@ const globalSentimentService    = require('./globalSentimentService');
 
 const AI_NEWS_SCORING_ENABLED = (process.env.AI_NEWS_SCORING_ENABLED || 'true').toLowerCase() === 'true';
 const SHORT_INTEREST_ENABLED = (process.env.SHORT_INTEREST_ENABLED || 'false').toLowerCase() === 'true';
+const MARKET_CAP_SCORING = (process.env.MARKET_CAP_SCORING || 'false').toLowerCase() === 'true';
 const _stopMonotonicityLogged = new Map(); // `${userId}:${sym}` → `${day}:${existingStop}` last logged
 const AI_NEWS_SCORE_WEIGHT = Math.max(0, Math.min(1, parseFloat(process.env.AI_NEWS_SCORE_WEIGHT || '1')));
 const AI_NEWS_MAX_IMPACT = Math.max(0, parseFloat(process.env.AI_NEWS_MAX_IMPACT || '8'));
@@ -1438,9 +1439,12 @@ async function getFundamentalsQuick(symbol) {
     try {
         const { query: dbQuery } = require('../config/database');
         const dbRes = await dbQuery(
-            `SELECT earnings_growth, revenue_growth, gross_margins, fetched_at
+            // A row with growth data but no market cap predates market caps being stored
+            // (2026-11-04) — refetch it once. ETFs (all null) stay cached.
+            `SELECT earnings_growth, revenue_growth, gross_margins, market_cap, fetched_at
              FROM fundamentals_cache
-             WHERE symbol = $1 AND fetched_at > NOW() - INTERVAL '7 days'`,
+             WHERE symbol = $1 AND fetched_at > NOW() - INTERVAL '7 days'
+               AND (market_cap IS NOT NULL OR (earnings_growth IS NULL AND revenue_growth IS NULL))`,
             [symbol]
         );
         if (dbRes.rows.length > 0) {
@@ -1449,6 +1453,7 @@ async function getFundamentalsQuick(symbol) {
                 earningsGrowth: r.earnings_growth != null ? parseFloat(r.earnings_growth) : null,
                 revenueGrowth:  r.revenue_growth  != null ? parseFloat(r.revenue_growth)  : null,
                 grossMargins:   r.gross_margins   != null ? parseFloat(r.gross_margins)   : null,
+                marketCap:      r.market_cap      != null ? Number(r.market_cap)          : null,
             };
             cacheService.set(memKey, result, 4 * 60 * 60 * 1000);
             return result;
@@ -1467,20 +1472,21 @@ async function getFundamentalsQuick(symbol) {
                 const { query: dbQuery } = require('../config/database');
                 await dbQuery(
                     `INSERT INTO fundamentals_cache
-                         (symbol, fetched_at, earnings_growth, revenue_growth, gross_margins)
-                     VALUES ($1, NOW(), $2, $3, $4)
+                         (symbol, fetched_at, earnings_growth, revenue_growth, gross_margins, market_cap)
+                     VALUES ($1, NOW(), $2, $3, $4, $5)
                      ON CONFLICT (symbol) DO UPDATE SET
                          fetched_at      = NOW(),
                          earnings_growth = EXCLUDED.earnings_growth,
                          revenue_growth  = EXCLUDED.revenue_growth,
-                         gross_margins   = EXCLUDED.gross_margins`,
-                    [symbol, result.earningsGrowth, result.revenueGrowth, result.grossMargins]
+                         gross_margins   = EXCLUDED.gross_margins,
+                         market_cap      = EXCLUDED.market_cap`,
+                    [symbol, result.earningsGrowth, result.revenueGrowth, result.grossMargins, result.marketCap]
                 );
             } catch { /* non-fatal */ }
         });
         return result;
     } catch {
-        const miss = { earningsGrowth: null, revenueGrowth: null, grossMargins: null };
+        const miss = { earningsGrowth: null, revenueGrowth: null, grossMargins: null, marketCap: null };
         cacheService.set(memKey, miss, 60 * 60 * 1000);
         return miss;
     }
@@ -1700,7 +1706,13 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         const change = quote.changePercent || 0;
         const volume = quote.volume || 0;
         const avgVolume = quote.avgVolume || volume;
-        const marketCap = quote.marketCap || 0;
+        // Alpaca quotes carry no market cap, so this has been 0 for every stock (since at least
+        // Aug 2026) and every stock took the "< $5B" −5 below. The real figure (Finnhub, via
+        // fundamentals) is stored and shown as a shadow line, but only scores — and sets the
+        // nightly tier — with MARKET_CAP_SCORING=true: today's thresholds and the measured ≥80
+        // edge were built with the flat −5, so switching it is a live change (2026-11-04).
+        const realMarketCap = quote.marketCap || fundamentals?.marketCap || 0;
+        const marketCap = MARKET_CAP_SCORING ? realMarketCap : (quote.marketCap || 0);
         const sector = sectorMetadata.resolveSector(symbol, quote.sector);
         const tradeProfile = getSectorTradeProfile(sector);
 
@@ -2056,9 +2068,11 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         }
 
         // 10. Market Cap Quality (±5)
-        if (marketCap > 100e9)      { aiScore += 3; }
-        else if (marketCap > 10e9)  { aiScore += 2; }
-        else if (marketCap < 5e9)   { aiScore -= 5; }
+        const _capPts = cap => (cap > 100e9 ? 3 : cap > 10e9 ? 2 : cap < 5e9 ? -5 : 0);
+        aiScore += _capPts(marketCap);
+        if (!MARKET_CAP_SCORING && realMarketCap > 0 && _capPts(realMarketCap) !== _capPts(marketCap)) {
+            scoringLog.push(`MarketCap(shadow): ${_capPts(realMarketCap) >= 0 ? '+' : ''}${_capPts(realMarketCap)} vs ${_capPts(marketCap)} scored (${(realMarketCap / 1e9).toFixed(1)}B)`);
+        }
 
         // 11. Sector Rotation (±8) — COMPASS ETF-based RS ranking (primary)
         // Falls back to the post-scan intra-bot cache when COMPASS data is unavailable.
@@ -2603,6 +2617,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             volume,
             volumeRatio: volumeRatio.toFixed(2),
             marketCap,
+            realMarketCap,
             sector,
             tradeProfile: tradeProfile.name,
             sectorMinScore: tradeProfile.minScore,

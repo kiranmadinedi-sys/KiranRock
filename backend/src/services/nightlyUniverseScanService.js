@@ -272,7 +272,7 @@ async function _upsert(symbol, date, analysis, passedPrescreen, exclusionReason,
             analysis?.recommendation ?? null,
             analysis?.setupFamily ?? null,
             analysis?.sector      ?? null,
-            analysis?.marketCap   ?? null,
+            analysis?.realMarketCap || analysis?.marketCap || null, // display value; tier stays on scoring cap
             passedPrescreen,
             exclusionReason,
             JSON.stringify(metadata),
@@ -757,7 +757,7 @@ async function rescanSymbol(symbol, reason = 'news') {
                 analysis.recommendation ?? null,
                 analysis.setupFamily   ?? null,
                 analysis.sector        ?? null,
-                analysis.marketCap     ?? null,
+                analysis.realMarketCap || analysis.marketCap || null,
                 JSON.stringify(rescanMeta),
                 _computeTier(analysis.marketCap)
             ]

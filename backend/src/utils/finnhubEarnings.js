@@ -76,6 +76,9 @@ async function fundamentalsSnapshot(symbol) {
         earningsGrowth: pct(m.epsGrowthQuarterlyYoy, m.epsGrowthTTMYoy),
         revenueGrowth:  pct(m.revenueGrowthQuarterlyYoy, m.revenueGrowthTTMYoy),
         grossMargins:   pct(m.grossMarginTTM),
+        // Finnhub reports millions of USD. Alpaca quotes carry no market cap, so this is the
+        // only live source since Yahoo was blocked (every stock read 0 from at least Aug 2026).
+        marketCap:      m.marketCapitalization > 0 ? Math.round(m.marketCapitalization * 1e6) : null,
     };
 }
 

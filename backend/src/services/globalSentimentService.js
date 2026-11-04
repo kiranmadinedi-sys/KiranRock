@@ -123,7 +123,18 @@ function _avg(vals) {
 
 // ── Core calculation ──────────────────────────────────────────────────────────
 
+// One refresh at a time (2026-11-04): when the 15-min cache expired, every stock in a live
+// batch started its own ~45s Yahoo-then-FRED fetch at once (5 seen at 08:35). Callers that
+// arrive mid-refresh now share it.
+let _inflight = null;
 async function getGlobalSentiment() {
+    const cached = cacheService.get(CACHE_KEY);
+    if (cached !== null) return cached;
+    if (!_inflight) _inflight = _computeGlobalSentiment().finally(() => { _inflight = null; });
+    return _inflight;
+}
+
+async function _computeGlobalSentiment() {
     // 1. In-memory (fastest — within same process lifetime)
     const cached = cacheService.get(CACHE_KEY);
     if (cached !== null) return cached;

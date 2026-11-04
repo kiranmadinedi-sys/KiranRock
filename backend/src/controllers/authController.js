@@ -8,7 +8,7 @@ const { sendOTP, verifyOTP } = require('../services/otpService');
 const pendingSignups = new Map();
 
 const login = async (req, res) => {
-    console.log('Login attempt:', req.body);
+    console.log('Login attempt:', { username: req.body?.username });
     try {
         const { username, password } = req.body;
         

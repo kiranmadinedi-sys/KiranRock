@@ -123,7 +123,20 @@ function _buildPrompt(symbol, headlineBlock) {
         `Score guide: 70-100=Bullish, 40-69=Neutral, 0-39=Bearish\n` +
         `riskFlags: ONLY include a flag when a headline states it as fact, not speculation or a` +
         ` routine/resolved matter. Leave the array empty for ordinary bad news (missed earnings,` +
-        ` price target cuts, competitive pressure) — these belong in the score, not riskFlags.`;
+        ` price target cuts, competitive pressure) — these belong in the score, not riskFlags.` +
+        ` A flag must be about ${symbol} itself — ignore regulatory or legal news about other` +
+        ` companies mentioned in a headline, and routine approvals (rate cases, FDA approvals).`;
+}
+
+// Law-firm solicitation ads ("Shareholders who lost money urged to contact…", "DEADLINE
+// ALERT…") are not news: they follow any sizeable drop, repeat for months, and read as
+// fact-stated fraud to the model. Found 2026-11-04 — they were the whole reason for most
+// fraud_allegation hard skips (129 symbols on the 11-03 scan, e.g. UPWK on an earnings beat).
+// A real SEC charge, restatement or delisting notice is still reported as ordinary news.
+const LAW_FIRM_AD = /law (firm|offices)|shareholders? (who|that) (lost|suffered)|investors? (who|that) (lost|suffered)|investors? have (the )?opportunity|urged to contact|(deadline|investor|shareholder) alert|class action|announces (an )?investigation|investigation (of|into) .*(claims|on behalf)|on behalf of (investors|shareholders)|recover (your )?losses|securities fraud (investigation|lawsuit|class)|rosen law|pomerantz|levi & korsinsky|schall|glancy|holzer|portnoy|bragar|faruqi|bronstein|kessler topaz|robbins geller|kirby mcinerney|gainey|frank r\. cruz|bernstein liebhard|johnson fistel/i;
+
+function filterHeadlines(headlines) {
+    return headlines.filter(h => !LAW_FIRM_AD.test(h));
 }
 
 // Free, local fallback when Gemini is unconfigured, quota-exhausted, or failing.
@@ -154,6 +167,7 @@ async function analyzeHeadlines(symbol, headlines = [], opts = {}) {
     const cached   = cacheService.get(cacheKey);
     if (cached) return cached;
 
+    headlines = filterHeadlines(headlines);
     const headlineBlock = headlines.length > 0
         ? headlines.slice(0, 10).map((h, i) => `${i + 1}. ${h}`).join('\n')
         : '(No recent headlines available — provide general market sentiment)';
@@ -203,5 +217,6 @@ module.exports = {
     analyzeHeadlines,
     isEnabled: () => !!GEMINI_API_KEY || ollamaService.isEnabled(),
     isGeminiQuotaExhausted,
+    filterHeadlines,
     RISK_FLAG_TYPES
 };

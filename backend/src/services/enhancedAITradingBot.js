@@ -6096,7 +6096,12 @@ async function manageExistingPositions(userId) {
                         // meaningfully. Exit price is encoded in `reason` (parsed back out by
                         // that check) rather than a new column — keeps this a same-shape,
                         // backward-compatible change to an existing generic table.
-                        if (isHardStop) {
+                        // Time-based exits get the same cooldown (2026-11-04): BJ was sold at
+                        // max-hold "to redeploy capital" and re-bought 7 minutes later at the
+                        // same price because it still scored 98 (same on 10-28 after a slow-mover
+                        // exit). Re-entry now needs the same proof: 2+ days and 5%+ above the exit.
+                        const isTimeExit = _exitCategory === 'max_hold_time' || _exitCategory === 'slow_mover';
+                        if (isHardStop || isTimeExit) {
                             try {
                                 await query(
                                     `INSERT INTO asset_blacklist (symbol, reason, added_by, expires_at)
@@ -6104,9 +6109,9 @@ async function manageExistingPositions(userId) {
                                      ON CONFLICT (symbol) DO UPDATE
                                        SET reason = EXCLUDED.reason,
                                            expires_at = GREATEST(EXCLUDED.expires_at, asset_blacklist.expires_at)`,
-                                    [`COOLDOWN_${userId}_${holding.symbol}`, `Stop-loss cooldown for ${holding.symbol} (exit: ${(pnlPercent).toFixed(1)}% @ $${exitPrice.toFixed(2)})`]
+                                    [`COOLDOWN_${userId}_${holding.symbol}`, `${isHardStop ? 'Stop-loss' : 'Time-exit'} cooldown for ${holding.symbol} (exit: ${(pnlPercent).toFixed(1)}% @ $${exitPrice.toFixed(2)})`]
                                 );
-                                logger.info('[StopCooldown] Up-to-5-day re-entry cooldown set (reasoned early-exit possible)', { userId, symbol: holding.symbol, exitPrice });
+                                logger.info('[StopCooldown] Up-to-5-day re-entry cooldown set (reasoned early-exit possible)', { userId, symbol: holding.symbol, exitPrice, exitCategory: _exitCategory });
                             } catch (cooldownErr) {
                                 logger.warn('[StopCooldown] Failed to insert cooldown', { error: cooldownErr.message });
                             }

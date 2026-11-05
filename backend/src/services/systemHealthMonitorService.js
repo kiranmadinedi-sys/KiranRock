@@ -453,6 +453,60 @@ async function checkNightlyScanCompletion() {
 }
 
 /**
+ * Check L — paid/keyed data services (2026-11-04). Gemini's prepaid credits ran out at
+ * ~9 PM CT and nobody knew: every PULSE call fell back to local Ollama (~31s/stock) and
+ * the nightly scan slowed from ~200 to ~85 stocks/hour, on track to finish mid-afternoon.
+ * One tiny probe per service every 30 min, at any hour (the scan runs overnight), so a
+ * billing/key/quota problem reaches Telegram within the half hour. Returns failure text
+ * per service; transient network errors are not reported (the next probe retries).
+ */
+const SERVICE_PROBE_MS = 30 * 60 * 1000;
+let _lastServiceProbe = 0;
+
+function _serviceProblem(err) {
+    const s = err.response?.status;
+    if (!s) return null; // timeout / network blip — not a billing or key problem
+    const msg = String(err.response?.data?.error?.message || err.response?.data?.error || err.response?.data?.message || '').slice(0, 160);
+    if (s === 402) return `out of credits (402)${msg ? ` — ${msg}` : ''}`;
+    if (s === 401 || s === 403) return `key rejected (${s})${msg ? ` — ${msg}` : ''}`;
+    if (s === 429) return `rate/quota limit (429)${msg ? ` — ${msg}` : ''}`;
+    if (s >= 500) return null;
+    return `HTTP ${s}${msg ? ` — ${msg}` : ''}`;
+}
+
+async function checkExternalServices() {
+    if (Date.now() - _lastServiceProbe < SERVICE_PROBE_MS) return [];
+    _lastServiceProbe = Date.now();
+    const probes = [];
+    if (process.env.GEMINI_API_KEY) {
+        const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
+        probes.push(['Gemini (PULSE news AI)', () => axios.post(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+            { contents: [{ parts: [{ text: 'ok' }] }], generationConfig: { maxOutputTokens: 1 } }, { timeout: 20000 })]);
+    }
+    if (process.env.FINNHUB_KEY) {
+        probes.push(['Finnhub (earnings/fundamentals)', () => axios.get('https://finnhub.io/api/v1/quote',
+            { params: { symbol: 'SPY', token: process.env.FINNHUB_KEY }, timeout: 15000 })]);
+    }
+    if (process.env.ALPACA_KEY_ID) {
+        probes.push(['Alpaca market data', () => axios.get('https://data.alpaca.markets/v2/stocks/SPY/bars/latest',
+            { headers: { 'APCA-API-KEY-ID': process.env.ALPACA_KEY_ID, 'APCA-API-SECRET-KEY': process.env.ALPACA_SECRET_KEY }, timeout: 15000 })]);
+    }
+    if (process.env.FRED_API_KEY) {
+        probes.push(['FRED (VIX/oil/gold)', () => axios.get('https://api.stlouisfed.org/fred/series/observations',
+            { params: { series_id: 'VIXCLS', api_key: process.env.FRED_API_KEY, file_type: 'json', limit: 1, sort_order: 'desc' }, timeout: 15000 })]);
+    }
+    const problems = [];
+    for (const [name, call] of probes) {
+        try { await call(); } catch (err) {
+            const p = _serviceProblem(err);
+            if (p) problems.push({ name, problem: p });
+        }
+    }
+    return problems;
+}
+
+/**
  * Check I — Regime blocking all new entries (CHOPPY/PANIC). This gate sits in
  * enhancedAITradingBot.js *before* any per-stock scanning happens, so it never reaches
  * alertNoOpportunities/alertEdgeGateBlocked — a choppy day was previously completely
@@ -547,6 +601,16 @@ async function runHealthCheck() {
             await alert(`scan_incomplete_${etDateStr}`,
                 `🌙 *KiranRock Nightly Scan* [${nowCDT()} CDT]\n\n${scanIssue}`,
                 KMADINED, ONE_DAY_MS
+            );
+        }
+
+        // L — Paid/keyed data services (any hour, self-throttled to every 30 min).
+        // 6-hour dedup per service — a top-up or new key can take a while.
+        for (const { name, problem } of await checkExternalServices()) {
+            logger.warn('[HealthMonitor] External service problem', { service: name, problem });
+            await alert(`service_${name}`,
+                `💳 *KiranRock Service Alert* [${nowCDT()} CDT]\n\n*${name}*: ${problem}\n\nThe app falls back to slower or weaker data until this is fixed (top up credits / check the key).`,
+                KMADINED, 6 * 60 * 60 * 1000
             );
         }
 
@@ -656,4 +720,4 @@ function stopSystemHealthMonitor() {
     }
 }
 
-module.exports = { startSystemHealthMonitor, stopSystemHealthMonitor, checkAndFixStops, upgradeTrailingStops };
+module.exports = { startSystemHealthMonitor, stopSystemHealthMonitor, checkAndFixStops, upgradeTrailingStops, checkExternalServices, _serviceProblem };

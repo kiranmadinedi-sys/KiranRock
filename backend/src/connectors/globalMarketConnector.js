@@ -2,25 +2,23 @@
  * Global Market Connector — ATLAS data source
  *
  * Two-pass fetch strategy:
- *   Pass 1 — Yahoo Finance via the project's shared dataProvider
- *             (crumb-cached, 429-aware, used by the entire bot already)
- *   Pass 2 — FRED API fallback for the two most critical signals when Yahoo fails:
- *             VIX level  (VIXCLS)    — used as a direct level, not % change
- *             WTI Oil    (DCOILWTICO) — 1-day lag % change from previous close
+ *   Pass 1 — Alpaca snapshots of US-listed ETF stand-ins (one call, ~0.2s). Replaced
+ *             Yahoo on 2026-11-05: Yahoo had been returning 1 of 13 symbols for weeks, so
+ *             ATLAS scored from VIX + oil/gold alone and a 1.8% oil dip put -4 on every
+ *             stock. The ETFs trade in US hours, so Asia/Europe read as their latest US-
+ *             session move (incl. extended hours), not the overnight index — a lagged but
+ *             real signal, where Yahoo gave none.
+ *   Pass 2 — FRED for VIX level (always — no ETF tracks the index level) and for oil/gold
+ *             when Alpaca fails.
  *
- * International index signals (Nikkei, DAX, etc.) degrade gracefully to null
- * when Yahoo is unavailable; globalSentimentService handles null → neutral score.
- * In production, Yahoo rarely fails: 15-min cache means ~13 calls per 15 minutes,
- * well below Yahoo's actual rate limit. The 429s here are a testing artefact.
- *
- * Symbols:
- *   Asia-Pacific : ^N225 ^HSI ^BSESN ^AXJO
- *   Europe       : ^GDAXI ^FTSE
- *   Macro / FX   : DX=F  CL=F  GC=F
- *   US Market    : ES=F  NQ=F  ^VIX  ^VVIX
+ * Symbols (keys kept so the scorer is unchanged) → stand-in:
+ *   Asia-Pacific : ^N225 EWJ · ^HSI EWH · ^BSESN INDA · ^AXJO EWA
+ *   Europe       : ^GDAXI EWG · ^FTSE EWU
+ *   Macro / FX   : DX=F UUP · CL=F USO · GC=F GLD
+ *   US Market    : ES=F SPY · NQ=F QQQ · ^VIX (FRED) · ^VVIX (none)
  */
 
-const dataProvider   = require('../services/dataProvider');
+const axios          = require('axios');
 const fredMacroSvc   = require('../services/fredMacroService');
 const cacheService   = require('../services/cacheService');
 const { logger }     = require('../utils/logger');
@@ -49,30 +47,33 @@ function _emptyEntry(sym) {
     return { price: null, changePercent: null, prevClose: null, preMarketPct: null, name: sym };
 }
 
-// ── Pass 1: Yahoo Finance via dataProvider ────────────────────────────────────
+// ── Pass 1: Alpaca ETF stand-ins ──────────────────────────────────────────────
 
-async function _fetchFromYahoo() {
-    const out = {};
+const PROXIES = {
+    '^N225': 'EWJ', '^HSI': 'EWH', '^BSESN': 'INDA', '^AXJO': 'EWA',
+    '^GDAXI': 'EWG', '^FTSE': 'EWU',
+    'DX=F': 'UUP', 'CL=F': 'USO', 'GC=F': 'GLD',
+    'ES=F': 'SPY', 'NQ=F': 'QQQ',
+};
+
+async function _fetchFromAlpaca() {
+    const out = Object.fromEntries(SYMBOLS.map(s => [s, _emptyEntry(s)]));
     let fetched = 0;
-
-    for (const sym of SYMBOLS) {
-        out[sym] = _emptyEntry(sym);
-        try {
-            const q = await dataProvider.getQuote(sym);
-            if (q && q.price != null) {
-                out[sym] = {
-                    price:         q.price         ?? null,
-                    changePercent: q.changePercent ?? null,
-                    prevClose:     null,
-                    preMarketPct:  null,
-                    name:          sym,
-                };
-                fetched++;
-            }
-        } catch { /* leave null */ }
-        await new Promise(r => setTimeout(r, 80));   // gentle burst control
+    if (!process.env.ALPACA_KEY_ID) return { data: out, fetched };
+    const resp = await axios.get('https://data.alpaca.markets/v2/stocks/snapshots', {
+        headers: { 'APCA-API-KEY-ID': process.env.ALPACA_KEY_ID, 'APCA-API-SECRET-KEY': process.env.ALPACA_SECRET_KEY },
+        params:  { symbols: Object.values(PROXIES).join(',') },
+        timeout: 15000,
+    });
+    for (const [sym, etf] of Object.entries(PROXIES)) {
+        const snap  = resp.data?.[etf];
+        const price = snap?.latestTrade?.p;
+        const prev  = snap?.prevDailyBar?.c;
+        if (price > 0 && prev > 0) {
+            out[sym] = { price, changePercent: +((price / prev - 1) * 100).toFixed(4), prevClose: prev, preMarketPct: null, name: `${sym} (${etf})` };
+            fetched++;
+        }
     }
-
     return { data: out, fetched };
 }
 
@@ -154,24 +155,20 @@ async function fetchGlobalQuotes() {
     const cached = cacheService.get(CACHE_KEY);
     if (cached !== null) return cached;
 
-    // Pass 1: Yahoo Finance
-    const { data, fetched: yahooFetched } = await _fetchFromYahoo().catch(() => ({
-        data:    Object.fromEntries(SYMBOLS.map(s => [s, _emptyEntry(s)])),
-        fetched: 0,
-    }));
+    // Pass 1: Alpaca ETF stand-ins
+    const { data, fetched: alpacaFetched } = await _fetchFromAlpaca().catch(err => {
+        logger.warn(`[GlobalMarket] Alpaca snapshots failed: ${err.message}`);
+        return { data: Object.fromEntries(SYMBOLS.map(s => [s, _emptyEntry(s)])), fetched: 0 };
+    });
 
-    // Pass 2: FRED for VIX / Oil / Gold when Yahoo is rate-limited
-    let fredFilled = 0;
-    if (yahooFetched < 4) {
-        logger.warn(`[GlobalMarket] Yahoo: only ${yahooFetched} symbols — using FRED for VIX/Oil/Gold`);
-        fredFilled = await _fillFromFRED(data).catch(() => 0);
-    }
+    // Pass 2: FRED — VIX level always, oil/gold only if Alpaca missed them
+    const fredFilled = await _fillFromFRED(data).catch(() => 0);
 
-    const total = yahooFetched + fredFilled;
+    const total = alpacaFetched + fredFilled;
     cacheService.set(CACHE_KEY, data, total > 0 ? CACHE_TTL : 90_000);
 
     logger.info('[GlobalMarket] Quotes ready', {
-        yahoo: yahooFetched,
+        alpaca: alpacaFetched,
         fred:  fredFilled,
         VIX:   data['^VIX']?.price?.toFixed(1),
         ES:    data['ES=F']?.changePercent?.toFixed(2),

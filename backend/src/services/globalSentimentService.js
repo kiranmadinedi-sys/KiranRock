@@ -223,7 +223,10 @@ async function _computeGlobalSentiment() {
                 totalW      += c.weight;
             }
         }
-        const globalScore = totalW > 0
+        // Coverage guard (2026-11-05): with Yahoo blocked only VIX + oil/gold (20% of the
+        // weight) came through, and renormalising let a 1.8% oil dip set BEARISH -4 on every
+        // stock. Below half the weight the read is too thin to move scores — stay neutral.
+        const globalScore = totalW >= 0.5
             ? Math.max(0, Math.min(1, weightedSum / totalW))
             : 0.5;
 

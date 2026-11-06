@@ -64,6 +64,7 @@ const agentHealth               = require('./agentHealthService');
 const localBrain                = require('./localBrainService');
 const evolveService             = require('./evolveService');
 const globalSentimentService    = require('./globalSentimentService');
+const platformSettings          = require('./platformSettingsService');
 
 const AI_NEWS_SCORING_ENABLED = (process.env.AI_NEWS_SCORING_ENABLED || 'true').toLowerCase() === 'true';
 const SHORT_INTEREST_ENABLED = (process.env.SHORT_INTEREST_ENABLED || 'false').toLowerCase() === 'true';
@@ -2372,8 +2373,13 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
                 atlasReason = globalSentiment.label ?? 'cached';
             }
             if (atlasAdj !== 0) {
-                aiScore += _scoredPts('ATLAS', atlasAdj);
-                scoringLog.push(`ATLAS: ${atlasAdj >= 0 ? '+' : ''}${atlasAdj} (${atlasReason})${_unscoredNote('ATLAS', atlasAdj)}`);
+                // Penalties too can be switched off (2026-11-06 replay, 2023-26: trades after
+                // ATLAS-bearish days averaged +0.61% vs +0.04% after bullish days — the penalty
+                // landed on the better days). Platform-wide, set only by an approved request.
+                const penaltyOff = atlasAdj < 0 &&
+                    (await platformSettings.get('atlas_penalties_scored').catch(() => true)) === false;
+                aiScore += penaltyOff ? 0 : _scoredPts('ATLAS', atlasAdj);
+                scoringLog.push(`ATLAS: ${atlasAdj >= 0 ? '+' : ''}${atlasAdj} (${atlasReason})${penaltyOff ? ` ${UNSCORED_MARKER}` : _unscoredNote('ATLAS', atlasAdj)}`);
             }
         }
 

@@ -13,6 +13,7 @@
  *   sizing_method    — payload { method, slots? }: swing position sizing (conviction | equal)
  *   blocked_setups   — payload { setups: [...] }: setup families the swing bot stops entering
  *   scan_rotation    — payload { enabled, keepTop? }: rotate the live entry scan through all candidates
+ *   platform_setting — payload { key, value }: platform-wide switch (platformSettingsService)
  */
 const { query } = require('../config/database');
 const { logger } = require('../utils/logger');
@@ -109,6 +110,16 @@ const HANDLERS = {
         return payload.enabled !== false
             ? `The bot now works through all its candidates across cycles (top ${keepTop ?? 5} still checked every cycle). Applies from the next cycle.`
             : 'Candidate rotation is off.';
+    },
+    // 2026-11-06: platform-wide scoring switches (scores are shared by every account).
+    async platform_setting(userId, payload) {
+        await require('./platformSettingsService').set(payload.key, payload.value, `approved by ${userId}`);
+        if (payload.key === 'atlas_penalties_scored') {
+            return payload.value === false
+                ? 'ATLAS no longer subtracts points from stock scores (still calculated and logged). Applies within a minute, all accounts.'
+                : 'ATLAS penalties are scored again.';
+        }
+        return `${payload.key} is now ${JSON.stringify(payload.value)}.`;
     },
     async core_enable(userId, payload) {
         const core = require('./coreHoldingsService');

@@ -33,7 +33,30 @@ function getFrontendBaseUrl() {
  * @param {string} message - Message text
  * @param {string} parseMode - Message format ('Markdown' or 'HTML')
  */
+// Telegram rejects any message over 4096 characters with a 400, and the plain-text retry
+// below fails the same way — the 7 AM daily report never reached two chats on 2026-11-05.
+// Long messages go out in parts split at line breaks.
+const TELEGRAM_MAX_CHARS = 4000;
+
+function splitTelegramMessage(message, max = TELEGRAM_MAX_CHARS) {
+    const parts = [];
+    let rest = String(message);
+    while (rest.length > max) {
+        let cut = rest.lastIndexOf('\n', max);
+        if (cut < max / 2) cut = max;
+        parts.push(rest.slice(0, cut));
+        rest = rest.slice(cut).replace(/^\n/, '');
+    }
+    parts.push(rest);
+    return parts;
+}
+
 async function sendTelegramMessage(chatId, message, parseMode = 'Markdown') {
+    if (message && message.length > TELEGRAM_MAX_CHARS) {
+        let ok = true;
+        for (const part of splitTelegramMessage(message)) ok = (await sendTelegramMessage(chatId, part, parseMode)) && ok;
+        return ok;
+    }
     try {
         if (!TELEGRAM_BOT_TOKEN) {
             logger.warn('Telegram bot token not configured');
@@ -68,7 +91,7 @@ async function sendTelegramMessage(chatId, message, parseMode = 'Markdown') {
             throw err;
         }
     } catch (error) {
-        logger.error('Failed to send Telegram alert', { error: error.message, chatId });
+        logger.error('Failed to send Telegram alert', { error: error.message, reason: error.response?.data?.description, chatId });
         return false;
     }
 }

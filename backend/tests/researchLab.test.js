@@ -89,3 +89,26 @@ describe('scoreIdea pass rule', () => {
         expect(r.why).toMatch(/train dates/);
     });
 });
+
+describe('news events in specs', () => {
+    const cal = ['2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06', '2026-11-09'];
+    const idx = new Map(cal.map((d, i) => [d, i]));
+    test('pre-open news on a trading day → buy that open (signal = day before)', () => {
+        expect(lab.eventSignalDay('2026-11-04', true, cal, idx)).toBe('2026-11-03');
+    });
+    test('news during or after the session → buy the next open (signal = news day)', () => {
+        expect(lab.eventSignalDay('2026-11-04', false, cal, idx)).toBe('2026-11-04');
+    });
+    test('weekend news → buy Monday open (signal = Friday)', () => {
+        expect(lab.eventSignalDay('2026-11-07', true, cal, idx)).toBe('2026-11-06');
+        expect(lab.eventSignalDay('2026-11-08', false, cal, idx)).toBe('2026-11-06');
+    });
+    test('no later open in the calendar → null', () => {
+        expect(lab.eventSignalDay('2026-11-09', false, cal, idx)).toBeNull();
+    });
+    test('an event-only spec is valid; unknown or noise events are not', () => {
+        expect(lab.validateSpec({ when: [], event: 'analyst_upgrade' }).event).toEqual(['analyst_upgrade']);
+        expect(() => lab.validateSpec({ when: [], event: 'magic' })).toThrow(/unknown event/);
+        expect(() => lab.validateSpec({ when: [], event: 'noise' })).toThrow(/unknown event/);
+    });
+});

@@ -60,7 +60,12 @@ async function ensureTable() {
 }
 
 function validateSpec(spec) {
-    if (!spec || !Array.isArray(spec.when) || !spec.when.length) throw new Error('spec.when must be a non-empty list');
+    const events = spec?.event == null ? null : [].concat(spec.event);
+    if (events) {
+        const { EVENT_TYPES } = require('./newsEventService');
+        for (const e of events) if (!EVENT_TYPES.includes(e) || e === 'noise') throw new Error(`unknown event ${e}`);
+    }
+    if (!spec || !Array.isArray(spec.when) || (!spec.when.length && !events)) throw new Error('spec.when must be a non-empty list (or give an event)');
     for (const c of spec.when) {
         if (!Array.isArray(c) || c.length !== 3) throw new Error(`condition must be [feature, op, value]: ${JSON.stringify(c)}`);
         if (!(c[0] in FEATURES)) throw new Error(`unknown feature ${c[0]}`);
@@ -70,7 +75,36 @@ function validateSpec(spec) {
     const hold = spec.hold ?? 5;
     if (!Number.isInteger(hold) || hold < 1 || hold > 60) throw new Error('hold must be 1-60 trading days');
     if (spec.stopPct != null && !(spec.stopPct > 0 && spec.stopPct < 50)) throw new Error('stopPct must be between 0 and 50');
-    return { when: spec.when, hold, stopPct: spec.stopPct ?? null };
+    return { when: spec.when, hold, stopPct: spec.stopPct ?? null, ...(events ? { event: events } : {}) };
+}
+
+/**
+ * Signal day for a news item: the trading day before the first open AFTER the news, so the
+ * simulated buy (next open) never uses news that wasn't out yet. Pre-9:30 ET news on a
+ * trading day → buy that day's open; later or non-trading-day news → the next open.
+ */
+function eventSignalDay(etDate, preOpen, calendar, calIdx) {
+    let entry = preOpen && calIdx.has(etDate) ? calIdx.get(etDate) : null;
+    if (entry == null) {
+        let lo = 0, hi = calendar.length; // first calendar day > etDate
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (calendar[mid] <= etDate) lo = mid + 1; else hi = mid; }
+        entry = lo;
+    }
+    return entry >= 1 && entry < calendar.length ? calendar[entry - 1] : null;
+}
+
+async function _eventDays(types, calendar, calIdx) {
+    const sets = new Map(types.map(t => [t, new Set()]));
+    if (!types.length) return sets;
+    const r = await query(
+        `SELECT symbol, event_type, (created_at AT TIME ZONE 'America/New_York')::date::text AS d,
+                (created_at AT TIME ZONE 'America/New_York')::time < '09:30' AS pre
+         FROM news_events WHERE event_type = ANY($1)`, [types]);
+    for (const row of r.rows) {
+        const sd = eventSignalDay(row.d, row.pre, calendar, calIdx);
+        if (sd) sets.get(row.event_type).add(`${row.symbol}|${sd}`);
+    }
+    return sets;
 }
 
 /** Add an idea (or return the existing one with the same name). */
@@ -219,6 +253,8 @@ async function runQueued({ ids = null, batch = 300 } = {}) {
 
     const { calendar, market } = await _market();
     const calIdx = new Map(calendar.map((d, i) => [d, i]));
+    const eventSets = await _eventDays([...new Set(specs.flatMap(s => s.event || []))], calendar, calIdx);
+    const hasEvent = (sp, sym, d) => !sp.event || sp.event.some(t => eventSets.get(t).has(`${sym}|${d}`));
     const symbols = (await query(`SELECT DISTINCT symbol FROM history_bars WHERE symbol <> 'SPY' ORDER BY symbol`)).rows.map(r => r.symbol);
     const t0 = Date.now();
     for (let s = 0; s < symbols.length; s += batch) {
@@ -245,7 +281,7 @@ async function runQueued({ ids = null, batch = 300 } = {}) {
                 }
                 for (const sp of specs) {
                     const r = cache[`${sp.hold}|${sp.stopPct ?? ''}`];
-                    if (r != null && matches(sp.when, f)) add(sig.get(sp.id), d, r);
+                    if (r != null && matches(sp.when, f) && hasEvent(sp, bars[i].symbol, d)) add(sig.get(sp.id), d, r);
                 }
             }
         }
@@ -286,6 +322,6 @@ async function runWeekly() {
 }
 
 module.exports = {
-    ensureTable, addHypothesis, runQueued, runWeekly, validateSpec, computeFeatures, tradeReturn, scoreIdea, matches,
+    ensureTable, addHypothesis, runQueued, runWeekly, validateSpec, computeFeatures, tradeReturn, scoreIdea, matches, eventSignalDay,
     formatResult, rollingExtreme, FEATURES, PASS, HOLDOUT_START,
 };

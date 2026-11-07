@@ -1700,6 +1700,8 @@ function startScheduler() {
         runWeeklyInsiderSweep();           // Saturday 12:00 ET: insider trades for every scanned ticker (research archive)
         runWeeklyResearchAgent();          // Saturday 12:00 ET: Gemini writes new ideas into the lab queue from the week + lab memory
         runWeeklyResearchLab();            // Saturday 13:00 ET: test every queued idea in the research lab (report only)
+        runDailyMistakeReview();           // Weekdays 18:30 ET: label today's losses + missed winners, feed repeats to the agent
+        runWeeklyAccountability();         // Friday 16:20 ET: what the app cost to run vs what live accounts gained
         runDailyInsiderSweep();            // Weekdays 17:00 ET: last 10 days of insider filings (feeds the 'insider' test arm)
         runPromotionAndReminders();        // Sat 11:30 ET promotion check; weekdays 9:00 ET approval reminders
         require('./satelliteService').runTick().catch(err =>
@@ -1852,6 +1854,40 @@ function runWeeklyResearchLab() {
     _researchLabRanDate = etDate;
     require('./researchLabService').runWeekly().catch(err =>
         console.error('[ResearchLab] Weekly run error:', err.message));
+}
+
+// Weekdays 18:30 ET — daily mistake review: Gemini labels recent losing trades and rejected
+// stocks that then ran, one cause each; repeats feed Saturday's research agent. Report only.
+let _mistakeReviewRanDate = null;
+function runDailyMistakeReview() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit'
+    }).formatToParts(new Date());
+    const get = t => parts.find(p => p.type === t).value;
+    const etDate = `${get('year')}-${get('month')}-${get('day')}`;
+    if (['Sat', 'Sun'].includes(get('weekday')) || parseInt(get('hour'), 10) !== 18 || parseInt(get('minute'), 10) < 30) return;
+    if (_mistakeReviewRanDate === etDate) return;
+    _mistakeReviewRanDate = etDate;
+    require('./mistakeReviewService').runDaily().catch(err =>
+        console.error('[MistakeReview] Daily run error:', err.message));
+}
+
+// Friday 16:20 ET (after the 16:10 $/day scoreboard) — weekly accountability: service costs
+// (metered Gemini + subscriptions) vs live-account gains. Admin only.
+let _accountabilityRanDate = null;
+function runWeeklyAccountability() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit'
+    }).formatToParts(new Date());
+    const get = t => parts.find(p => p.type === t).value;
+    const etDate = `${get('year')}-${get('month')}-${get('day')}`;
+    if (get('weekday') !== 'Fri' || parseInt(get('hour'), 10) !== 16 || parseInt(get('minute'), 10) < 20) return;
+    if (_accountabilityRanDate === etDate) return;
+    _accountabilityRanDate = etDate;
+    require('./accountabilityService').runWeekly().catch(err =>
+        console.error('[Accountability] Weekly run error:', err.message));
 }
 
 // Weekdays 17:00 ET — refresh the last 10 days of insider filings so tomorrow's 'insider'

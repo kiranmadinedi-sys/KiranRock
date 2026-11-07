@@ -119,8 +119,32 @@ async function _fetchCashPct(userId) {
 }
 
 /**
- * TOTAL P&L per trading day from Alpaca's own portfolio history (profit_loss excludes
- * deposits/withdrawals; includes closed trades, open positions and core holdings).
+ * Alpaca's profit_loss is supposed to exclude deposits/withdrawals, but a settling deposit
+ * can land in it as "profit" (2026-11-07: kmadined's $2,500 deposit on 11-03 showed as
+ * +$2,492 P&L on 11-04, so the week read +$2,414 instead of about -$78). For each cash
+ * move, find the bar within a few days whose P&L is roughly that amount and take it out.
+ * When no bar matches, Alpaca already excluded it, so nothing is subtracted twice.
+ * days = bar dates (YYYY-MM-DD); moves = [{ date, amount }] (+deposit, -withdrawal).
+ */
+function removeCashMoves(days, pl, moves) {
+    const out = pl.slice();
+    for (const m of moves) {
+        if (!m.amount) continue;
+        const t = Date.parse(m.date);
+        let best = -1;
+        for (let i = 0; i < days.length; i++) {
+            const dd = (Date.parse(days[i]) - t) / 86400000;
+            if (dd < -1 || dd > 5) continue;
+            if (best < 0 || Math.abs(out[i] - m.amount) < Math.abs(out[best] - m.amount)) best = i;
+        }
+        if (best >= 0 && Math.abs(out[best] - m.amount) <= Math.abs(m.amount) * 0.25) out[best] -= m.amount;
+    }
+    return out;
+}
+
+/**
+ * TOTAL P&L per trading day from Alpaca's own portfolio history (includes closed trades,
+ * open positions and core holdings), with deposits/withdrawals removed (removeCashMoves).
  * Returns { last5, last28 } sums, or null when unavailable.
  */
 async function _fetchTotalPnl(userId) {
@@ -129,12 +153,17 @@ async function _fetchTotalPnl(userId) {
         const userDb = require('./userDatabaseService');
         const c = await userDb.getUserAlpacaCredentials(userId);
         const base = c.isPaper !== false ? 'https://paper-api.alpaca.markets/v2' : 'https://api.alpaca.markets/v2';
+        const headers = { 'APCA-API-KEY-ID': c.keyId, 'APCA-API-SECRET-KEY': c.secretKey };
         const h = (await axios.get(`${base}/account/portfolio/history`, {
-            headers: { 'APCA-API-KEY-ID': c.keyId, 'APCA-API-SECRET-KEY': c.secretKey },
-            params: { period: '1M', timeframe: '1D' }, timeout: 8000,
+            headers, params: { period: '1M', timeframe: '1D' }, timeout: 8000,
         })).data;
-        const pl = (h.profit_loss || []).map(v => (v == null ? 0 : Number(v)));
+        const days = (h.timestamp || []).map(t => new Date(t * 1000).toISOString().slice(0, 10));
+        let pl = (h.profit_loss || []).map(v => (v == null ? 0 : Number(v)));
         if (!pl.length) return null;
+        const acts = await axios.get(`${base}/account/activities`, {
+            headers, params: { activity_types: 'CSD,CSW,JNLC', after: days[0] }, timeout: 8000,
+        }).then(r => r.data || []).catch(() => []);
+        pl = removeCashMoves(days, pl, acts.map(a => ({ date: a.date, amount: Number(a.net_amount) || 0 })));
         const sum = a => a.reduce((x, y) => x + y, 0);
         return { last5: sum(pl.slice(-5)), last28: sum(pl.slice(-20)) };
     } catch (err) {
@@ -311,7 +340,7 @@ async function sendWeeklyPnlReports({ now = new Date(), deps = {} } = {}) {
 }
 
 module.exports = {
-    targetPerDay, verdict, ANNUAL_TARGET_PCT, ANNUAL_STRETCH_PCT,
+    targetPerDay, verdict, removeCashMoves, ANNUAL_TARGET_PCT, ANNUAL_STRETCH_PCT,
     tradingDayKeys, summarizeWindow, buildAccountSummary, buildAllSummaries,
     formatAccountMessage, formatCombinedMessage, sendWeeklyPnlReports,
     DEFAULT_TARGET_USD, DEFAULT_STRETCH_USD

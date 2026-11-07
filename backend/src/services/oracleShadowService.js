@@ -80,6 +80,7 @@ async function _askGemini(system, prompt) {
         { timeout: 60000 });
     const u = resp.data.usageMetadata || {};
     const text = resp.data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+    require('./costLedgerService').add('gemini:oracle_shadow', require('./costLedgerService').geminiCost(u, { inPerM: PRICE_IN, outPerM: PRICE_OUT }));
     return {
         ...parseVerdict(text), ms: Date.now() - t0,
         cost: (u.promptTokenCount || 0) / 1e6 * PRICE_IN + ((u.candidatesTokenCount || 0) + (u.thoughtsTokenCount || 0)) / 1e6 * PRICE_OUT,

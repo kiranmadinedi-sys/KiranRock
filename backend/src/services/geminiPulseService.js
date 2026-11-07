@@ -68,6 +68,8 @@ async function _callGemini(prompt) {
         },
         { timeout: 12000 }
     );
+    const ledger = require('./costLedgerService');
+    ledger.add('gemini:pulse', ledger.geminiCost(resp.data?.usageMetadata));
     return resp;
 }
 

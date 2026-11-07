@@ -145,6 +145,7 @@ async function _gemini(prompt) {
         { timeout: 90000 });
     const u = resp.data.usageMetadata || {};
     const cost = (u.promptTokenCount || 0) / 1e6 * PRICE_IN + ((u.candidatesTokenCount || 0) + (u.thoughtsTokenCount || 0)) / 1e6 * PRICE_OUT;
+    require('./costLedgerService').add('gemini:news', cost);
     const text = resp.data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '[]';
     return { text, cost, usage: u };
 }

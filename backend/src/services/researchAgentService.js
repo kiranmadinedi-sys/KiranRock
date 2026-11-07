@@ -45,7 +45,10 @@ async function _week(now) {
     const events = (await query(
         `SELECT event_type, COUNT(*)::int AS n FROM news_events
          WHERE created_at >= $1 AND event_type NOT IN ('noise', 'unclassified') GROUP BY 1 ORDER BY 2 DESC LIMIT 15`, [since]).catch(() => ({ rows: [] }))).rows;
+    // Daily mistake review (2026-11-07): repeated causes of our own losses / missed winners.
+    const mistakes = await require('./mistakeReviewService').recentPatterns().catch(() => null);
     return {
+        mistakesLast30Days: mistakes,
         closedTrades: trades.map(t => ({ ...t, pnl_pct: t.pnl_pct == null ? null : +t.pnl_pct.toFixed(2), hold_h: t.hold_h == null ? null : Math.round(t.hold_h) })),
         index5dPct: Object.fromEntries(idx.map(x => [x.symbol, x.r5 == null ? null : +(x.r5 * 100).toFixed(2)])),
         newsEventsThisWeek: events,
@@ -74,6 +77,7 @@ ${JSON.stringify(week)}
 
 RULES:
 - Each idea needs a clear economic reason (why would this make money, who is on the other side?). Write it in "idea" in one sentence.
+- If mistakesLast30Days shows a repeated cause (e.g. chased_extended, filter_too_strict), at least one idea should test a rule that would have avoided it or caught the missed move.
 - Prefer ideas that are different from everything in memory. Small parameter tweaks of failed ideas waste the test budget.
 - Plenty of trades: avoid conditions so narrow they fire on fewer than ~100 days.
 - name: short snake_case, unique, ending in the hold (e.g. "_5d").
@@ -111,6 +115,8 @@ async function _ask(prompt) {
         { contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.7, maxOutputTokens: 16000, responseMimeType: 'application/json' } },
         { timeout: 180000 });
     const text = resp.data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '[]';
+    const ledger = require('./costLedgerService');
+    ledger.add('gemini:research_agent', ledger.geminiCost(resp.data.usageMetadata));
     return { text, usage: resp.data.usageMetadata || {} };
 }
 

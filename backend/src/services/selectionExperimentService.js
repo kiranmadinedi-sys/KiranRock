@@ -285,22 +285,31 @@ async function runDailyPickLog(now = new Date()) {
  */
 async function getExperimentReport({ userId = null, sinceDate = '2026-10-12' } = {}) {
     await ensureTable();
+    // Prices from history_bars (entry next open, exit 5 trading days later — same as
+    // promotionService). market_review_snapshots only covers a few picks per day, which
+    // showed oversold at −1.5pp when the full set was +0.2pp (2026-11-07).
     const res = await query(`
-        SELECT p.scan_date::text AS d, p.arm, p.rank,
-               (LEAST(30, GREATEST(-30, (m.close_5d / m.base_close - 1) * 100)))::float AS ret5
-        FROM selection_experiment_picks p
-        JOIN market_review_snapshots m ON m.symbol = p.symbol AND m.scan_date = p.scan_date
-        WHERE p.scan_date >= $1::date
-          AND ($2::text IS NULL OR p.user_id = $2)
-          AND m.base_close > 0 AND m.close_5d IS NOT NULL`,
+        WITH p AS (SELECT DISTINCT scan_date, arm, rank, symbol FROM selection_experiment_picks
+                   WHERE scan_date >= $1::date AND ($2::text IS NULL OR user_id = $2)),
+             b AS (SELECT symbol, d, o, c, ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY d) rn
+                   FROM history_bars WHERE symbol IN (SELECT symbol FROM p)),
+             s AS (SELECT p.scan_date, p.arm, p.rank, p.symbol, MIN(b.rn) AS rn
+                   FROM p JOIN b ON b.symbol = p.symbol AND b.d > p.scan_date GROUP BY 1, 2, 3, 4)
+        SELECT s.scan_date::text AS d, s.arm, s.rank,
+               (LEAST(30, GREATEST(-30, (e5.c / e1.o - 1) * 100)))::float AS ret5
+        FROM s JOIN b e1 ON e1.symbol = s.symbol AND e1.rn = s.rn
+               JOIN b e5 ON e5.symbol = s.symbol AND e5.rn = s.rn + 4
+        WHERE e1.o > 0`,
         [sinceDate, userId]
     );
 
     const avg = a => (a.length ? a.reduce((s, x) => s + x, 0) / a.length : null);
     const days = [...new Set(res.rows.map(r => r.d))].sort();
+    const dayAvgs = (name, topN) => new Map(days
+        .map(d => [d, avg(res.rows.filter(r => r.d === d && r.arm === name && r.rank <= topN).map(r => r.ret5))])
+        .filter(([, v]) => v != null));
     const arm = (name, topN) => {
-        const perDay = days.map(d => avg(res.rows.filter(r => r.d === d && r.arm === name && r.rank <= topN).map(r => r.ret5)))
-            .filter(v => v != null);
+        const perDay = [...dayAvgs(name, topN).values()];
         const picks = res.rows.filter(r => r.arm === name && r.rank <= topN);
         return {
             days: perDay.length,
@@ -309,17 +318,22 @@ async function getExperimentReport({ userId = null, sinceDate = '2026-10-12' } =
             picks: picks.length,
         };
     };
-    const top5 = { control: arm('control', 5), oversold: arm('oversold', 5), steady: arm('steady', 5) };
-    const top40 = { control: arm('control', 40), oversold: arm('oversold', 40), steady: arm('steady', 40) };
-    const edgeOf = (t, name) => (t[name].avgReturn5dPct != null && t.control.avgReturn5dPct != null)
-        ? +(t[name].avgReturn5dPct - t.control.avgReturn5dPct).toFixed(2) : null;
-    const edge = t => ({ oversold: edgeOf(t, 'oversold'), steady: edgeOf(t, 'steady') });
+    const arms = ['control', ...[...new Set(res.rows.map(r => r.arm))].filter(a => a !== 'control').sort()];
+    const table = topN => Object.fromEntries(arms.map(a => [a, arm(a, topN)]));
+    const top5 = table(5), top40 = table(40);
+    // Edge on the days both methods logged (most arms started 2026-10-16, control 10-12).
+    const edgeOf = (topN, name) => {
+        const c = dayAvgs('control', topN), a = dayAvgs(name, topN);
+        const diffs = [...a].filter(([d]) => c.has(d)).map(([d, v]) => v - c.get(d));
+        return diffs.length ? +avg(diffs).toFixed(2) : null;
+    };
+    const edge = topN => Object.fromEntries(arms.filter(a => a !== 'control').map(a => [a, edgeOf(topN, a)]));
 
     return {
         sinceDate, daysWithReturns: days.length,
-        top5: { ...top5, edgePp: edge(top5) },
-        top40: { ...top40, edgePp: edge(top40) },
-        passRule: 'oversold ≥ +1pp per pick over control, win rate not lower, after ~3 weeks / ~30 closed paper trades',
+        top5: { ...top5, edgePp: edge(5) },
+        top40: { ...top40, edgePp: edge(40) },
+        passRule: 'a method ≥ +1pp per pick over control on the same days, win rate not lower, after ≥15 scan days',
     };
 }
 

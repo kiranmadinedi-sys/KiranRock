@@ -56,10 +56,32 @@ async function _fetch(symbols, start, end, onBars) {
     } while (token);
 }
 
-async function _insert(barsBySymbol) {
+/**
+ * Newest bar date that is a finished session. Alpaca returns today's bar while the market
+ * is still trading, and storing it made a midday price look like the close (2026-11-02:
+ * SPY 762.91 on 236K volume vs the real 752.10 on 50.9M, written by the satellite's
+ * first-trading-day top-up). Today's bar counts only after 16:30 ET.
+ */
+function _lastCompleteDay(now = new Date()) {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(now).map(p => [p.type, p.value]));
+    const today = `${parts.year}-${parts.month}-${parts.day}`;
+    const minutes = Number(parts.hour) * 60 + Number(parts.minute);
+    if (minutes >= 16 * 60 + 30) return today;
+    const d = new Date(`${today}T12:00:00Z`);
+    d.setUTCDate(d.getUTCDate() - 1);
+    return d.toISOString().slice(0, 10);
+}
+
+async function _insert(barsBySymbol, lastDay = _lastCompleteDay()) {
     const rows = [];
     for (const [sym, bars] of Object.entries(barsBySymbol)) {
-        for (const b of bars) rows.push([sym, b.t.slice(0, 10), b.o, b.h, b.l, b.c, Math.round(b.v)]);
+        for (const b of bars) {
+            const d = b.t.slice(0, 10);
+            if (d > lastDay) continue; // session still trading
+            rows.push([sym, d, b.o, b.h, b.l, b.c, Math.round(b.v)]);
+        }
     }
     for (let i = 0; i < rows.length; i += 2000) {
         const chunk = rows.slice(i, i + 2000);
@@ -117,4 +139,4 @@ async function appendRecent({ now = new Date() } = {}) {
     }
 }
 
-module.exports = { ensureTable, backfill, appendRecent, scanUniverse, HISTORY_START };
+module.exports = { ensureTable, backfill, appendRecent, scanUniverse, HISTORY_START, _lastCompleteDay, _insert };

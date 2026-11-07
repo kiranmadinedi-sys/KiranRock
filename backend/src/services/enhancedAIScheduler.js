@@ -1698,6 +1698,7 @@ function startScheduler() {
         runWeeklyScoreValidation();        // Saturday 10:00 ET: which score components actually predict returns
         runWeeklyMarketStudy();            // Saturday 11:00 ET: exits + picking methods tested on ALL ≥80 candidates
         runWeeklyInsiderSweep();           // Saturday 12:00 ET: insider trades for every scanned ticker (research archive)
+        runWeeklyResearchAgent();          // Saturday 12:00 ET: Gemini writes new ideas into the lab queue from the week + lab memory
         runWeeklyResearchLab();            // Saturday 13:00 ET: test every queued idea in the research lab (report only)
         runDailyInsiderSweep();            // Weekdays 17:00 ET: last 10 days of insider filings (feeds the 'insider' test arm)
         runPromotionAndReminders();        // Sat 11:30 ET promotion check; weekdays 9:00 ET approval reminders
@@ -1817,6 +1818,23 @@ async function runWeeklyInsiderSweep() {
     _insiderSweepRanDate = etDate;
     require('./researchArchiveService').weeklyInsiderSweep().catch(err =>
         console.error('[ResearchArchive] Insider sweep error:', err.message));
+}
+
+// Saturday 12:00 ET — research agent: Gemini reads the week plus every past lab result and
+// queues a few new ideas; the 13:00 lab run tests them. Proposes only — see researchAgentService.js.
+let _researchAgentRanDate = null;
+function runWeeklyResearchAgent() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit'
+    }).formatToParts(new Date());
+    const get = t => parts.find(p => p.type === t).value;
+    const etDate = `${get('year')}-${get('month')}-${get('day')}`;
+    if (get('weekday') !== 'Sat' || parseInt(get('hour'), 10) !== 12) return;
+    if (_researchAgentRanDate === etDate) return;
+    _researchAgentRanDate = etDate;
+    require('./researchAgentService').runWeekly().catch(err =>
+        console.error('[ResearchAgent] Weekly run error:', err.message));
 }
 
 // Saturday 13:00 ET — research lab: tests every queued idea on history_bars (refreshed by

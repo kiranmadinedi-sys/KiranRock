@@ -67,7 +67,7 @@ function formatMessage(w) {
     L.push(`  <b>Total: ${money(w.gains.totalUsd)}</b>`, '');
     L.push('<b>Cost to run the app:</b>');
     for (const m of w.spend.metered) L.push(`  ${m.service}: $${m.usd.toFixed(2)} (${m.calls} calls)`);
-    for (const s of w.spend.subscriptions) L.push(`  ${s.service}: $${s.periodUsd.toFixed(2)} ($${s.monthly_usd}/mo)`);
+    for (const s of w.spend.subscriptions.filter(x => x.monthly_usd > 0)) L.push(`  ${s.service}: $${s.periodUsd.toFixed(2)} ($${s.monthly_usd}/mo)`);
     L.push(`  <b>Total: $${w.spend.totalUsd.toFixed(2)}</b>`);
     if (w.spend.unknownPrices.length) L.push(`  ⚠️ price not set (counted as $0): ${w.spend.unknownPrices.join(', ')}`);
     L.push('');

@@ -330,6 +330,17 @@ async function getVerdict(data) {
         `"bear_case":"<1 sentence key risk>","key_risk":"<biggest single risk>",` +
         `"master_alignment":["<up to 3 masters who agree>"]}`;
 
+    // 2026-11-07: live checks only — Gemini answers the same question in the background for
+    // comparison (oracleShadowService). Never awaited, never changes the verdict used.
+    const _t0 = Date.now();
+    const _shadow = local => {
+        if (!data.fast) return;
+        try {
+            require('./oracleShadowService').record({ symbol: data.symbol, price: data.price, system: ORACLE_SYSTEM, prompt: userPrompt,
+                localModel: modelUsed, local, localMs: Date.now() - _t0 });
+        } catch (_) { /* shadow must never affect the live check */ }
+    };
+
     try {
         const res = await _post('/api/chat', {
             model:    modelUsed,
@@ -372,10 +383,12 @@ async function getVerdict(data) {
 
         cacheService.set(cacheKey, result, ORACLE_CACHE_TTL_MS);
         logger.info(`[Ollama/ORACLE] ${data.symbol} (${modelUsed}): ${verdict} score=${score} ${result.confidence} size=${positionSizePct}%`);
+        _shadow(result);
         return result;
 
     } catch (err) {
         logger.warn(`[Ollama/ORACLE] ${data.symbol} (${modelUsed}) verdict failed: ${err.message}`);
+        _shadow(null);
         return null;
     }
 }
@@ -604,6 +617,7 @@ module.exports = {
     generate,
     getVerdict,
     getVerdictWithDBHistory,
+    ORACLE_SYSTEM,
     forecastEarnings,
     explainBacktestResults,
     explainLocalBrain,

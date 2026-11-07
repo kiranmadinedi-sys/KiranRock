@@ -51,10 +51,12 @@ function splitTelegramMessage(message, max = TELEGRAM_MAX_CHARS) {
     return parts;
 }
 
-async function sendTelegramMessage(chatId, message, parseMode = 'Markdown') {
+async function sendTelegramMessage(chatId, message, parseMode = 'Markdown', _part = false) {
+    // Copy every message to the Reports page (2026-11-07) — once, before any splitting.
+    if (!_part) require('./reportArchiveService').archiveTelegram({ chatId, body: message, parseMode });
     if (message && message.length > TELEGRAM_MAX_CHARS) {
         let ok = true;
-        for (const part of splitTelegramMessage(message)) ok = (await sendTelegramMessage(chatId, part, parseMode)) && ok;
+        for (const part of splitTelegramMessage(message)) ok = (await sendTelegramMessage(chatId, part, parseMode, true)) && ok;
         return ok;
     }
     try {

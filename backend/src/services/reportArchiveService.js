@@ -18,7 +18,18 @@ const KINDS = {
     premarket_brief: 'Pre-market overnight check',
     core_watchlist: 'Core watchlist',
     core_guidance: 'Core guidance',
+    accountability: 'Weekly accountability (cost vs gains)',
+    mistake_review: 'Daily mistake review',
+    research_lab: 'Research lab',
+    portfolio_lab: 'Portfolio lab',
+    prediction_check: 'Score edge check',
+    news_rescan: 'News rescan alert',
+    telegram: 'All Telegram messages',
 };
+
+// Raw Telegram copies (~130/day: trade alerts, health, scan status). Kept out of the "All"
+// view so the curated reports aren't buried; the 'telegram' chip shows them.
+const NOISY_KINDS = ['telegram'];
 
 let _ready = false;
 async function ensureTable() {
@@ -47,9 +58,44 @@ async function save({ kind, title, body, format = 'markdown', userId = null, adm
         await query(
             `INSERT INTO report_archive (kind, title, body, format, user_id, admin_only) VALUES ($1, $2, $3, $4, $5, $6)`,
             [kind, title || KINDS[kind] || kind, String(body), format, userId == null ? null : String(userId), !!adminOnly]);
+        // The Telegram hook may already have stored this exact text as a raw copy — keep one.
+        if (kind !== 'telegram') {
+            await query(`DELETE FROM report_archive WHERE kind = 'telegram' AND body = $1 AND created_at > NOW() - INTERVAL '10 minutes'`, [String(body)]);
+        }
     } catch (err) {
         logger.warn('[ReportArchive] Save failed (non-blocking)', { kind, error: err.message });
     }
+}
+
+function _title(body) {
+    const first = String(body).split('\n').map(l => l.replace(/<[^>]+>|[*_`[\]]/g, '').trim()).find(Boolean) || 'Telegram message';
+    return first.slice(0, 100);
+}
+
+/**
+ * Every Telegram send lands here (telegramAlertService / telegramService / news rescan), so
+ * /reports shows everything Telegram shows (2026-11-07, user request). Admin chat → admin
+ * only; a user's own chat → only that user. Skips text a scheduled report already archived
+ * under its own kind. Fire-and-forget; never throws.
+ */
+function archiveTelegram({ chatId, body, parseMode }) {
+    if (!body || (process.env.NODE_ENV === 'test' && !process.env.REPORT_ARCHIVE_IN_TESTS)) return;
+    (async () => {
+        await ensureTable();
+        const text = String(body);
+        const dup = await query(`SELECT 1 FROM report_archive WHERE body = $1 AND created_at > NOW() - INTERVAL '10 minutes' LIMIT 1`, [text]);
+        if (dup.rows.length) return;
+        const adminChat = process.env.TELEGRAM_CHAT_ID || '';
+        let userId = null, adminOnly = true;
+        if (chatId && String(chatId) !== String(adminChat)) {
+            const u = await query(`SELECT id FROM users WHERE telegram_chat_id = $1 LIMIT 1`, [String(chatId)]);
+            if (u.rows[0]) { userId = String(u.rows[0].id); adminOnly = false; }
+        }
+        const format = String(parseMode || '').toUpperCase() === 'HTML' ? 'html' : 'markdown';
+        await query(
+            `INSERT INTO report_archive (kind, title, body, format, user_id, admin_only) VALUES ('telegram', $1, $2, $3, $4, $5)`,
+            [_title(text), text, format, userId, adminOnly]);
+    })().catch(err => logger.debug('[ReportArchive] Telegram copy failed', { error: err.message }));
 }
 
 const VISIBLE_SQL = `(user_id = $1 OR (user_id IS NULL AND (NOT admin_only OR $2)))`;
@@ -59,6 +105,7 @@ async function list(userId, isAdmin, { kind = null, limit = 200 } = {}) {
     const params = [String(userId), !!isAdmin, Math.min(Number(limit) || 200, 500)];
     let where = VISIBLE_SQL;
     if (kind) { params.push(kind); where += ` AND kind = $4`; }
+    else where += ` AND kind <> ALL('{${NOISY_KINDS.join(',')}}')`;
     const r = await query(
         `SELECT id, kind, title, created_at, user_id IS NOT NULL AS personal FROM report_archive
          WHERE ${where} ORDER BY created_at DESC LIMIT $3`, params);
@@ -71,4 +118,4 @@ async function get(userId, isAdmin, id) {
     return r.rows[0] || null;
 }
 
-module.exports = { KINDS, ensureTable, save, list, get };
+module.exports = { KINDS, ensureTable, save, list, get, archiveTelegram };

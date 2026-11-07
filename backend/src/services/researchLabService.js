@@ -314,6 +314,7 @@ async function runWeekly() {
         const msg = `🔬 *Research lab* — ${tested.length} idea(s) tested\n\n${tested.map(formatResult).join('\n')}\n\n` +
             `All-time: ${total.p} passed of ${total.n} tested. A pass goes to paper first; live only by approval.`;
         await require('./telegramAlertService').sendAdminMessage(msg).catch(() => {});
+        await require('./reportArchiveService').save({ kind: 'research_lab', body: msg, adminOnly: true }).catch(() => {});
         return tested;
     } catch (err) {
         logger.warn('[ResearchLab] Weekly run failed', { error: err.message });

@@ -1702,6 +1702,8 @@ function startScheduler() {
         runWeeklyResearchLab();            // Saturday 13:00 ET: test every queued idea in the research lab (report only)
         runDailyMistakeReview();           // Weekdays 18:30 ET: label today's losses + missed winners, feed repeats to the agent
         runWeeklyAccountability();         // Friday 16:20 ET: what the app cost to run vs what live accounts gained
+        runDailyPredictionCheck();         // Weekdays 08:00 ET: does the nightly score still predict 5-day returns?
+        runWeeklyPortfolioLab();           // Saturday 13:30 ET: slots / sizing / exits replayed on real nightly scores
         runDailyInsiderSweep();            // Weekdays 17:00 ET: last 10 days of insider filings (feeds the 'insider' test arm)
         runPromotionAndReminders();        // Sat 11:30 ET promotion check; weekdays 9:00 ET approval reminders
         require('./satelliteService').runTick().catch(err =>
@@ -1888,6 +1890,40 @@ function runWeeklyAccountability() {
     _accountabilityRanDate = etDate;
     require('./accountabilityService').runWeekly().catch(err =>
         console.error('[Accountability] Weekly run error:', err.message));
+}
+
+// Weekdays 08:00 ET — daily prediction check: refresh yesterday's bars, then score every
+// finished scan night (5-day outcome) and warn admin if the score edge turns negative.
+let _predictionCheckRanDate = null;
+function runDailyPredictionCheck() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit'
+    }).formatToParts(new Date());
+    const get = t => parts.find(p => p.type === t).value;
+    const etDate = `${get('year')}-${get('month')}-${get('day')}`;
+    if (['Sat', 'Sun'].includes(get('weekday')) || parseInt(get('hour'), 10) !== 8) return;
+    if (_predictionCheckRanDate === etDate) return;
+    _predictionCheckRanDate = etDate;
+    require('./predictionCheckService').runDaily().catch(err =>
+        console.error('[PredictionCheck] Daily run error:', err.message));
+}
+
+// Saturday 13:30 ET — portfolio lab: re-tests every rule-set (starter grid + agent ideas)
+// on the real nightly scores and Telegrams admin. Report only — see portfolioLabService.js.
+let _portfolioLabRanDate = null;
+function runWeeklyPortfolioLab() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit'
+    }).formatToParts(new Date());
+    const get = t => parts.find(p => p.type === t).value;
+    const etDate = `${get('year')}-${get('month')}-${get('day')}`;
+    if (get('weekday') !== 'Sat' || parseInt(get('hour'), 10) !== 13 || parseInt(get('minute'), 10) < 30) return;
+    if (_portfolioLabRanDate === etDate) return;
+    _portfolioLabRanDate = etDate;
+    require('./portfolioLabService').runWeekly().catch(err =>
+        console.error('[PortfolioLab] Weekly run error:', err.message));
 }
 
 // Weekdays 17:00 ET — refresh the last 10 days of insider filings so tomorrow's 'insider'

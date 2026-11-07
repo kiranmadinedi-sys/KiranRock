@@ -17,6 +17,7 @@ const lab = require('./researchLabService');
 const { EVENT_TYPES } = require('./newsEventService');
 
 const MAX_IDEAS = 6; // a few per week — every extra test raises the odds of a lucky pass
+const MAX_PORTFOLIO_IDEAS = 2; // portfolio-rule ideas (slots, sizing, exits) per week
 const MODEL = () => process.env.GEMINI_AGENT_MODEL || 'gemini-3.5-flash';
 
 async function _memory() {
@@ -32,6 +33,16 @@ async function _memory() {
             }),
         };
     });
+}
+
+/** Portfolio lab memory: every rule-set tested and how it did vs control. */
+async function _portfolioMemory() {
+    const pl = require('./portfolioLabService');
+    await pl.ensureTable();
+    const r = await query(`SELECT name, idea, spec, status, result FROM portfolio_experiments ORDER BY id`);
+    return r.rows.map(e => ({ name: e.name, idea: e.idea, spec: e.spec, status: e.status,
+        returnPct: e.result?.full?.returnPct, vsControlPp: e.result?.vsControlPp, halves: e.result?.halves?.map(h => h.returnPct),
+        maxDrawdownPct: e.result?.full?.maxDrawdownPct, avgInvestedPct: e.result?.full?.avgInvestedPct, why: e.result?.why }));
 }
 
 async function _week(now) {
@@ -55,7 +66,8 @@ async function _week(now) {
     };
 }
 
-function buildPrompt(memory, week) {
+function buildPrompt(memory, week, portfolioMemory = []) {
+    const pl = require('./portfolioLabService');
     return `You are the research agent for a US stock swing-trading system. Propose up to ${MAX_IDEAS} NEW trading ideas that a fixed test bench will check on 3 years of daily prices (2023 →, ~4,700 liquid US stocks).
 
 HOW THE BENCH TESTS AN IDEA (you cannot change this):
@@ -82,18 +94,37 @@ RULES:
 - Plenty of trades: avoid conditions so narrow they fire on fewer than ~100 days.
 - name: short snake_case, unique, ending in the hold (e.g. "_5d").
 
-Reply with JSON only: [{"name": "...", "family": "momentum|mean_reversion|trend|event|market|other", "idea": "...", "spec": {...}}]`;
+PORTFOLIO RULES (optional, up to ${MAX_PORTFOLIO_IDEAS}): you may also propose changes to HOW the picks are traded — our biggest past drags were idle cash and caps blocking winners, not stock picks. A portfolio bench replays the real nightly scores since 2026-05-28 and must beat today's rules (control) in BOTH halves with drawdown ≤ 2pp worse.
+- control: ${JSON.stringify(pl.CONTROL)} (null allowed for stopPct, trailPct, takeProfitPct, sectorCap = off)
+- give {"type": "portfolio", "name": "...", "idea": "...", "spec": {only the settings you change}}
+- portfolio memory (already tested): ${JSON.stringify(portfolioMemory)}
+
+Reply with JSON only: [{"name": "...", "family": "momentum|mean_reversion|trend|event|market|other", "idea": "...", "spec": {...}}, ...optional portfolio items]`;
 }
 
 /** Parse + validate the model's ideas against the spec rules and the memory. */
-function acceptIdeas(text, memory) {
+function acceptIdeas(text, memory, portfolioMemory = []) {
     let arr;
     try { arr = JSON.parse(String(text).replace(/```json|```/g, '').trim()); } catch (_) { return { accepted: [], rejected: [{ why: 'reply was not JSON' }] }; }
     if (!Array.isArray(arr)) return { accepted: [], rejected: [{ why: 'reply was not a list' }] };
     const names = new Set(memory.map(m => m.name));
     const specs = new Set(memory.map(m => JSON.stringify(lab.validateSpec(m.spec))));
-    const accepted = [], rejected = [];
-    for (const x of arr.slice(0, MAX_IDEAS)) {
+    const accepted = [], rejected = [], portfolio = [];
+    const pNames = new Set(portfolioMemory.map(m => m.name));
+    const pSpecs = new Set(portfolioMemory.map(m => JSON.stringify(m.spec)));
+    for (const x of arr.filter(i => i && i.type === 'portfolio').slice(0, MAX_PORTFOLIO_IDEAS)) {
+        try {
+            if (typeof x.name !== 'string' || !/^[a-z0-9_]{3,60}$/.test(x.name)) throw new Error('bad name');
+            if (pNames.has(x.name)) throw new Error('name already tested');
+            const clean = require('./portfolioLabService').validateSpec(x.spec);
+            if (pSpecs.has(JSON.stringify(clean))) throw new Error('same portfolio rules already tested');
+            pNames.add(x.name); pSpecs.add(JSON.stringify(clean));
+            portfolio.push({ name: x.name, idea: String(x.idea || '').slice(0, 400), spec: clean });
+        } catch (err) {
+            rejected.push({ name: x.name, why: err.message });
+        }
+    }
+    for (const x of arr.filter(i => !(i && i.type === 'portfolio')).slice(0, MAX_IDEAS)) {
         try {
             if (!x || typeof x.name !== 'string' || !/^[a-z0-9_]{3,60}$/.test(x.name)) throw new Error('bad name');
             if (names.has(x.name)) throw new Error('name already tested');
@@ -106,7 +137,7 @@ function acceptIdeas(text, memory) {
             rejected.push({ name: x?.name, why: err.message });
         }
     }
-    return { accepted, rejected };
+    return { accepted, rejected, portfolio };
 }
 
 async function _ask(prompt) {
@@ -129,15 +160,17 @@ async function runWeekly({ now = new Date() } = {}) {
         if (!process.env.GEMINI_API_KEY) return null;
         const memory = await _memory();
         const week = await _week(now);
-        const { text, usage } = await _ask(buildPrompt(memory, week));
-        const { accepted, rejected } = acceptIdeas(text, memory);
+        const portfolioMemory = await _portfolioMemory().catch(() => []);
+        const { text, usage } = await _ask(buildPrompt(memory, week, portfolioMemory));
+        const { accepted, rejected, portfolio } = acceptIdeas(text, memory, portfolioMemory);
         for (const idea of accepted) await lab.addHypothesis({ ...idea, source: 'agent' });
-        logger.info('[ResearchAgent] Proposed ideas', { added: accepted.map(a => a.name), rejected, usage });
-        return { added: accepted, rejected, usage };
+        for (const p of portfolio) await require('./portfolioLabService').addExperiment({ ...p, source: 'agent' });
+        logger.info('[ResearchAgent] Proposed ideas', { added: accepted.map(a => a.name), portfolio: portfolio.map(p => p.name), rejected, usage });
+        return { added: accepted, portfolio, rejected, usage };
     } catch (err) {
         logger.warn('[ResearchAgent] Weekly run failed', { error: err.response?.status || err.message });
         return null;
     }
 }
 
-module.exports = { runWeekly, buildPrompt, acceptIdeas, MAX_IDEAS };
+module.exports = { runWeekly, buildPrompt, acceptIdeas, MAX_IDEAS, MAX_PORTFOLIO_IDEAS };

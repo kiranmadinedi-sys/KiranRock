@@ -36,6 +36,8 @@ async function sendTelegramAlert(message) {
         );
         const token = process.env.TELEGRAM_BOT_TOKEN;
         if (!token) return;
+        // Same text goes to every trader — one public copy on the Reports page.
+        require('./reportArchiveService').save({ kind: 'news_rescan', body: message, format: 'html' }).catch(() => {});
         for (const u of users.rows) {
             await fetch(
                 `https://api.telegram.org/bot${token}/sendMessage`,

@@ -35,6 +35,7 @@ async function sendTelegramMessage(target, message, options = {}) {
 
     const chatId = await resolveTelegramChatId(target);
     if (!chatId) throw new Error('No Telegram chat ID found for this phone number');
+    require('./reportArchiveService').archiveTelegram({ chatId, body: message, parseMode: options.parse_mode });
     
     // Retry logic with exponential backoff
     const maxRetries = 3;

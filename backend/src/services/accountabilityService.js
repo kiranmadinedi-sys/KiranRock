@@ -57,7 +57,8 @@ async function buildWeek({ now = new Date(), deps = {} } = {}) {
         `SELECT to_char(week_end, 'YYYY-MM-DD') AS week_end, gains_usd::float AS gains, spend_usd::float AS spend, net_usd::float AS net
          FROM weekly_accountability ORDER BY week_end DESC LIMIT 4`)).rows;
     const scoreEdge = await (deps.scoreEdge || (() => require('./predictionCheckService').rolling({ nights: 20 })))().catch(() => null);
-    return { fromDay, toDay, spend, gains, net, history, scoreEdge };
+    const machine = await (deps.machine || (() => require('./systemResourceService').weekSummary()))().catch(() => null);
+    return { fromDay, toDay, spend, gains, net, history, scoreEdge, machine };
 }
 
 function formatMessage(w) {
@@ -79,6 +80,8 @@ function formatMessage(w) {
         L.push('', `<b>Is the nightly score still working?</b> (last ${e.nights} scan nights, 5-day returns)`);
         L.push(`  score ≥80 vs average stock: ${e.avgSpread80 >= 0 ? '+' : ''}${e.avgSpread80}pp (${e.nightsSpread80Positive}/${e.nights} nights positive) · top-20 picks: ${e.avgTop20Spread >= 0 ? '+' : ''}${e.avgTop20Spread}pp · rank correlation ${e.avgIc}`);
     }
+    const m = w.machine && require('./systemResourceService').formatWeekLine(w.machine);
+    if (m) L.push('', '<b>The PC running the app (last 7 days):</b>', m);
     if (w.history.length > 1) {
         L.push('', '<b>Last weeks (gains / cost / net):</b>');
         for (const h of w.history) L.push(`  ${h.week_end}: ${money(h.gains)} / $${(h.spend ?? 0).toFixed(2)} / ${money(h.net)}`);

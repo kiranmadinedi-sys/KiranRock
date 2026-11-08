@@ -16,6 +16,7 @@ const trailingStopService          = require('./services/trailingStopService');
 const telegramLinkService          = require('./services/telegramLinkService');
 const marketMonitorService         = require('./services/marketMonitorService');
 const systemHealthMonitor          = require('./services/systemHealthMonitorService');
+const systemResources              = require('./services/systemResourceService');
 const intradayScheduler            = require('./services/intradayScheduler');
 const missedOpportunityService     = require('./services/missedOpportunityService');
 const shadowTradeService           = require('./services/shadowTradeService');
@@ -78,6 +79,7 @@ async function shutdownWorker(signal, options = {}) {
         telegramLinkService.stopTelegramLinkListener();
         marketMonitorService.stopMarketMonitor();
         systemHealthMonitor.stopSystemHealthMonitor();
+        systemResources.stop();
         intradayScheduler.stopScheduler();
         missedOpportunityService.stopMissedOpportunityScheduler();
         shadowTradeService.stopShadowTradeScheduler();
@@ -181,6 +183,10 @@ async function startWorker(options = {}) {
 
     console.log('\n🏥 Starting System Health Monitor (5-min checks + Telegram alerts)...');
     systemHealthMonitor.startSystemHealthMonitor();
+
+    console.log('
+🖥️  Starting PC Resource Monitor (RAM/CPU/disk/DB/Ollama, 1-min samples)...');
+    systemResources.start();
 
     console.log('\n🔍 Starting Missed Opportunity Monitor (daily 5:00 PM ET check)...');
     missedOpportunityService.startMissedOpportunityScheduler();

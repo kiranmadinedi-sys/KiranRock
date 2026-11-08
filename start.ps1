@@ -481,6 +481,25 @@ Write-Host "   Alpaca Paper Trading | PostgreSQL" -ForegroundColor Cyan
 Write-Host "===============================================" -ForegroundColor Cyan
 Write-Host ""
 
+# ── Preflight (2026-11-08): never replace a working app with a broken one ───
+# Compiles every backend file and checks relative requires BEFORE anything is
+# stopped. On 2026-11-07 a syntax error in worker.js passed every test and the
+# worker crash-looped after restart. If the app is running and the check fails,
+# abort and leave it untouched. At boot (nothing running) just warn and go on.
+Write-Host "Preflight: checking backend code..." -ForegroundColor DarkGray
+& node (Join-Path $backendPath "scripts\preflight.js")
+if ($LASTEXITCODE -ne 0) {
+    $pm2Running = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'pm2[\\/]lib[\\/]Daemon\.js' }
+    if ($pm2Running) {
+        Write-Host "PREFLIGHT FAILED - restart aborted. The running app was NOT stopped." -ForegroundColor Red
+        Write-Host "Fix the errors above, then run start.ps1 again." -ForegroundColor Red
+        Read-Host "Press Enter to close"
+        exit 1
+    }
+    Write-Host "PREFLIGHT FAILED - nothing is running, starting anyway (see errors above)." -ForegroundColor Yellow
+}
+
 # ── Kill previous PM2 logs terminal windows if PID files exist ──────────────
 $backendLogsPidFile = Join-Path $env:TEMP 'kiranrock_backend_logs.pid'
 if (Test-Path $backendLogsPidFile) {

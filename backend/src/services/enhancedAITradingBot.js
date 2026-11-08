@@ -1228,42 +1228,69 @@ async function checkMaxDrawdown(userId, currentPortfolioValue) {
 
         return { halt: false, paperOnly: false, reduceSizing: false, drawdownPct };
     } catch (error) {
-        logger.error('[DrawdownBreaker] Error checking drawdown', { error: error.message, userId });
-        return { halt: false, paperOnly: false, reduceSizing: false, drawdownPct: 0 };
+        // Fail closed (2026-11-08): no new buys this cycle when the check itself breaks.
+        logger.error('[DrawdownBreaker] Drawdown check unavailable — no new buys this cycle', { error: error.message, userId });
+        return { halt: true, unavailable: true, paperOnly: true, reduceSizing: true, drawdownPct: 0 };
     }
+}
+
+/** Closed-trade P&L since `sinceSql` (a SQL date expression). Throws on DB error — callers fail closed. */
+async function _realizedPnlSince(userId, sinceSql) {
+    const r = await query(
+        `SELECT COALESCE(SUM(pnl), 0)::float AS pnl FROM trades
+         WHERE user_id = $1 AND action = 'SELL' AND pnl IS NOT NULL
+           AND COALESCE(status, '') <> 'VOIDED' AND trade_date >= ${sinceSql}`, [userId]);
+    return Number(r.rows[0]?.pnl) || 0;
+}
+
+// One Telegram per user/kind/day — the check runs every 5-min cycle once it trips.
+const _lossAlertSent = new Set();
+function _lossAlertOnce(userId, kind) {
+    const key = `${userId}|${kind}|${new Date().toISOString().slice(0, 10)}`;
+    if (_lossAlertSent.has(key)) return false;
+    _lossAlertSent.add(key);
+    return true;
 }
 
 /**
- * Check daily loss limit (circuit breaker)
+ * Daily loss limit (circuit breaker). Returns { halt, unavailable, dailyPnl, lossLimit, source }.
+ * Limit: 1% of account value, $15 floor.
+ *
+ * 2026-11-08: was ai_performance_metrics.total_profit_loss, which never saw exits filled by the
+ * broker's own stop orders or open-position losses (kmadined 11-04 counted +$6.77, real −$1.09;
+ * 11-06 no row at all) — it could not fire on a bad day. Now Alpaca's equity − last_equity
+ * (realized + stop fills + open positions); without it, today's closed trades. If neither can
+ * be read, new buys are blocked this cycle (fail closed) — exits keep running.
  */
-async function checkDailyLossLimit(userId, riskConfig, totalPortfolioValue = 0) {
+async function checkDailyLossLimit(userId, riskConfig, totalPortfolioValue = 0, brokerDayPnl = null) {
+    const lossLimit = -(Math.max(15, totalPortfolioValue * 0.01));
+    let dailyPnl, source;
     try {
-        const dailyLoss = await performanceService.getTodayLoss(userId);
-
-        // Dynamic limit: 1% of current account value, minimum $15 floor.
-        // This scales correctly as the account grows — a fixed $25 stops trading
-        // after a single bad fill on a small account, while 1% scales proportionally.
-        const onePct   = totalPortfolioValue * 0.01;
-        const lossLimit = -(Math.max(15, onePct));
-
-        if (dailyLoss <= lossLimit) {
-            logger.error('Daily loss limit reached', { userId, dailyLoss, lossLimit, accountValue: totalPortfolioValue });
-            alertService.alertDailyLossLimitReached(userId, dailyLoss).catch(() => {});
-            return true;
-        }
-        if (dailyLoss <= lossLimit * 0.75) {
-            alertService.alertDailyLossWarning(userId, dailyLoss, lossLimit).catch(() => {});
-        }
-        return false;
+        if (Number.isFinite(brokerDayPnl)) { dailyPnl = brokerDayPnl; source = 'broker'; }
+        else { dailyPnl = await _realizedPnlSince(userId, 'CURRENT_DATE'); source = 'trades'; }
     } catch (error) {
-        logger.error('Error checking daily loss limit', { error: error.message, userId });
-        return false;
+        logger.error('[SHIELD] Daily loss check unavailable — no new buys this cycle', { error: error.message, userId });
+        return { halt: true, unavailable: true, dailyPnl: null, lossLimit, source: null };
     }
+    if (dailyPnl <= lossLimit) {
+        logger.error('Daily loss limit reached', { userId, dailyPnl, lossLimit, source, accountValue: totalPortfolioValue });
+        if (_lossAlertOnce(userId, 'daily_limit')) alertService.alertDailyLossLimitReached(userId, dailyPnl).catch(() => {});
+        return { halt: true, unavailable: false, dailyPnl, lossLimit, source };
+    }
+    if (dailyPnl <= lossLimit * 0.75 && _lossAlertOnce(userId, 'daily_warn')) {
+        alertService.alertDailyLossWarning(userId, dailyPnl, lossLimit).catch(() => {});
+    }
+    return { halt: false, unavailable: false, dailyPnl, lossLimit, source };
 }
 
+/**
+ * Weekly loss limit. Returns true to halt new buys. 2026-11-08: reads closed trades since
+ * Monday (was ai_performance_metrics — blind to broker stop fills, and returned 0 on a DB
+ * error). A failed read halts new buys this cycle (fail closed).
+ */
 async function checkWeeklyLossLimit(userId, totalPortfolioValue, sessionRiskConfig = {}) {
     try {
-        const weeklyPnl  = await performanceService.getWeeklyLoss(userId);
+        const weeklyPnl  = await _realizedPnlSince(userId, `date_trunc('week', CURRENT_DATE)`);
         const weeklyLimit = -(totalPortfolioValue * (sessionRiskConfig?.weeklyLossLimit || 0.10)); // PANTHEON: 10% weekly max loss
         if (weeklyPnl <= weeklyLimit) {
             logger.error('[SHIELD] Weekly loss limit hit — halting trading until Monday', {
@@ -1284,8 +1311,8 @@ async function checkWeeklyLossLimit(userId, totalPortfolioValue, sessionRiskConf
         }
         return false;
     } catch (error) {
-        logger.error('[SHIELD] Error checking weekly loss limit', { error: error.message, userId });
-        return false;
+        logger.error('[SHIELD] Weekly loss check unavailable — no new buys this cycle', { error: error.message, userId });
+        return true;
     }
 }
 
@@ -3477,6 +3504,8 @@ async function executeAutonomousTrading(userId) {
                 // Use actual cash (not buying power) so the bot never sizes positions using margin credit.
                 // Buying power includes Reg-T margin (~2×) which would let the bot over-deploy.
                 availableBalance = Math.max(0, brokerAcct.cashBalance ?? brokerAcct.buyingPower);
+                sessionRiskConfig._brokerDayPnl = Number.isFinite(brokerAcct.equity) && Number.isFinite(brokerAcct.lastEquity) && brokerAcct.lastEquity > 0
+                    ? brokerAcct.equity - brokerAcct.lastEquity : null;
                 logger.info('[CashGuard] Synced from Alpaca', {
                     userId,
                     portfolioValue: totalPortfolioValue.toFixed(2),
@@ -3540,10 +3569,15 @@ async function executeAutonomousTrading(userId) {
         });
 
         // Check daily loss circuit breaker (dynamic % of portfolio — PANTHEON SHIELD)
-        const lossLimitReached = await checkDailyLossLimit(userId, sessionRiskConfig, totalPortfolioValue);
-        if (lossLimitReached) {
-            logger.error('Daily loss limit reached, stopping trading', { userId });
-            return { success: false, message: 'Daily loss limit reached' };
+        // Every halt below blocks new buys only — exits (trailing, take-profit, time) still run
+        // (2026-11-08: these returned before manageExistingPositions, so a tripped limit froze exits too).
+        const dailyLoss = await checkDailyLossLimit(userId, sessionRiskConfig, totalPortfolioValue, sessionRiskConfig._brokerDayPnl);
+        if (dailyLoss.halt) {
+            logger.error('Daily loss limit — no new buys, managing exits', { userId, ...dailyLoss });
+            await manageExistingPositions(userId);
+            return { success: false, message: dailyLoss.unavailable
+                ? 'Daily loss check unavailable — no new buys this cycle'
+                : `Daily loss limit reached ($${dailyLoss.dailyPnl.toFixed(2)} vs limit $${dailyLoss.lossLimit.toFixed(2)}) — exits only` };
         }
 
         // Check consecutive loss streak circuit breaker
@@ -3553,6 +3587,7 @@ async function executeAutonomousTrading(userId) {
             logger.error('[CircuitBreaker] Trading halted due to consecutive loss streak', {
                 userId, streak: streakBreaker.streak
             });
+            await manageExistingPositions(userId);
             return { success: false, message: `Circuit breaker: ${streakBreaker.streak} consecutive losses — trading halted` };
         }
         
@@ -3561,7 +3596,10 @@ async function executeAutonomousTrading(userId) {
             ? { halt: false, paperOnly: false, reduceSizing: false, drawdownPct: 0 }
             : await checkMaxDrawdown(userId, totalPortfolioValue);
         if (drawdownState.halt) {
-            return { success: false, message: `Max drawdown exceeded (${drawdownState.drawdownPct.toFixed(1)}%) — all new buys halted` };
+            await manageExistingPositions(userId);
+            return { success: false, message: drawdownState.unavailable
+                ? 'Drawdown check unavailable — no new buys this cycle'
+                : `Max drawdown exceeded (${drawdownState.drawdownPct.toFixed(1)}%) — all new buys halted` };
         }
         // Level 2: paper-only mode — block live new buys but allow the session to manage exits.
         // 2026-10-29: was brokerService.isLive, which reads the server-wide ALPACA_PAPER env
@@ -3581,7 +3619,8 @@ async function executeAutonomousTrading(userId) {
         // Weekly loss limit — PANTHEON SHIELD: halt if week P&L < -10% portfolio
         const weeklyHalt = await checkWeeklyLossLimit(userId, totalPortfolioValue, sessionRiskConfig);
         if (weeklyHalt) {
-            return { success: false, message: 'Weekly loss limit reached — trading halted until Monday' };
+            await manageExistingPositions(userId);
+            return { success: false, message: 'Weekly loss limit reached (or check unavailable) — no new buys, exits only' };
         }
 
         // Daily circuit breaker: halt new entries if EITHER condition fires:
@@ -3625,7 +3664,10 @@ async function executeAutonomousTrading(userId) {
                 return { success: false, message: `Daily circuit breaker: ${reason}` };
             }
         } catch (_stopBreakerErr) {
-            logger.warn('[DailyCircuitBreaker] Check failed — proceeding', { err: _stopBreakerErr.message });
+            // Fail closed (2026-11-08): DB timeouts cluster on rough days — exactly when this matters.
+            logger.warn('[DailyCircuitBreaker] Check failed — no new buys this cycle, managing exits', { err: _stopBreakerErr.message });
+            await manageExistingPositions(userId);
+            return { success: false, message: 'Daily circuit breaker check unavailable — no new buys this cycle' };
         }
 
         // SHIELD — FRED macro gate: raise minBuyScore or halt new buys in severe bear macro
@@ -6177,6 +6219,7 @@ if (process.env.NODE_ENV === 'test') {
     module.exports._test = {
         checkMaxDrawdown, drawdownBlocksLiveBuys, rotateScanList, equalPositionSize,
         checkLossStreakBreaker,
+        checkDailyLossLimit, checkWeeklyLossLimit,
         deriveStockSetupFamily,
         refreshSectorRotationCache,
         getSectorRotation: () => _sectorRotation,

@@ -1032,6 +1032,10 @@ const alpacaBroker = (() => {
             cashBalance:    parseFloat(account.cash),
             portfolioValue: parseFloat(account.portfolio_value),
             buyingPower:    parseFloat(account.buying_power),
+            // equity − lastEquity = today's change incl. open positions and broker stop fills
+            // (daily loss limit, 2026-11-08). lastEquity is the previous close.
+            equity:         parseFloat(account.equity),
+            lastEquity:     parseFloat(account.last_equity),
             broker:         isPaper ? 'alpaca-paper' : 'alpaca-live'
         };
     }

@@ -184,8 +184,7 @@ async function startWorker(options = {}) {
     console.log('\n🏥 Starting System Health Monitor (5-min checks + Telegram alerts)...');
     systemHealthMonitor.startSystemHealthMonitor();
 
-    console.log('
-🖥️  Starting PC Resource Monitor (RAM/CPU/disk/DB/Ollama, 1-min samples)...');
+    console.log('\n🖥️  Starting PC Resource Monitor (RAM/CPU/disk/DB/Ollama, 1-min samples)...');
     systemResources.start();
 
     console.log('\n🔍 Starting Missed Opportunity Monitor (daily 5:00 PM ET check)...');

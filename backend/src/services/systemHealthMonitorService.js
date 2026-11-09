@@ -153,7 +153,11 @@ async function checkSentinel(userId) {
 
 async function checkBotCycles(userId) {
     const r = await query(
-        `SELECT success, message FROM ai_trading_logs WHERE user_id=$1 ORDER BY timestamp DESC LIMIT 3`,
+        // Recent cycles only (2026-11-09): Parvataneni's last 3 rows were Oct 5 timeouts from
+        // before its AI trading was switched off, so this alerted on month-old history forever.
+        `SELECT success, message FROM ai_trading_logs
+          WHERE user_id=$1 AND timestamp > NOW() - INTERVAL '30 minutes'
+          ORDER BY timestamp DESC LIMIT 3`,
         [userId]
     );
     if (r.rows.length >= 3 && r.rows.every(row =>

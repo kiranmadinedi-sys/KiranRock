@@ -629,6 +629,26 @@ const _distressActiveCache = new Map();
 // userId → { date: string, edgeGate: number, volumeGate: number, regimeCap: number, distressMode: number }
 const _gateStats = new Map();
 
+// ─── INTRADAY VOLUME PACE ─────────────────────────────────────────────────────
+// quote.volume is today's volume SO FAR; quote.avgVolume is a FULL day. Before 2026-11-09 the
+// VolumeGate compared them directly, so in NEUTRAL/CHOPPY/BEAR it blocked nearly every buy until
+// late afternoon (11-06: 38/39 rejections; 11-09 +2% day: median ratio 0.12 by 9:30 CT).
+// Typical cumulative share of a day's volume by minutes after the 9:30 ET open (U-shaped day).
+const _VOLUME_CURVE = [[0, 0], [30, 0.13], [60, 0.21], [120, 0.33], [180, 0.43], [240, 0.52], [300, 0.62], [360, 0.78], [390, 1]];
+const _MIN_VOLUME_FRACTION = 0.10;   // first ~20 min: don't let a handful of prints read as a surge
+
+/** Expected fraction of a full day's volume traded by `now`; 1 outside regular hours (= raw ratio). */
+function _sessionVolumeFraction(now = new Date()) {
+    const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const mins = et.getHours() * 60 + et.getMinutes() - 570;
+    if (mins <= 0 || mins >= 390) return 1;
+    for (let i = 1; i < _VOLUME_CURVE.length; i++) {
+        const [m1, f1] = _VOLUME_CURVE[i], [m0, f0] = _VOLUME_CURVE[i - 1];
+        if (mins <= m1) return Math.max(_MIN_VOLUME_FRACTION, f0 + (f1 - f0) * (mins - m0) / (m1 - m0));
+    }
+    return 1;
+}
+
 function _bumpGateStat(userId, gate) {
     const today = new Date().toDateString();
     let s = _gateStats.get(userId);
@@ -4313,13 +4333,15 @@ async function executeAutonomousTrading(userId) {
             {
                 const _vgRegime = ((opportunity.regime || (typeof regime === 'object' && regime?.regime) || '')).toString().toUpperCase();
                 if (_vgRegime.includes('CHOPPY') || _vgRegime.includes('NEUTRAL') || _vgRegime.includes('BEAR')) {
-                    const volRatio = parseFloat(opportunity.volumeRatio) || 0;
+                    const rawRatio = parseFloat(opportunity.volumeRatio) || 0;
+                    const volFraction = _sessionVolumeFraction();
+                    const volRatio = +(rawRatio / volFraction).toFixed(2);   // pace vs a normal day at this time
                     if (volRatio < 1.5) {
                         logger.info('[VolumeGate] Skipping — no volume surge in low-conviction regime', {
-                            userId, symbol: opportunity.symbol, volumeRatio: volRatio, regime: _vgRegime
+                            userId, symbol: opportunity.symbol, volumeRatio: volRatio, rawRatio, volFraction: +volFraction.toFixed(2), regime: _vgRegime
                         });
                         _bumpGateStat(userId, 'volumeGate');
-                        _recordRejection(opportunity, userId, 'volume_gate', `ratio ${volRatio} < 1.5 in ${_vgRegime}`);
+                        _recordRejection(opportunity, userId, 'volume_gate', `pace ${volRatio} (raw ${rawRatio}) < 1.5 in ${_vgRegime}`);
                         continue;
                     }
                 }
@@ -6220,6 +6242,7 @@ if (process.env.NODE_ENV === 'test') {
         checkMaxDrawdown, drawdownBlocksLiveBuys, rotateScanList, equalPositionSize,
         checkLossStreakBreaker,
         checkDailyLossLimit, checkWeeklyLossLimit,
+        _sessionVolumeFraction,
         deriveStockSetupFamily,
         refreshSectorRotationCache,
         getSectorRotation: () => _sectorRotation,

@@ -169,10 +169,10 @@ function _releaseOllamaSlot() {
 }
 
 // ─── HTTP helper (native — no extra npm packages) ────────────────────────────
-async function _post(path, body, priority = 'batch', maxWaitMs = null) {
+async function _post(path, body, priority = 'batch', maxWaitMs = null, timeoutMs = TIMEOUT_MS) {
     await _acquireOllamaSlot(priority, maxWaitMs);
     try {
-        return await _rawPost(path, body);
+        return await _rawPost(path, body, timeoutMs);
     } finally {
         _releaseOllamaSlot();
     }
@@ -183,7 +183,7 @@ async function _post(path, body, priority = 'batch', maxWaitMs = null) {
 // One value for every call (a different num_ctx forces a model reload).
 const OLLAMA_NUM_CTX = parseInt(process.env.OLLAMA_NUM_CTX || '16384', 10);
 
-async function _rawPost(path, body) {
+async function _rawPost(path, body, timeoutMs = TIMEOUT_MS) {
     if (body && typeof body === 'object') body = { ...body, options: { num_ctx: OLLAMA_NUM_CTX, ...(body.options || {}) } };
     const url     = new URL(path, BASE_URL);
     const payload = JSON.stringify(body);
@@ -200,7 +200,7 @@ async function _rawPost(path, body) {
                 'Content-Type':   'application/json',
                 'Content-Length': Buffer.byteLength(payload),
             },
-            timeout: TIMEOUT_MS,
+            timeout: timeoutMs,
         };
 
         const req = http.request(options, res => {
@@ -260,7 +260,7 @@ async function generate(userPrompt, systemPrompt = '', options = {}) {
                 temperature: options.temperature ?? 0.4,
                 num_predict: options.maxTokens   ?? 2000,
             },
-        }, options.fast ? 'live' : 'batch');
+        }, options.fast ? 'live' : 'batch', null, options.timeoutMs || TIMEOUT_MS);
         return res?.message?.content || '';
     } catch (err) {
         logger.warn(`[Ollama] generate() failed: ${err.message}`);

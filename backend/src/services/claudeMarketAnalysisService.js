@@ -280,7 +280,9 @@ async function analyzeDailyWithClaude({ picks, marketContext, macroNews, todayLa
 
     // fast: the 7B model (5 GB). On the 27B (17 GB) this timed out empty every morning since
     // at least 2026-10-24 and pushed free RAM to 1.3 GB at 6 AM (2026-11-09).
-    const text = await ollamaService.generate(prompt, '', { maxTokens: 1500, temperature: 0.35, fast: true });
+    // 7B on this CPU ≈ 13 tok/s, so 1500 tokens + prompt can pass the default 120 s; nothing
+    // else needs Ollama at 6 AM, so give it 5 min.
+    const text = await ollamaService.generate(prompt, '', { maxTokens: 1500, temperature: 0.35, fast: true, timeoutMs: 300000 });
     logger.info('[MarketAnalysis] Daily briefing complete', { chars: text.length });
     return text;
 }

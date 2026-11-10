@@ -9,7 +9,8 @@
  *
  * Alerts go to the admin only when a breach persists (N consecutive checks), at most
  * once an hour per problem, with an all-clear when it recovers. Thresholds are env
- * overridable. Report only — never kills or restarts anything. Never throws.
+ * overridable. Report only — never kills or restarts anything (one exception: it asks Ollama
+ * to unload an idle model whose server has bloated, see ollamaService.recycleIfBloated). Never throws.
  */
 const os = require('os');
 const fs = require('fs');
@@ -219,6 +220,10 @@ async function _tickOnce() {
             const [procs, ol, db] = await Promise.all([_procs(), _ollama(), _dbStats()]);
             s.procs = procs; s.ollamaUp = ol.up; s.ollamaModels = ol.models || [];
             if (db) { s.dbConns = db.conns; s.dbConnsMax = db.max; s.dbSizeGb = db.size_gb; }
+            // The one exception to "report only": ask Ollama to unload an idle, bloated model
+            // (llama-server grew ~0.9 GB/h on 2026-11-09). It reloads on the next call.
+            const llama = (procs || []).find(p => p.name === 'llama-server');
+            if (llama) await require('./ollamaService').recycleIfBloated(llama.mb, s.ollamaModels).catch(() => {});
         }
         _buf.push(s);
         const { fire, clear } = evaluate(s);

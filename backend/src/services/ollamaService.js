@@ -219,6 +219,35 @@ async function _rawPost(path, body, timeoutMs = TIMEOUT_MS) {
     });
 }
 
+// ─── Memory recycle ───────────────────────────────────────────────────────────
+// 2026-11-09: with the 7B loaded all market day, llama-server grew 6.1 → 11.8 GB (~0.9 GB/h)
+// while the model itself is 5.1 GB; free RAM fell 12.2 → 4.7 GB. Unloading resets it and the
+// next call reloads in ~5 s. Called by systemResourceService with its 5-min process sample;
+// only acts when nothing is running or queued, so it never interrupts a verdict.
+const RECYCLE_EXTRA_MB    = parseInt(process.env.OLLAMA_RECYCLE_EXTRA_MB || '4096', 10);
+const RECYCLE_COOLDOWN_MS = 30 * 60 * 1000;
+let _lastRecycle = 0;
+
+async function recycleIfBloated(serverMb, models = [], now = Date.now()) {
+    if (!BASE_URL || !serverMb || !models.length) return false;
+    const modelMb = Math.max(...models.map(m => (m.gb || 0) * 1024));
+    if (serverMb < modelMb + RECYCLE_EXTRA_MB) return false;
+    if (now - _lastRecycle < RECYCLE_COOLDOWN_MS) return false;
+    if (_activeOllamaRequests > 0 || _ollamaQueue.length > 0) return false;
+    _lastRecycle = now;
+    await _acquireOllamaSlot('batch');
+    try {
+        for (const m of models) await _rawPost('/api/generate', { model: m.name, keep_alive: 0 }, 30000);
+        logger.info('[Ollama] Unloaded idle model to release memory', { serverMb, modelMb: Math.round(modelMb), models: models.map(m => m.name) });
+        return true;
+    } catch (err) {
+        logger.warn(`[Ollama] Memory recycle failed: ${err.message}`);
+        return false;
+    } finally {
+        _releaseOllamaSlot();
+    }
+}
+
 // Safely extract first {...} JSON block from raw model output
 function _extractJSON(raw) {
     const cleaned = raw.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
@@ -623,4 +652,5 @@ module.exports = {
     explainLocalBrain,
     chat,
     isEnabled,
+    recycleIfBloated,
 };

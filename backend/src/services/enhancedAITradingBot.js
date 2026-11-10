@@ -1886,7 +1886,11 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
 
 
         // 2. Volume (±10) — vs avg volume from the quote
-        const volumeRatio = quote.avgVolume > 0 ? quote.volume / quote.avgVolume : 1;
+        // Paced (2026-11-09): during market hours quote.volume is today's volume so far, so the raw
+        // ratio read ~0.1 every morning and nearly every stock took the −6 "very low" penalty.
+        // Divide by the share of a normal day traded by now; outside regular hours this is a no-op.
+        const rawVolumeRatio = quote.avgVolume > 0 ? quote.volume / quote.avgVolume : 1;
+        const volumeRatio = rawVolumeRatio / _sessionVolumeFraction();
         if (volumeRatio > 2.0)      { aiScore += 10; scoringLog.push('Volume: +10 (2x avg)'); }
         else if (volumeRatio > 1.5) { aiScore += 6;  scoringLog.push('Volume: +6'); }
         else if (volumeRatio > 1.0) { aiScore += 3;  scoringLog.push('Volume: +3'); }
@@ -2536,7 +2540,10 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             }
         }
 
-        // Normalize score to 0-100 (pre-ORACLE)
+        // Normalize score to 0-100 (pre-ORACLE). Keep the unclamped sum (2026-11-09): 388 of
+        // 11-09's live decisions were exactly 100, so ties are ordered by it and it is logged so
+        // we can test whether the excess above 100 predicts anything.
+        const rawAiScore = Math.round(aiScore);
         aiScore = Math.max(0, Math.min(100, aiScore));
 
         // Preliminary R/R for ORACLE context (1.5× stop, 3× target baseline).
@@ -2668,7 +2675,9 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
             week52High,
             change,
             volume,
-            volumeRatio: volumeRatio.toFixed(2),
+            volumeRatio: volumeRatio.toFixed(2),        // paced — see the Volume score above
+            rawVolumeRatio: rawVolumeRatio.toFixed(2),
+            rawAiScore,
             marketCap,
             realMarketCap,
             sector,
@@ -2746,6 +2755,7 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
 
         // Log AI decision with structured data
         logger.aiDecision(symbol, Math.round(aiScore), recommendation, {
+            rawScore: rawAiScore,
             rsi: rsiInterpretation.signal,
             macd: macdInterpretation?.signal || 'NEUTRAL',
             volumeRatio: volumeRatio.toFixed(2),
@@ -3137,8 +3147,8 @@ async function scanMarketForOpportunities(userId, limit = 50, overrideMinScore =
         const vcpA = a.vcpPattern === 'confirmed' ? 2 : a.vcpPattern === 'forming' ? 1 : 0;
         const vcpB = b.vcpPattern === 'confirmed' ? 2 : b.vcpPattern === 'forming' ? 1 : 0;
         if (vcpB !== vcpA) return vcpB - vcpA;
-        // Final fallback: raw score
-        return b.aiScore - a.aiScore;
+        // Final fallback: the unclamped score (many candidates tie at the 100 cap)
+        return (b.rawAiScore ?? b.aiScore) - (a.rawAiScore ?? a.aiScore);
     });
 
     // Raise minimum score for speculative (tier 5)
@@ -4333,12 +4343,12 @@ async function executeAutonomousTrading(userId) {
             {
                 const _vgRegime = ((opportunity.regime || (typeof regime === 'object' && regime?.regime) || '')).toString().toUpperCase();
                 if (_vgRegime.includes('CHOPPY') || _vgRegime.includes('NEUTRAL') || _vgRegime.includes('BEAR')) {
-                    const rawRatio = parseFloat(opportunity.volumeRatio) || 0;
-                    const volFraction = _sessionVolumeFraction();
-                    const volRatio = +(rawRatio / volFraction).toFixed(2);   // pace vs a normal day at this time
+                    // volumeRatio is already paced in analyzeStockWithAI (vs a normal day at this hour).
+                    const volRatio = parseFloat(opportunity.volumeRatio) || 0;
+                    const rawRatio = parseFloat(opportunity.rawVolumeRatio ?? opportunity.volumeRatio) || 0;
                     if (volRatio < 1.5) {
                         logger.info('[VolumeGate] Skipping — no volume surge in low-conviction regime', {
-                            userId, symbol: opportunity.symbol, volumeRatio: volRatio, rawRatio, volFraction: +volFraction.toFixed(2), regime: _vgRegime
+                            userId, symbol: opportunity.symbol, volumeRatio: volRatio, rawRatio, regime: _vgRegime
                         });
                         _bumpGateStat(userId, 'volumeGate');
                         _recordRejection(opportunity, userId, 'volume_gate', `pace ${volRatio} (raw ${rawRatio}) < 1.5 in ${_vgRegime}`);

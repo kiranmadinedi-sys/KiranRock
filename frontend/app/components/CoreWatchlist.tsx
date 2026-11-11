@@ -15,6 +15,7 @@ const STATUS_STYLE: Record<string, string> = {
     'Reassess': AMBER, 'Wait': AMBER, 'Review first': ORANGE, 'Avoid today': RED, 'Data unavailable': RED,
 };
 const pct = (v: number | null | undefined) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${Number(v).toFixed(0)}%`);
+const ratio = (v: number | null | undefined) => (v == null ? '—' : Number(v).toFixed(1));
 
 export default function CoreWatchlist() {
     const [rows, setRows] = useState<any[] | null>(null);
@@ -66,7 +67,7 @@ Paper: applied now. Live account: sends you an approval request.`, '5');
             {notice && <div className="text-green-700 dark:text-green-400 mb-2">{notice}</div>}
             {!rows ? <div className="text-slate-500">Loading...</div> : (
                 <div className="overflow-x-auto"><table className="w-full text-sm">
-                    <thead><tr>{['Stock', 'Status', 'Why', 'Price', 'From 52w high', 'P/E vs usual', 'Growth (rev / EPS)', 'Earnings', 'Data as of', ''].map(h => <th key={h} className="pb-2 text-left text-slate-500 dark:text-slate-400">{h}</th>)}</tr></thead>
+                    <thead><tr>{['Stock', 'Status', 'Why', 'Price', 'From 52w high', 'P/E vs usual', 'P/S · P/B · Op margin', 'Growth (rev / EPS)', 'Earnings', 'Data as of', ''].map(h => <th key={h} className="pb-2 text-left text-slate-500 dark:text-slate-400">{h}</th>)}</tr></thead>
                     <tbody>{rows.map(r => (
                         <tr key={r.symbol} className="border-t border-slate-100 dark:border-slate-700 align-top">
                             <td className="py-2 font-medium text-slate-900 dark:text-white">{r.symbol}{r.inCore ? <span className="ml-1 text-xs text-slate-500">(in core)</span> : null}</td>
@@ -75,6 +76,7 @@ Paper: applied now. Live account: sends you an approval request.`, '5');
                             <td className="py-2">{money(r.price)}</td>
                             <td className="py-2 whitespace-nowrap" title={r.hi52 ? `52w high ${money(r.hi52)} on ${r.hi52Date}` : ''}>{r.ddPct == null ? '—' : `−${Number(r.ddPct).toFixed(1)}%`}</td>
                             <td className="py-2 whitespace-nowrap" title={r.valuation?.pe ? `P/E ${r.valuation.pe.toFixed(1)} vs usual ${r.valuation.usualPe?.toFixed(1) ?? '?'} · forward P/E ${r.valuation.forwardPe?.toFixed(1) ?? '?'}` : ''}>{pct(r.valuation?.peVsUsualPct)}</td>
+                            <td className="py-2 whitespace-nowrap" title="Price to sales · price to book · operating margin (Finnhub, trailing 12 months). Shown for context; not used in the status.">{ratio(r.valuation?.ps)} · {ratio(r.valuation?.pb)} · {r.valuation?.operatingMarginPct == null ? '—' : `${Number(r.valuation.operatingMarginPct).toFixed(0)}%`}</td>
                             <td className="py-2 whitespace-nowrap">{pct(r.valuation?.revenueGrowthPct)} / {pct(r.valuation?.epsGrowthPct)}</td>
                             <td className="py-2 whitespace-nowrap">{r.earningsDate || (r.earningsKnown ? 'none soon' : '—')}</td>
                             <td className="py-2 whitespace-nowrap text-xs text-slate-500" title={r.sources || ''}>{r.asOf || '—'}</td>

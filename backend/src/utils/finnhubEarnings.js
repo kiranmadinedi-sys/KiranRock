@@ -47,6 +47,9 @@ async function valuationSnapshot(symbol) {
         pe, forwardPe: m.forwardPE > 0 ? m.forwardPE : null, peg: m.pegTTM ?? null, usualPe,
         peVsUsualPct: pe && usualPe ? (pe / usualPe - 1) * 100 : null,
         revenueGrowthPct: m.revenueGrowthTTMYoy ?? null, epsGrowthPct: m.epsGrowthTTMYoy ?? null,
+        // Display only (2026-11-11) — not used by classify(). Same response, no extra call.
+        ps: m.psTTM > 0 ? m.psTTM : null, pb: m.pbQuarterly > 0 ? m.pbQuarterly : (m.pbAnnual > 0 ? m.pbAnnual : null),
+        operatingMarginPct: m.operatingMarginTTM ?? null,
     };
 }
 

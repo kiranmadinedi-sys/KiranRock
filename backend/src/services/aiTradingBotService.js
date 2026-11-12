@@ -281,7 +281,17 @@ async function generatePortfolioAllocation(userId, availableBalance) {
 /**
  * Execute initial portfolio setup
  */
+// RETIRED 2026-11-12: the legacy initialize/rebalance paths placed market orders on whatever
+// account called them, bypassing every guard the enhanced bot has (cash guard, loss limits,
+// position caps, live-approval rule). The status page also read a $0 portfolio, so Rebalance
+// fell through to Initialize and would have bought a fresh portfolio on a live account.
+const LEGACY_RETIRED = 'Legacy AI initialize/rebalance is retired. The enhanced bot manages positions automatically.';
+
 async function initializeAIPortfolio(userId) {
+    throw new Error(LEGACY_RETIRED);
+}
+
+async function _legacyInitializeAIPortfolio(userId) {
     try {
         // Get current account balance
         const account = await tradingAccountService.getTradingAccount(userId);
@@ -345,6 +355,10 @@ async function initializeAIPortfolio(userId) {
  * Pre-fetches sentiment for all held symbols in parallel.
  */
 async function rebalancePortfolio(userId) {
+    throw new Error(LEGACY_RETIRED);
+}
+
+async function _legacyRebalancePortfolio(userId) {
     try {
         // Get current portfolio
         const portfolio = await portfolioTrackingService.getPortfolioSummary(userId);
@@ -355,7 +369,7 @@ async function rebalancePortfolio(userId) {
         const totalValue = portfolio.totalPortfolioValue || 0;
 
         if (totalValue === 0) {
-            return await initializeAIPortfolio(userId);
+            throw new Error(LEGACY_RETIRED);
         }
 
         // Get current target stocks from nightly scan

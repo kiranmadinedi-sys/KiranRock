@@ -286,76 +286,6 @@ export default function AITradingPage() {
         setEnhancedSettingsChanged(true);
     };
 
-    const handleInitializeAI = async () => {
-        if (!confirm('AI will invest your balance across diversified stocks. Continue?')) {
-            return;
-        }
-
-        setProcessing(true);
-        setMessage(null);
-
-        try {
-            const response = await fetch(`${getApiBaseUrl()}/api/ai-trading/initialize`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${token}`
-                }
-            });
-
-            const data = await response.json();
-
-            if (response.ok) {
-                setMessage({
-                    type: 'success',
-                    text: `${data.message}! Invested in ${data.executedTrades.length} stocks across ${data.diversification.sectors} sectors.`
-                });
-                await loadAIData();
-            } else {
-                setMessage({ type: 'error', text: data.error || 'Initialization failed' });
-            }
-        } catch (error) {
-            setMessage({ type: 'error', text: 'Error initializing AI trading' });
-        } finally {
-            setProcessing(false);
-        }
-    };
-
-    const handleRebalance = async () => {
-        if (!confirm('AI will rebalance your portfolio. Continue?')) {
-            return;
-        }
-
-        setProcessing(true);
-        setMessage(null);
-
-        try {
-            const response = await fetch(`${getApiBaseUrl()}/api/ai-trading/rebalance`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${token}`
-                }
-            });
-
-            const data = await response.json();
-
-            if (response.ok) {
-                const executedCount = data.actions?.filter((action) => action.executed).length || 0;
-                setMessage({
-                    type: 'success',
-                    text: `${data.message}! Executed ${executedCount} actions.`
-                });
-                await loadAIData();
-            } else {
-                setMessage({ type: 'error', text: data.error || 'Rebalancing failed' });
-            }
-        } catch (error) {
-            setMessage({ type: 'error', text: 'Error rebalancing portfolio' });
-        } finally {
-            setProcessing(false);
-        }
-    };
 
     if (loading) {
         return (
@@ -416,7 +346,7 @@ export default function AITradingPage() {
                                 <p className="text-xs uppercase tracking-[0.35em] text-cyan-200/80">AI Command Center</p>
                                 <h1 className="mt-3 text-3xl font-bold">AI Trading Dashboard</h1>
                                 <p className="mt-3 max-w-3xl text-sm text-slate-200">
-                                    This view now reflects both surfaces in the system: the legacy manual AI portfolio controls and the enhanced worker-driven automation stack that handles live scheduling, trailing stops, partial profit-taking, and operational safeguards.
+                                    Settings and status for the enhanced, worker-driven bot that handles live scheduling, trailing stops, partial profit-taking and safeguards.
                                 </p>
                             </div>
 
@@ -428,7 +358,7 @@ export default function AITradingPage() {
                                     Market {automationStatus?.marketOpen ? 'OPEN' : 'CLOSED'}
                                 </span>
                                 <span className={`rounded-full px-3 py-2 ${getStatusBadgeClasses(schedulerStatus?.running, 'bg-violet-400/20 text-violet-100 border border-violet-300/30', 'bg-white/10 text-slate-100 border border-white/15')}`}>
-                                    Scheduler {schedulerStatus?.running ? 'RUNNING' : 'STOPPED'}
+                                    {schedulerStatus?.running ? 'Scheduler RUNNING' : 'Bot runs in worker process'}
                                 </span>
                                 <span className={`rounded-full px-3 py-2 ${getStatusBadgeClasses(automationStatus?.globalTradingEnabled !== false, 'bg-amber-400/20 text-amber-100 border border-amber-300/30', 'bg-rose-400/20 text-rose-100 border border-rose-300/30')}`}>
                                     Global Trading {automationStatus?.globalTradingEnabled !== false ? 'ENABLED' : 'BLOCKED'}
@@ -448,27 +378,12 @@ export default function AITradingPage() {
                     )}
 
                     <div className="p-6 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
-                        <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/60 p-5">
-                            <div className="text-sm font-medium text-slate-500 dark:text-slate-400">Total Portfolio Value</div>
-                            <div className="mt-3 text-2xl font-bold text-slate-900 dark:text-white">{formatCurrency(aiStatus?.totalValue)}</div>
-                            <div className="mt-2 text-xs text-slate-500 dark:text-slate-400">Legacy portfolio status snapshot</div>
-                        </div>
-                        <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/60 p-5">
-                            <div className="text-sm font-medium text-slate-500 dark:text-slate-400">Invested Capital</div>
-                            <div className="mt-3 text-2xl font-bold text-blue-600 dark:text-blue-400">{formatCurrency(aiStatus?.investedValue)}</div>
-                            <div className="mt-2 text-xs text-slate-500 dark:text-slate-400">{formatPercent(aiStatus?.investedPercent)} deployed</div>
-                        </div>
-                        <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/60 p-5">
-                            <div className="text-sm font-medium text-slate-500 dark:text-slate-400">Cash Reserve</div>
-                            <div className="mt-3 text-2xl font-bold text-emerald-600 dark:text-emerald-400">{formatCurrency(aiStatus?.cashReserve)}</div>
-                            <div className="mt-2 text-xs text-slate-500 dark:text-slate-400">{formatPercent(aiStatus?.cashReservePercent)} liquid</div>
-                        </div>
-                        <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/60 p-5">
-                            <div className="text-sm font-medium text-slate-500 dark:text-slate-400">Total Return</div>
-                            <div className={`mt-3 text-2xl font-bold ${Number(aiStatus?.totalReturn) >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}`}>
-                                {Number(aiStatus?.totalReturn) >= 0 ? '+' : ''}{formatPercent(aiStatus?.totalReturn)}
+                        <div className="md:col-span-2 xl:col-span-4 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/60 p-5">
+                            <div className="text-sm font-medium text-slate-500 dark:text-slate-400">Portfolio value, cash and returns</div>
+                            <div className="mt-3 text-sm text-slate-700 dark:text-slate-300">
+                                See the <a href="/portfolio" className="text-blue-600 hover:underline">Portfolio</a> and <a href="/dashboard" className="text-blue-600 hover:underline">Dashboard</a> pages.
+                                The cards that used to be here came from the retired legacy bot and showed wrong numbers ($0 value, negative invested).
                             </div>
-                            <div className="mt-2 text-xs text-slate-500 dark:text-slate-400">Holdings {aiStatus?.holdings || 0}</div>
                         </div>
                         <div className="rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/80 dark:bg-slate-800/60 p-5">
                             <div className="text-sm font-medium text-slate-500 dark:text-slate-400">Automation Cycle</div>
@@ -482,28 +397,16 @@ export default function AITradingPage() {
                     <div className="rounded-3xl border border-slate-200/70 dark:border-slate-700/70 bg-white/85 dark:bg-slate-900/75 p-6 shadow-lg shadow-slate-200/30 dark:shadow-black/20">
                         <div className="flex items-start justify-between gap-4 mb-6">
                             <div>
-                                <h2 className="text-xl font-semibold text-slate-900 dark:text-white">Manual Execution Controls</h2>
+                                <h2 className="text-xl font-semibold text-slate-900 dark:text-white">Strategy Settings</h2>
                                 <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
-                                    These buttons drive the legacy AI route surface. They remain useful for one-click initialization and discretionary rebalancing.
+                                    The strategy settings below are the ones the live bot uses.
                                 </p>
                             </div>
                         </div>
 
-                        <div className="flex flex-wrap gap-4 mb-6">
-                            <button
-                                onClick={handleInitializeAI}
-                                disabled={processing || aiStatus?.holdings > 0}
-                                className="px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors font-medium"
-                            >
-                                {processing ? 'Processing...' : 'Initialize AI Portfolio'}
-                            </button>
-                            <button
-                                onClick={handleRebalance}
-                                disabled={processing || aiStatus?.holdings === 0}
-                                className="px-6 py-3 bg-slate-900 text-white rounded-xl hover:bg-slate-800 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors font-medium dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
-                            >
-                                {processing ? 'Processing...' : 'Rebalance Portfolio'}
-                            </button>
+                        <div className="mb-6 rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 px-4 py-3 text-sm text-amber-800 dark:text-amber-300">
+                            The old “Initialize AI Portfolio” and “Rebalance Portfolio” buttons were retired on 2026-11-12. They placed market orders
+                            outside the enhanced bot&apos;s safety checks. The enhanced bot buys, sells and manages stops automatically.
                         </div>
 
                         {/* Live Active Strategy Card — sourced from enhanced bot config (source of truth) */}

@@ -46,26 +46,18 @@ router.post('/settings', async (req, res) => {
  * POST /api/ai-trading/initialize
  * Initialize AI-managed portfolio
  */
-router.post('/initialize', async (req, res) => {
-    try {
-        const result = await aiTradingBotService.initializeAIPortfolio(req.userId);
-        res.json(result);
-    } catch (error) {
-        res.status(400).json({ error: error.message });
-    }
+// Retired 2026-11-12 — placed live market orders outside every enhanced-bot guard.
+router.post('/initialize', (req, res) => {
+    res.status(410).json({ error: 'Retired: the enhanced bot manages positions automatically. Nothing was traded.' });
 });
 
 /**
  * POST /api/ai-trading/rebalance
  * Rebalance portfolio based on AI recommendations
  */
-router.post('/rebalance', async (req, res) => {
-    try {
-        const result = await aiTradingBotService.rebalancePortfolio(req.userId);
-        res.json(result);
-    } catch (error) {
-        res.status(400).json({ error: error.message });
-    }
+// Retired 2026-11-12 — placed live market orders outside every enhanced-bot guard.
+router.post('/rebalance', (req, res) => {
+    res.status(410).json({ error: 'Retired: the enhanced bot manages positions automatically. Nothing was traded.' });
 });
 
 /**

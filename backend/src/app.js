@@ -202,6 +202,7 @@ app.use('/api/core-holdings', coreHoldingsRoutes);
 app.use('/api/approvals', approvalRoutes);
 app.use('/api/paper-tests', paperTestsRoutes);
 app.use('/api/reports', reportsRoutes);
+app.use('/api/lab', require('./routes/labRoutes'));
 app.use('/api/performance', performanceRoutes);
 app.use('/api/stock-feed', stockFeedRoutes);
 app.use('/api/system', systemRoutes); // Use the new system routes

@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useState, useRef, useCallback } from 'react';
-import AppHeader from '../components/AppHeader';
 import { getApiBaseUrl } from '../config';
 
 interface Contract {
@@ -75,7 +74,8 @@ export default function OptionsChainPage() {
         try {
             let url = `${API_BASE}/api/options/chain?symbol=${symbol}`;
             if (expiration) url += `&expiration=${expiration}`;
-            const resp = await fetch(url);
+            const token = localStorage.getItem('token');
+            const resp = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
             const data: ChainData = await resp.json();
 
             if (!resp.ok || data.error) {
@@ -166,7 +166,6 @@ export default function OptionsChainPage() {
 
     return (
         <div className="min-h-screen bg-gray-950 text-white">
-            <AppHeader showSearch={false} />
 
             <div className="max-w-7xl mx-auto px-4 py-6">
                 {/* Title + search */}

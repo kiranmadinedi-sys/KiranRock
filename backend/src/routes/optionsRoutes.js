@@ -5,10 +5,72 @@ const optionsScheduler = require('../services/optionsScheduler');
 const { protect } = require('../middleware/authMiddleware');
 const YahooFinance = require('yahoo-finance2').default;
 const dataProvider = require('../services/dataProvider');
+const axios = require('axios');
+const { logger } = require('../utils/logger');
 
-// All routes require authentication
-// Temporarily disabled for local dev
-// router.use(protect);
+const ALPACA_DATA = 'https://data.alpaca.markets';
+const ALPACA_TRADE = 'https://paper-api.alpaca.markets';   // contracts list is the same on paper
+const alpacaHeaders = () => ({ 'APCA-API-KEY-ID': process.env.ALPACA_KEY_ID, 'APCA-API-SECRET-KEY': process.env.ALPACA_SECRET_KEY });
+const dateTs = d => Math.floor(Date.parse(`${d}T00:00:00Z`) / 1000);
+
+/**
+ * Chain for one expiration from Alpaca (2026-11-12). Contracts list → expirations + open interest;
+ * snapshots → bid/ask/last/volume/IV. `expiration` is unix seconds of the date (UTC midnight).
+ */
+async function alpacaChain(symbol, expiration) {
+    const today = new Date().toISOString().slice(0, 10);
+    const contracts = [];
+    let page_token;
+    for (let i = 0; i < 5; i++) {
+        const r = await axios.get(`${ALPACA_TRADE}/v2/options/contracts`, {
+            headers: alpacaHeaders(), timeout: 15000,
+            params: { underlying_symbols: symbol, expiration_date_gte: today, status: 'active', limit: 10000, page_token } });
+        contracts.push(...(r.data?.option_contracts || []));
+        page_token = r.data?.next_page_token;
+        if (!page_token) break;
+    }
+    const dates = [...new Set(contracts.map(c => c.expiration_date))].sort();
+    if (!dates.length) return null;
+    const wanted = expiration ? new Date(expiration * 1000).toISOString().slice(0, 10) : null;
+    const sel = dates.includes(wanted) ? wanted : dates[0];
+
+    const snaps = {};
+    page_token = undefined;
+    for (let i = 0; i < 5; i++) {
+        const r = await axios.get(`${ALPACA_DATA}/v1beta1/options/snapshots/${symbol}`, {
+            headers: alpacaHeaders(), timeout: 15000,
+            params: { feed: 'indicative', expiration_date: sel, limit: 1000, page_token } });
+        Object.assign(snaps, r.data?.snapshots || {});
+        page_token = r.data?.next_page_token;
+        if (!page_token) break;
+    }
+    const px = await axios.get(`${ALPACA_DATA}/v2/stocks/${symbol}/trades/latest`, { headers: alpacaHeaders(), params: { feed: 'iex' }, timeout: 15000 })
+        .then(r => r.data?.trade?.p || null).catch(() => null);
+
+    const calls = [], puts = [];
+    for (const c of contracts.filter(x => x.expiration_date === sel)) {
+        const s = snaps[c.symbol] || {};
+        const strike = Number(c.strike_price);
+        const last = s.latestTrade?.p || Number(c.close_price) || 0;
+        const prev = s.prevDailyBar?.c;
+        const row = {
+            strike, bid: s.latestQuote?.bp || 0, ask: s.latestQuote?.ap || 0, lastPrice: last,
+            volume: s.dailyBar?.v || 0, openInterest: Number(c.open_interest) || 0,
+            impliedVolatility: s.impliedVolatility || 0,
+            inTheMoney: px ? (c.type === 'call' ? strike < px : strike > px) : false,
+            change: prev && last ? last - prev : 0, percentChange: prev && last ? (last / prev - 1) * 100 : 0,
+            type: c.type,
+        };
+        (c.type === 'call' ? calls : puts).push(row);
+    }
+    calls.sort((a, b) => a.strike - b.strike); puts.sort((a, b) => a.strike - b.strike);
+    return { symbol, stockPrice: px, expirationDates: dates.map(d => ({ timestamp: dateTs(d), date: d })),
+             selectedExpiration: dateTs(sel), calls, puts, source: 'live', provider: 'alpaca (indicative)' };
+}
+
+// All routes require authentication. Re-enabled 2026-11-12 — it had been commented out "for
+// local dev", leaving POST /scan and the rest open to anyone through the public tunnel.
+router.use(protect);
 
 /**
  * GET /api/options/chain?symbol=AAPL&expiration=<unix_seconds>
@@ -36,6 +98,15 @@ router.get('/chain', async (req, res) => {
         percentChange:     Number(c.percentChange || 0),
         type
     });
+
+    // 2026-11-12: Alpaca first. Yahoo has been 429-blocked for months, so the page only ever
+    // showed "Options data temporarily unavailable". Same indicative feed the put bot uses.
+    try {
+        const alp = await alpacaChain(symbol, expiration);
+        if (alp && (alp.calls.length + alp.puts.length) > 0) return res.json(alp);
+    } catch (err) {
+        logger.warn('[OptionsChain] Alpaca chain failed — trying Yahoo', { symbol, error: err.response?.data?.message || err.message });
+    }
 
     try {
         // Single initial call — returns expiration list + nearest-expiration contracts

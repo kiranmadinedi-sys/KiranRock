@@ -80,6 +80,17 @@ async function ensureTable() {
         ADD COLUMN IF NOT EXISTS reprice_count INT NOT NULL DEFAULT 0,
         ADD COLUMN IF NOT EXISTS last_reprice_at TIMESTAMPTZ,
         ADD COLUMN IF NOT EXISTS assigned_price NUMERIC`);
+    // Quote at the moment an exit fired (2026-11-11) — tells a real move from a bad indicative ask.
+    await query(`ALTER TABLE options_income_trades
+        ADD COLUMN IF NOT EXISTS exit_bid NUMERIC,
+        ADD COLUMN IF NOT EXISTS exit_ask NUMERIC,
+        ADD COLUMN IF NOT EXISTS exit_stock_price NUMERIC,
+        ADD COLUMN IF NOT EXISTS exit_quote_at TIMESTAMPTZ`);
+    // Daily at-the-money implied volatility (2026-11-11) so IV rank has a history when spreads come.
+    await query(`CREATE TABLE IF NOT EXISTS options_iv_history (
+        symbol TEXT NOT NULL, d DATE NOT NULL, stock_price NUMERIC, atm_iv NUMERIC,
+        expiry DATE, dte INT, n_contracts INT, fetched_at TIMESTAMPTZ DEFAULT NOW(),
+        PRIMARY KEY (symbol, d))`);
     _ready = true;
 }
 
@@ -318,6 +329,13 @@ async function runManagement(userId, now = new Date()) {
                 : ask >= entry * CFG.stopMultiple ? 'stop (3× premium)'
                 : dte <= CFG.closeDte ? `close near expiry (${dte}d)` : null;
             if (!reason) continue;
+            // Record-only: the quote and stock price behind this exit. Never blocks the exit.
+            const bid = s?.latestQuote?.bp > 0 ? s.latestQuote.bp : null;
+            const stockPx = (await _stockPrices(client, [t.underlying]).catch(() => ({})))[t.underlying] ?? null;
+            await query(`UPDATE options_income_trades SET exit_bid = $2, exit_ask = $3, exit_stock_price = $4, exit_quote_at = NOW() WHERE id = $1`,
+                [t.id, bid, ask, stockPx]).catch(() => {});
+            logger.info('[OptionsIncome] Exit quote', { contract: t.contract, reason, bid, ask, mid: bid ? (bid + ask) / 2 : null,
+                spreadPct: bid ? +((ask - bid) / ((ask + bid) / 2) * 100).toFixed(1) : null, stockPx, strike: Number(t.strike), entry });
             try {
                 const o = (await axios.post(`${client.trade}/v2/orders`, {
                     symbol: t.contract, qty: String(t.qty), side: 'buy', type: 'limit', limit_price: String(roundTick(ask)),
@@ -371,6 +389,81 @@ async function _maybeReprice(client, userId, t, order, now) {
     }
 }
 
+/** Latest stock prices for up to ~100 symbols in one call: { SYM: price }. */
+async function _stockPrices(client, symbols) {
+    if (!symbols.length) return {};
+    const r = await axios.get(`${DATA}/v2/stocks/trades/latest`, {
+        headers: client.headers, params: { symbols: symbols.join(','), feed: 'iex' }, timeout: 15000 });
+    const out = {};
+    for (const [sym, tr] of Object.entries(r.data?.trades || {})) if (tr?.p > 0) out[sym] = tr.p;
+    return out;
+}
+
+/**
+ * Pure: at-the-money implied volatility from an options snapshots map — the expiry nearest 30 days,
+ * the strike nearest the stock price, averaging the call and put IV there. Null if nothing usable.
+ */
+function atmIv(snapshots, price, today) {
+    const rows = [];
+    for (const [sym, s] of Object.entries(snapshots || {})) {
+        const m = sym.match(/^([A-Z.]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/);
+        const iv = s?.impliedVolatility;
+        if (!m || !(iv > 0 && iv < 5)) continue;
+        const expiry = `20${m[2]}-${m[3]}-${m[4]}`;
+        rows.push({ expiry, dte: dayDiff(expiry, today), strike: parseInt(m[6], 10) / 1000, iv });
+    }
+    if (!rows.length || !(price > 0)) return null;
+    const best = rows.reduce((a, r) => (Math.abs(r.dte - 30) < Math.abs(a.dte - 30) ? r : a));
+    const sameExp = rows.filter(r => r.expiry === best.expiry);
+    const gap = Math.min(...sameExp.map(r => Math.abs(r.strike - price)));
+    const atm = sameExp.filter(r => Math.abs(r.strike - price) === gap);
+    return { atmIv: atm.reduce((a, r) => a + r.iv, 0) / atm.length, expiry: best.expiry, dte: best.dte, n: rows.length };
+}
+
+const IV_ALWAYS = ['SPY', 'QQQ', 'IWM'];
+const IV_MAX_SYMBOLS = 120;
+/**
+ * Once a day near the close: record ATM IV for today's put candidates, open puts, the index ETFs
+ * and anything tracked in the last 30 days (so a symbol's history doesn't get holes). Data only —
+ * nothing here trades. ~1 data call per symbol, spaced 500 ms.
+ */
+async function recordIvSnapshot(userId, now = new Date()) {
+    await ensureTable();
+    const client = await _client(userId);
+    const today = etToday(now);
+    const cands = (await candidateUnderlyings().catch(() => [])).map(x => x.symbol);
+    const open = (await query(`SELECT DISTINCT underlying FROM options_income_trades WHERE status IN ('pending_open','open','pending_close')`)).rows.map(r => r.underlying);
+    const recent = (await query(`SELECT symbol FROM options_iv_history WHERE d > CURRENT_DATE - 30 GROUP BY symbol ORDER BY max(d) DESC`)).rows.map(r => r.symbol);
+    const syms = [...new Set([...IV_ALWAYS, ...open, ...recent, ...cands])].slice(0, IV_MAX_SYMBOLS);
+    const prices = {};
+    for (let i = 0; i < syms.length; i += 100) Object.assign(prices, await _stockPrices(client, syms.slice(i, i + 100)).catch(() => ({})));
+    const from = new Date(now.getTime() + 15 * 86400000).toISOString().slice(0, 10);
+    const to = new Date(now.getTime() + 50 * 86400000).toISOString().slice(0, 10);
+    let saved = 0;
+    for (const sym of syms) {
+        const px = prices[sym];
+        if (!(px > 0)) continue;
+        try {
+            const r = await axios.get(`${DATA}/v1beta1/options/snapshots/${sym}`, {
+                headers: client.headers, timeout: 15000,
+                params: { feed: 'indicative', expiration_date_gte: from, expiration_date_lte: to,
+                          strike_price_gte: (px * 0.95).toFixed(2), strike_price_lte: (px * 1.05).toFixed(2), limit: 250 },
+            });
+            const a = atmIv(r.data?.snapshots, px, today);
+            if (a) {
+                await query(`INSERT INTO options_iv_history (symbol, d, stock_price, atm_iv, expiry, dte, n_contracts) VALUES ($1,$2,$3,$4,$5,$6,$7)
+                             ON CONFLICT (symbol, d) DO UPDATE SET stock_price = EXCLUDED.stock_price, atm_iv = EXCLUDED.atm_iv,
+                             expiry = EXCLUDED.expiry, dte = EXCLUDED.dte, n_contracts = EXCLUDED.n_contracts, fetched_at = NOW()`,
+                    [sym, today, px, a.atmIv, a.expiry, a.dte, a.n]);
+                saved++;
+            }
+        } catch (err) { /* one symbol failing is fine */ }
+        await new Promise(r => setTimeout(r, 500));
+    }
+    logger.info('[OptionsIncome] IV snapshot recorded', { day: today, symbols: syms.length, saved });
+    return { symbols: syms.length, saved };
+}
+
 /** Drop the swing-bot protection once no open/pending put remains on that underlying (never after assignment). */
 async function _releaseIfDone(userId, underlying) {
     const r = await query(`SELECT 1 FROM options_income_trades WHERE user_id = $1 AND underlying = $2
@@ -395,6 +488,12 @@ async function runTick(now = new Date()) {
                 _enteredOn.add(key);
                 const r = await runEntries(id, now);
                 if (r.opened?.length) logger.info('[OptionsIncome] Entries', { userId: id, opened: r.opened });
+            }
+            // Data only: one IV snapshot a day (first configured paper user), 3:30–3:55 PM ET.
+            const ivKey = `iv:${etToday(now)}`;
+            if (id === ids[0] && etMin >= 15 * 60 + 30 && etMin < 15 * 60 + 55 && !_enteredOn.has(ivKey)) {
+                _enteredOn.add(ivKey);
+                await recordIvSnapshot(id, now).catch(err => logger.warn('[OptionsIncome] IV snapshot failed (non-blocking)', { error: err.message }));
             }
         } catch (err) {
             logger.warn('[OptionsIncome] Tick failed (non-blocking)', { userId: id, error: err.message });
@@ -445,4 +544,4 @@ function exitPlan(t, { mark = null, stockPrice = null } = {}) {
     return plan;
 }
 
-module.exports = { CFG, ymd, exitPlan, choosePut, assignmentPnl, stepDownLimit, nextEarnings, candidateUnderlyings, runEntries, runManagement, runTick, summary, ensureTable };
+module.exports = { CFG, ymd, exitPlan, choosePut, atmIv, recordIvSnapshot, assignmentPnl, stepDownLimit, nextEarnings, candidateUnderlyings, runEntries, runManagement, runTick, summary, ensureTable };

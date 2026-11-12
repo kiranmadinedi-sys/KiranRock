@@ -58,3 +58,24 @@ describe('ymd (2026-10-30: pg DATE objects made every open put look expired)', (
         expect(exitPlan({ premium: 0.71, strike: 30, expiry: new Date(2026, 10, 20) }).closeBy).toBe('2026-11-13');
     });
 });
+
+describe('atmIv (2026-11-11 IV history)', () => {
+    const { atmIv } = require('../src/services/optionsIncomeService');
+    const snaps = {
+        'ABC261218C00050000': { impliedVolatility: 0.30 },
+        'ABC261218P00050000': { impliedVolatility: 0.34 },
+        'ABC261218P00055000': { impliedVolatility: 0.28 },
+        'ABC270115P00050000': { impliedVolatility: 0.40 },   // further from 30 days
+        'ABC261218P00045000': { impliedVolatility: 9 },      // junk IV ignored
+    };
+    test('nearest-30-day expiry, strike nearest price, call+put averaged', () => {
+        const a = atmIv(snaps, 50.4, '2026-11-12');
+        expect(a.expiry).toBe('2026-12-18');
+        expect(a.atmIv).toBeCloseTo(0.32);
+        expect(a.n).toBe(4);
+    });
+    test('nothing usable → null', () => {
+        expect(atmIv({}, 50, '2026-11-12')).toBeNull();
+        expect(atmIv(snaps, 0, '2026-11-12')).toBeNull();
+    });
+});

@@ -1,7 +1,7 @@
 /**
  * Claude Assistant Service — Personal AI for kmadined
  *
- * Wraps the Anthropic Messages API with tool_use so Claude can pull
+ * Gemini function calling (Anthropic until 2026-11-12) so the model can pull
  * live data (portfolio, signals, health, stock analysis) before answering.
  *
  * READ-ONLY. No order placement.
@@ -12,12 +12,11 @@ const axios      = require('axios');
 const { query }  = require('../config/database');
 const { logger } = require('../utils/logger');
 
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const KMADINED_USER_ID  = 'ca632c53-8798-46f4-be94-29be0fede7f2';
-const MODEL             = 'claude-sonnet-4-6';
+const CHAT_MODEL        = () => process.env.GEMINI_CHAT_MODEL || 'gemini-3.5-flash';
 const MAX_TOOL_ROUNDS   = 4;  // max back-and-forth before forcing a text answer
 
-// ─── Tool definitions (what Claude can call) ──────────────────────────────────
+// ─── Tool definitions (what the model can call) ──────────────────────────────────
 
 const TOOLS = [
     {
@@ -65,6 +64,23 @@ const TOOLS = [
         }
     }
 ];
+
+function _geminiSchema(x) {
+    if (Array.isArray(x)) return x.map(_geminiSchema);
+    if (!x || typeof x !== 'object') return x;
+    const out = {};
+    for (const [k, v] of Object.entries(x)) out[k] = k === 'type' && typeof v === 'string' ? v.toUpperCase() : _geminiSchema(v);
+    return out;
+}
+const GEMINI_TOOLS = TOOLS.map(t => {
+    const hasArgs = Object.keys(t.input_schema?.properties || {}).length > 0;
+    const decl = { name: t.name, description: t.description };
+    if (hasArgs) {
+        decl.parameters = _geminiSchema(t.input_schema);
+        if (!decl.parameters.required?.length) delete decl.parameters.required;
+    }
+    return decl;
+});
 
 // ─── Tool implementations ─────────────────────────────────────────────────────
 
@@ -336,68 +352,39 @@ Guidelines:
 // ─── Main chat function ───────────────────────────────────────────────────────
 
 /**
- * Send a message to Claude with tool_use and return the final text response.
+ * Send a message to Gemini with function calling and return the final text response.
  * @param {string} userMessage - The user's question
- * @returns {Promise<string>} Claude's response text
+ * @returns {Promise<string>} response text
  */
 async function chat(userMessage) {
-    if (!ANTHROPIC_API_KEY) {
-        throw new Error('ANTHROPIC_API_KEY not configured');
-    }
-
-    const messages = [{ role: 'user', content: userMessage }];
-    let rounds = 0;
-
-    while (rounds < MAX_TOOL_ROUNDS) {
-        rounds++;
-
-        const response = await axios.post(
-            'https://api.anthropic.com/v1/messages',
+    if (!process.env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not configured');
+    // 2026-11-12: moved from Anthropic to Gemini (one paid AI provider). Same tools, same prompt.
+    const contents = [{ role: 'user', parts: [{ text: userMessage }] }];
+    const ledger = require('./costLedgerService');
+    for (let round = 1; round <= MAX_TOOL_ROUNDS; round++) {
+        const resp = await axios.post(
+            `https://generativelanguage.googleapis.com/v1beta/models/${CHAT_MODEL()}:generateContent?key=${process.env.GEMINI_API_KEY}`,
             {
-                model:      MODEL,
-                max_tokens: 1024,
-                system:     buildSystemPrompt(),
-                tools:      TOOLS,
-                messages
+                systemInstruction: { parts: [{ text: buildSystemPrompt() }] },
+                tools: [{ functionDeclarations: GEMINI_TOOLS }],
+                contents,
+                generationConfig: { maxOutputTokens: 4096, temperature: 0.3 },
             },
-            {
-                headers: {
-                    'x-api-key':         ANTHROPIC_API_KEY,
-                    'anthropic-version': '2023-06-01',
-                    'content-type':      'application/json'
-                },
-                timeout: 30000
-            }
-        );
-
-        const { stop_reason, content } = response.data;
-
-        // Add assistant's response to conversation
-        messages.push({ role: 'assistant', content });
-
-        // If no tool calls or final answer — return text
-        if (stop_reason === 'end_turn' || stop_reason !== 'tool_use') {
-            const textBlock = content.find(b => b.type === 'text');
-            return textBlock?.text || 'No response generated.';
+            { timeout: 60000 });
+        ledger.add('gemini:enquiry_chat', ledger.geminiCost(resp.data.usageMetadata));
+        const content = resp.data.candidates?.[0]?.content;
+        if (!content?.parts?.length) return 'No response generated.';
+        contents.push(content);   // verbatim — Gemini 3 needs its thought signatures back
+        const calls = content.parts.filter(p => p.functionCall);
+        if (!calls.length) return content.parts.map(p => p.text || '').join('').trim() || 'No response generated.';
+        const responses = [];
+        for (const { functionCall: fc } of calls) {
+            logger.info('[Assistant] Tool call', { tool: fc.name, input: fc.args });
+            const result = await executeTool(fc.name, fc.args || {});
+            responses.push({ functionResponse: { name: fc.name, response: { result } } });
         }
-
-        // Process tool calls
-        const toolResults = [];
-        for (const block of content) {
-            if (block.type !== 'tool_use') continue;
-            logger.info('[ClaudeAssistant] Tool call', { tool: block.name, input: block.input });
-            const result = await executeTool(block.name, block.input || {});
-            toolResults.push({
-                type:        'tool_result',
-                tool_use_id: block.id,
-                content:     JSON.stringify(result)
-            });
-        }
-
-        // Feed results back to Claude
-        messages.push({ role: 'user', content: toolResults });
+        contents.push({ role: 'user', parts: responses });
     }
-
     return 'I reached the maximum number of tool calls. Please try a more specific question.';
 }
 

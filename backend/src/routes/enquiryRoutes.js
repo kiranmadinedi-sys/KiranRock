@@ -154,17 +154,17 @@ router.post('/enquiry', authenticateToken, async (req, res) => {
             return res.status(400).json({ error: 'Question is required' });
         }
 
-        // ── Personal assistant — kmadined only, powered by Claude API ────────
+        // ── Personal assistant — kmadined only, Gemini with live-data tools (Anthropic until 2026-11-12) ──
         const KMADINED = 'ca632c53-8798-46f4-be94-29be0fede7f2';
         if (userId === KMADINED) {
-            logger.info('[Enquiry] Claude assistant path', { userId, questionLength: question.length });
+            logger.info('[Enquiry] Assistant path', { userId, questionLength: question.length });
             try {
                 const answer = await claudeAssistant.chat(question);
-                return res.json({ answer, timestamp: new Date().toISOString(), engine: 'claude' });
+                return res.json({ answer, timestamp: new Date().toISOString(), engine: 'gemini' });
             } catch (claudeErr) {
                 // 2026-11-12: credits ran out and every question showed "could not process that".
                 // Fall through to the standard data + local-model path instead of failing.
-                logger.error('[Enquiry] Claude assistant failed — using the standard path', {
+                logger.error('[Enquiry] Assistant failed — using the standard path', {
                     status: claudeErr.response?.status,
                     error: claudeErr.response?.data?.error?.message || claudeErr.message });
             }

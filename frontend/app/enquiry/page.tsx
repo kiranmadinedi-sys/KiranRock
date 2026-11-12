@@ -485,7 +485,7 @@ export default function EnquiryPage() {
                                 Send
                             </button>
                         </form>
-                        <p className="text-[10px] text-gray-400 mt-1.5">Powered by Claude AI · Live portfolio, signals &amp; system data from KiranRock</p>
+                        <p className="text-[10px] text-gray-400 mt-1.5">Powered by Gemini · Live portfolio, signals &amp; system data from KiranRock</p>
                     </div>
                 </div>
             </div>

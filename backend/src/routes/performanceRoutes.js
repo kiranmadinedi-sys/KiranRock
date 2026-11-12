@@ -1381,12 +1381,11 @@ router.get('/trade-log', protect, async (req, res) => {
  *
  * Collects all trading stats for the period, then asks Claude to write
  * a plain-English summary a non-trader can fully understand.
- * Uses the same Anthropic SDK already wired up for ORACLE/assistant.
+ * Gemini writes it (Anthropic until 2026-11-12); template text if Gemini fails.
  */
 router.post('/plain-summary', protect, async (req, res) => {
     try {
         const { query } = require('../config/database');
-        const Anthropic = require('@anthropic-ai/sdk');
         const userId = req.userId;
         const days   = Math.max(7, Math.min(parseInt(req.body?.days) || 90, 365));
 
@@ -1557,10 +1556,9 @@ router.post('/plain-summary', protect, async (req, res) => {
             skippedOpportunities: skippedBlob.blockedDays > 0 ? skippedBlob : null,
         };
 
-        // ── 3. Ask Claude for the plain-English summary ────────────────────
-        const apiKey = process.env.ANTHROPIC_API_KEY;
-        if (!apiKey) {
-            // Fallback: build a template summary without Claude
+        // ── 3. Ask Gemini for the plain-English summary (Anthropic until 2026-11-12) ──
+        // Template summary — used when Gemini is not configured or the call fails.
+        const templateSummary = () => {
             const direction = statsBlob.netPnlUsd >= 0 ? 'made money' : 'lost money';
             const summary = [
                 `Over the ${statsBlob.period}, the bot completed ${statsBlob.totalTrades} trades — ` +
@@ -1576,10 +1574,10 @@ router.post('/plain-summary', protect, async (req, res) => {
                 `(mostly ${statsBlob.skippedOpportunities.dominantBlockedRegime || 'unfavorable'} conditions) — the ${statsBlob.skippedOpportunities.candidates85} ` +
                 `high-scoring stocks it passed on during those days averaged ${statsBlob.skippedOpportunities.avgReturn5d85 != null ? `${statsBlob.skippedOpportunities.avgReturn5d85 >= 0 ? '+' : ''}${statsBlob.skippedOpportunities.avgReturn5d85.toFixed(2)}%` : 'an unclear return'} over the next 5 days.` : '',
             ].filter(Boolean).join(' ');
-            return res.json({ summary, stats: statsBlob });
-        }
+            return summary;
+        };
+        if (!process.env.GEMINI_API_KEY) return res.json({ summary: templateSummary(), stats: statsBlob });
 
-        const client = new Anthropic({ apiKey });
         const prompt = `You are a friendly assistant explaining a stock trading bot's performance to someone with zero trading knowledge. Use simple everyday language — no jargon.
 
 Here are the trading results for the ${statsBlob.period}:
@@ -1616,14 +1614,20 @@ Rules:
 - Use short paragraphs, not bullet points
 - Do NOT start with "Overall" — vary the opening`;
 
-        const message = await client.messages.create({
-            model:      'claude-haiku-4-5-20251001',
-            max_tokens: 512,
-            messages:   [{ role: 'user', content: prompt }]
-        });
-
-        const summary = message.content?.[0]?.text?.trim() || 'Summary unavailable.';
-        res.json({ summary, stats: statsBlob });
+        let summary;
+        try {
+            const axios = require('axios');
+            const resp = await axios.post(
+                `https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_CHAT_MODEL || 'gemini-3.5-flash'}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+                { contents: [{ parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 2048, temperature: 0.4 } },
+                { timeout: 60000 });
+            const ledger = require('../services/costLedgerService');
+            ledger.add('gemini:plain_summary', ledger.geminiCost(resp.data.usageMetadata));
+            summary = resp.data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('').trim();
+        } catch (err) {
+            logger.warn('[PlainSummary] Gemini failed — template summary', { error: err.response?.data?.error?.message || err.message });
+        }
+        res.json({ summary: summary || templateSummary(), stats: statsBlob });
 
     } catch (err) {
         logger.error('Plain summary endpoint error', { error: err.message });

@@ -1,5 +1,5 @@
 /**
- * Claude AI Reports
+ * AI reports (local Ollama model — no Anthropic key needed since 2026-11-12)
  *
  * sendClaudeWeeklyBuyList  — Sunday 8 AM EST
  *   Full analyst-grade weekly report: bull/base/bear scenarios, R/R ratios,
@@ -124,9 +124,6 @@ function buildTradeOfWeekHeader(pick, wk) {
 async function sendClaudeWeeklyBuyList() {
     const chatId = process.env.TELEGRAM_CHAT_ID;
     if (!chatId) throw new Error('TELEGRAM_CHAT_ID not set in .env');
-    if (!process.env.ANTHROPIC_API_KEY) {
-        throw new Error('ANTHROPIC_API_KEY not set in .env — get your key at console.anthropic.com');
-    }
 
     logger.info('[ClaudeBuyList] Starting Claude WEEKLY buy list...');
     const token = await login();
@@ -147,7 +144,7 @@ async function sendClaudeWeeklyBuyList() {
         weekLabel: wk
     });
 
-    const footer = `\n━━━━━━━━━━━━━━━━━━━━\n🤖 _Analysed by Claude AI (${process.env.CLAUDE_MODEL || 'claude-sonnet-4-6'}) · Live market data_\n⚖️ _Not financial advice. Do your own research._`;
+    const footer = `\n━━━━━━━━━━━━━━━━━━━━\n🤖 _Analysed by the local AI model · Live market data_\n⚖️ _Not financial advice. Do your own research._`;
     const count = await sendChunked(chatId, `${totHeader}${claudeReport}${footer}`);
 
     logger.info('[ClaudeBuyList] ✓ Weekly report sent', { picks: picks.length, tradeOfWeek: tradeOfWeek?.symbol, chunks: count });
@@ -159,11 +156,6 @@ async function sendClaudeWeeklyBuyList() {
 async function sendClaudeDailyAnalysis() {
     const chatId = process.env.TELEGRAM_CHAT_ID;
     if (!chatId) throw new Error('TELEGRAM_CHAT_ID not set in .env');
-    if (!process.env.ANTHROPIC_API_KEY) {
-        logger.warn('[ClaudeDaily] ANTHROPIC_API_KEY not set — skipping Claude daily analysis');
-        console.log('[ClaudeDaily] Skipping: ANTHROPIC_API_KEY not configured');
-        return;
-    }
 
     logger.info('[ClaudeDaily] Starting Claude DAILY beginner analysis...');
     const token = await login();
@@ -183,7 +175,7 @@ async function sendClaudeDailyAnalysis() {
         todayLabel: todayLabel()
     });
 
-    const footer = `\n━━━━━━━━━━━━━━━━━━━━\n🤖 _Claude AI · ${process.env.CLAUDE_MODEL || 'claude-sonnet-4-6'}_\n⚖️ _Not financial advice. Learn before you invest._`;
+    const footer = `\n━━━━━━━━━━━━━━━━━━━━\n🤖 _Local AI model_\n⚖️ _Not financial advice. Learn before you invest._`;
     const count = await sendChunked(chatId, `${claudeReport}${footer}`);
 
     logger.info('[ClaudeDaily] ✓ Daily beginner analysis sent', { picks: picks.length, chunks: count });

@@ -162,8 +162,11 @@ router.post('/enquiry', authenticateToken, async (req, res) => {
                 const answer = await claudeAssistant.chat(question);
                 return res.json({ answer, timestamp: new Date().toISOString(), engine: 'claude' });
             } catch (claudeErr) {
-                logger.error('[Enquiry] Claude assistant failed', { error: claudeErr.message });
-                return res.status(500).json({ error: 'Assistant is unavailable. Please try again shortly.' });
+                // 2026-11-12: credits ran out and every question showed "could not process that".
+                // Fall through to the standard data + local-model path instead of failing.
+                logger.error('[Enquiry] Claude assistant failed — using the standard path', {
+                    status: claudeErr.response?.status,
+                    error: claudeErr.response?.data?.error?.message || claudeErr.message });
             }
         }
 

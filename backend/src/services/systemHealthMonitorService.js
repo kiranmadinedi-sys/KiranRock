@@ -496,6 +496,13 @@ async function checkExternalServices() {
         probes.push(['Alpaca market data', () => axios.get('https://data.alpaca.markets/v2/stocks/SPY/bars/latest',
             { headers: { 'APCA-API-KEY-ID': process.env.ALPACA_KEY_ID, 'APCA-API-SECRET-KEY': process.env.ALPACA_SECRET_KEY }, timeout: 15000 })]);
     }
+    if (process.env.ANTHROPIC_API_KEY) {
+        // 2026-11-12: credits ran out and the Enquiry chat failed silently. 1-token Haiku call —
+        // an empty balance answers 400 "credit balance is too low", which the probe reports.
+        probes.push(['Anthropic Claude (Enquiry chat)', () => axios.post('https://api.anthropic.com/v1/messages',
+            { model: 'claude-haiku-4-5-20251001', max_tokens: 1, messages: [{ role: 'user', content: 'ok' }] },
+            { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' }, timeout: 20000 })]);
+    }
     if (process.env.FRED_API_KEY) {
         probes.push(['FRED (VIX/oil/gold)', () => axios.get('https://api.stlouisfed.org/fred/series/observations',
             { params: { series_id: 'VIXCLS', api_key: process.env.FRED_API_KEY, file_type: 'json', limit: 1, sort_order: 'desc' }, timeout: 15000 })]);

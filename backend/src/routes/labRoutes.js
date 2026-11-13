@@ -16,8 +16,33 @@ const safe = (p, fallback) => p.then(r => r.rows).catch(err => {
     return fallback;
 });
 
+/**
+ * Per symbol: latest IV, change vs the previous snapshot, and where today sits in its own range
+ * (IV rank, 0 = lowest seen, 100 = highest). Rank needs 20+ days of history to mean anything.
+ */
+const IV_RANK_MIN_DAYS = 20;
+function ivSummary(rows) {
+    const by = new Map();
+    for (const r of rows) { if (!by.has(r.symbol)) by.set(r.symbol, []); by.get(r.symbol).push(r); }
+    const latest = [];
+    for (const [symbol, hist] of by) {
+        const last = hist[hist.length - 1], prev = hist.length > 1 ? hist[hist.length - 2] : null;
+        const ivs = hist.map(h => h.iv).filter(v => v != null);
+        const lo = Math.min(...ivs), hi = Math.max(...ivs);
+        latest.push({
+            symbol, d: last.d, price: last.price, iv: last.iv, dte: last.dte, days: hist.length,
+            change: prev && prev.iv != null && last.iv != null ? last.iv - prev.iv : null,
+            lo, hi, rank: hist.length >= IV_RANK_MIN_DAYS && hi > lo ? Math.round((last.iv - lo) / (hi - lo) * 100) : null,
+            history: hist.map(h => ({ d: h.d, iv: h.iv, price: h.price })),
+        });
+    }
+    latest.sort((a, b) => (b.iv ?? 0) - (a.iv ?? 0));
+    const days = [...new Set(rows.map(r => r.d))].sort();
+    return { latest, days: days.length, first: days[0] || null, last: days[days.length - 1] || null, rankMinDays: IV_RANK_MIN_DAYS };
+}
+
 router.get('/summary', async (req, res) => {
-    const [ideas, shadowDaily, shadowByVerdict, shadowMatrix, newsTypes, newsRange, spendDaily, spendByService, subs] = await Promise.all([
+    const [ideas, shadowDaily, shadowByVerdict, shadowMatrix, newsTypes, newsRange, spendDaily, spendByService, subs, ivRows] = await Promise.all([
         safe(query(`SELECT id, name, family, idea, source, status, result, created_at, tested_at
                     FROM research_hypotheses ORDER BY COALESCE(tested_at, created_at) DESC, id DESC`), []),
         // Per day: checks, how many each model answered, agreement where both answered.
@@ -53,9 +78,12 @@ router.get('/summary', async (req, res) => {
         safe(query(`SELECT service, sum(calls)::int AS calls, round(sum(usd)::numeric, 2)::float AS usd, min(day) AS since
                     FROM api_costs GROUP BY 1 ORDER BY 3 DESC`), []),
         safe(query(`SELECT service, monthly_usd, notes, active FROM service_subscriptions ORDER BY service`), []),
+        // Options IV: last 180 days of the daily ATM implied-volatility snapshot (optionsIncomeService).
+        safe(query(`SELECT symbol, d::text AS d, stock_price::float AS price, atm_iv::float AS iv, dte
+                    FROM options_iv_history WHERE d > CURRENT_DATE - 180 ORDER BY symbol, d`), []),
     ]);
     res.json({ ideas, shadow: { daily: shadowDaily, byVerdict: shadowByVerdict, matrix: shadowMatrix },
-               news: { types: newsTypes, range: newsRange[0] || {} }, spend: { daily: spendDaily, byService: spendByService, subscriptions: subs } });
+               news: { types: newsTypes, range: newsRange[0] || {} }, spend: { daily: spendDaily, byService: spendByService, subscriptions: subs }, iv: ivSummary(ivRows) });
 });
 
 module.exports = router;

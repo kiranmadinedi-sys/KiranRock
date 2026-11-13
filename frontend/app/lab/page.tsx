@@ -5,7 +5,7 @@ import { getApiBaseUrl } from '../config';
 
 /** Lab (2026-11-12, admin only): research ideas, ORACLE shadow test, news events, AI spend. Read-only. */
 
-const TABS = ['Ideas', 'ORACLE shadow', 'News events', 'AI spend'] as const;
+const TABS = ['Ideas', 'ORACLE shadow', 'News events', 'Options IV', 'AI spend'] as const;
 type Tab = typeof TABS[number];
 
 const card = 'bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 p-5';
@@ -26,11 +26,33 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
     );
 }
 
+/** Small IV line for one symbol; one dot per day until there's enough for a line. */
+function IvChart({ history }: { history: { d: string; iv: number }[] }) {
+    const pts = history.filter(h => h.iv != null);
+    if (!pts.length) return null;
+    const W = 560, H = 120, P = 24;
+    const lo = Math.min(...pts.map(p => p.iv)), hi = Math.max(...pts.map(p => p.iv));
+    const span = hi - lo || hi * 0.2 || 0.01;
+    const x = (i: number) => pts.length === 1 ? W / 2 : P + i * (W - 2 * P) / (pts.length - 1);
+    const y = (v: number) => H - P - (v - (lo - span * 0.1)) / (span * 1.2) * (H - 2 * P);
+    return (
+        <svg viewBox={`0 0 ${W} ${H}`} className="w-full max-w-xl h-32 text-blue-600 dark:text-blue-400">
+            {pts.length > 1 && <polyline fill="none" stroke="currentColor" strokeWidth="2" points={pts.map((p, i) => `${x(i)},${y(p.iv)}`).join(' ')} />}
+            {pts.map((p, i) => <circle key={p.d} cx={x(i)} cy={y(p.iv)} r="3" fill="currentColor"><title>{`${p.d}: ${(p.iv * 100).toFixed(1)}%`}</title></circle>)}
+            <text x={P} y={H - 4} fontSize="11" className="fill-slate-500">{pts[0].d}</text>
+            <text x={W - P} y={H - 4} fontSize="11" textAnchor="end" className="fill-slate-500">{pts[pts.length - 1].d}</text>
+            <text x={4} y={14} fontSize="11" className="fill-slate-500">{`${(hi * 100).toFixed(0)}%`}</text>
+            <text x={4} y={H - P} fontSize="11" className="fill-slate-500">{`${(lo * 100).toFixed(0)}%`}</text>
+        </svg>
+    );
+}
+
 export default function LabPage() {
     const [data, setData] = useState<any>(null);
     const [error, setError] = useState<string | null>(null);
     const [tab, setTab] = useState<Tab>('Ideas');
     const [open, setOpen] = useState<number | null>(null);
+    const [ivOpen, setIvOpen] = useState<string | null>(null);
 
     useEffect(() => {
         (async () => {
@@ -177,6 +199,39 @@ export default function LabPage() {
                                 <td className={td}>{news.range?.n ? `${(r.n / news.range.n * 100).toFixed(1)}%` : '—'}</td>
                             </tr>))}</tbody>
                     </table>
+                </div>
+            )}
+
+            {tab === 'Options IV' && (
+                <div className={card}>
+                    <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">
+                        Implied volatility: the yearly price swing the options market is pricing in, from at-the-money options about 30 days out.
+                        Recorded once a day near the close for the index ETFs, the biggest option names, open puts and the put candidates.
+                        Divide by about 3.5 for the expected one-month move (SPY 14% ≈ ±4%). <b>IV rank</b> shows where today sits in that stock&apos;s own range
+                        (0 = calmest seen, 100 = most nervous); it fills in after {data.iv?.rankMinDays ?? 20} days of history.
+                        {' '}{data.iv?.days ? `${data.iv.days} day(s) so far, ${day(data.iv.first)} → ${day(data.iv.last)}.` : 'No snapshots yet.'} Click a row for its history.
+                    </p>
+                    <div className="overflow-x-auto"><table className="w-full text-sm">
+                        <thead><tr>{['Symbol', 'Price', 'IV', '≈ 1-month move', 'Change vs prior day', 'IV rank', 'Range seen', 'Days'].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
+                        <tbody>{(data.iv?.latest || []).map((r: any) => (
+                            <React.Fragment key={r.symbol}>
+                                <tr className="border-t border-slate-100 dark:border-slate-700 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700/40" onClick={() => setIvOpen(ivOpen === r.symbol ? null : r.symbol)}>
+                                    <td className={`${td} font-medium text-slate-900 dark:text-white`}>{r.symbol}</td>
+                                    <td className={td}>{r.price == null ? '—' : `$${Number(r.price).toFixed(2)}`}</td>
+                                    <td className={td}>{r.iv == null ? '—' : `${(r.iv * 100).toFixed(1)}%`}</td>
+                                    <td className={td}>{r.iv == null ? '—' : `±${(r.iv * 100 / Math.sqrt(12)).toFixed(1)}%`}</td>
+                                    <td className={`${td} ${r.change > 0 ? 'text-red-600 dark:text-red-400' : r.change < 0 ? 'text-green-600 dark:text-green-400' : ''}`}>
+                                        {r.change == null ? '—' : `${r.change >= 0 ? '+' : ''}${(r.change * 100).toFixed(1)} pts`}</td>
+                                    <td className={td}>{r.rank == null ? `needs ${data.iv.rankMinDays} days` : r.rank}</td>
+                                    <td className={td}>{r.lo == null ? '—' : `${(r.lo * 100).toFixed(0)}–${(r.hi * 100).toFixed(0)}%`}</td>
+                                    <td className={td}>{r.days}</td>
+                                </tr>
+                                {ivOpen === r.symbol && (
+                                    <tr><td colSpan={8} className="pb-3"><IvChart history={r.history} /></td></tr>
+                                )}
+                            </React.Fragment>
+                        ))}</tbody>
+                    </table></div>
                 </div>
             )}
 

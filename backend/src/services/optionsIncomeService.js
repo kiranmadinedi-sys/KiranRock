@@ -420,7 +420,10 @@ function atmIv(snapshots, price, today) {
     return { atmIv: atm.reduce((a, r) => a + r.iv, 0) / atm.length, expiry: best.expiry, dte: best.dte, n: rows.length };
 }
 
-const IV_ALWAYS = ['SPY', 'QQQ', 'IWM'];
+// Index ETFs plus the most-traded single-stock option names (logging only, 2026-11-13): big
+// event moves like NVDA's 11-12 gap happen here, and these are above the CSP price cap so
+// they would otherwise never be recorded.
+const IV_ALWAYS = ['SPY', 'QQQ', 'IWM', 'NVDA', 'AAPL', 'MSFT', 'AMZN', 'META', 'GOOGL', 'TSLA', 'AMD', 'AVGO'];
 const IV_MAX_SYMBOLS = 120;
 /**
  * Once a day near the close: record ATM IV for today's put candidates, open puts, the index ETFs

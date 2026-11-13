@@ -34,6 +34,9 @@ const FEATURES = {
     low52Dist: '% above 52-week low', rangePos: 'close position in day range 0-1', price: 'close',
     atrPct: '14-day ATR as % of price', spyRet5: 'SPY 5-day % change', spyAbove200: 'SPY above its 200-day average (1/0)',
     prevRet1: 'prior day 1-day % change',
+    // The one forward-looking field that is still honest: the simulated buy happens AT the next
+    // open, so how far that open gapped is known at the moment of entry (2026-11-13).
+    nextGap: 'next open vs today\'s close % (known at the entry open)',
 };
 const OPS = {
     '>': (x, v) => x > v, '>=': (x, v) => x >= v, '<': (x, v) => x < v, '<=': (x, v) => x <= v,
@@ -160,6 +163,7 @@ function computeFeatures(bars, market = {}) {
         out[i] = {
             ret1: pct(c[i], c[i - 1]), prevRet1: pct(c[i - 1], c[i - 2]), ret5: pct(c[i], c[i - 5]), ret20: pct(c[i], c[i - 20]),
             ret60: i >= 60 ? pct(c[i], c[i - 60]) : null, gap: pct(bars[i].o, c[i - 1]),
+            nextGap: i + 1 < n ? pct(bars[i + 1].o, c[i]) : null,
             volRatio: v20[i - 1] > 0 ? v[i] / v20[i - 1] : null,
             sma50Dist: s50[i] ? pct(c[i], s50[i]) : null, sma200Dist: s200[i] ? pct(c[i], s200[i]) : null,
             rsi14: rsi[i], high52Dist: hi252[i] ? pct(c[i], hi252[i]) : null, low52Dist: lo252[i] ? pct(c[i], lo252[i]) : null,

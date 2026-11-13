@@ -62,6 +62,17 @@ test('computeFeatures: ret1, volume ratio and 52-week distance on a simple serie
     expect(f.high52Dist).toBeNull(); // fewer than 252 bars
 });
 
+test('computeFeatures: nextGap is the next open vs today\'s close (the entry price), null on the last bar', () => {
+    const bars = Array.from({ length: 30 }, (_, i) => bar(`2024-01-${String(i + 1).padStart(2, '0')}`, 100, 101, 99, 100, 1000));
+    bars[29] = bar('2024-01-30', 87, 95, 86, 94, 5000); // gaps down 13% from the prior 100 close
+    const feats = lab.computeFeatures(bars);
+    expect(feats[28].nextGap).toBeCloseTo(-13);
+    expect(feats[29].nextGap).toBeNull();
+    // the trade the spec selects buys exactly that gapped open
+    expect(lab.tradeReturn(bars, 28, 1, null)).toBeCloseTo((94 / 87 - 1) * 100);
+    expect(lab.matches([['nextGap', '<=', -8]], feats[28])).toBe(true);
+});
+
 describe('scoreIdea pass rule', () => {
     const days = (from, n) => Array.from({ length: n }, (_, i) => {
         const d = new Date(`${from}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + i); return d.toISOString().slice(0, 10);

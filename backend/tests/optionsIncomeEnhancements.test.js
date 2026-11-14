@@ -33,18 +33,20 @@ describe('exitPlan', () => {
     const shak = { premium: 2.7, strike: 65, expiry: '2026-11-20', next_earnings: '2026-11-05' };
     test('prices and dates the management loop acts on', () => {
         const p = exitPlan(shak, { mark: 5.3, stockPrice: 64.55 });
-        expect(p).toMatchObject({ takeProfitAt: 1.35, stopAt: 8.1, closeBy: '2026-11-13', earningsBeforeClose: true, assignmentCost: 6500, cushionPct: -0.69 });
+        // 2026-11-14: no stop and no early close (held to expiry unless 50% profit)
+        expect(p).toMatchObject({ takeProfitAt: 1.35, stopAt: null, closeBy: '2026-11-20', earningsBeforeClose: true, assignmentCost: 6500, cushionPct: -0.69 });
         expect(p.flags).toEqual(['below strike', 'earnings before close']);
     });
-    test('near stop once the put costs 2× the premium; no flags for a safe put', () => {
-        expect(exitPlan(shak, { mark: 5.5, stockPrice: 70 }).flags).toContain('near stop');
+    test('no stop now: a put costing 3× its premium is flagged (not acted on); no flags for a safe put', () => {
+        expect(exitPlan(shak, { mark: 8.2, stockPrice: 70 }).flags).toContain('big paper loss (no stop: held to expiry)');
+        expect(exitPlan(shak, { mark: 5.5, stockPrice: 70 }).flags).not.toContain('near stop');
         const hpq = exitPlan({ premium: 0.71, strike: 30, expiry: '2026-11-20', next_earnings: '2026-11-23' }, { mark: 0.47, stockPrice: 33.55 });
         expect(hpq.flags).toEqual([]);
         expect(hpq.earningsBeforeClose).toBe(false);
     });
     test('works without live prices', () => {
         const p = exitPlan({ entry_premium: 1, strike: 50, expiry: '2026-11-13' });
-        expect(p).toMatchObject({ mark: null, cushionPct: null, earnings: null, closeBy: '2026-11-06', flags: [] });
+        expect(p).toMatchObject({ mark: null, cushionPct: null, earnings: null, closeBy: '2026-11-13', flags: [] });
     });
 });
 
@@ -55,7 +57,7 @@ describe('ymd (2026-10-30: pg DATE objects made every open put look expired)', (
         expect(ymd('2026-11-20')).toBe('2026-11-20');
     });
     test('exitPlan accepts a Date expiry', () => {
-        expect(exitPlan({ premium: 0.71, strike: 30, expiry: new Date(2026, 10, 20) }).closeBy).toBe('2026-11-13');
+        expect(exitPlan({ premium: 0.71, strike: 30, expiry: new Date(2026, 10, 20) }).closeBy).toBe('2026-11-20');
     });
 });
 

@@ -32,15 +32,21 @@ const { logger } = require('../utils/logger');
 
 const CFG = {
     minDte: 25, maxDte: 45,
-    minDelta: -0.30, maxDelta: -0.15,
+    // 2026-11-14 (user-approved, paper only): Options lab CSP backtest — 60 stocks, Mar 2024 → Sep 2026,
+    // 11,686 test trades on real option prices. Old rules (3× stop + close at 7 days) earned ~0-1%/yr on
+    // collateral, below T-bills; "50% profit, else hold to expiry" on busy contracts at ~0.20 delta earned
+    // ~8%/yr (92% winners, ~9% assigned). Our own puts traded 1-4 times a day and the paper stops filled on
+    // swinging indicative quotes (BMY bought back at ~2× the real trade price).
+    minDelta: -0.25, maxDelta: -0.15,
+    minContractVolume: 20,       // contracts traded on a recent day (dailyBar/prevDailyBar within 5 days)
     minPremiumPct: 0.6,          // mid premium as % of strike
     maxSpreadPct: 25,            // (ask − bid) as % of mid
     minPrice: 15, maxPrice: 100,
     maxPositions: 5,
     maxCollateralEach: 10000,
     takeProfitFrac: 0.5,         // buy back when the put costs ≤ 50% of the premium received
-    stopMultiple: 3,             // buy back when the put costs ≥ 3× the premium received
-    closeDte: 7,
+    stopMultiple: null,          // was 3 (buy back at 3× premium) — off: stops locked in dips that recovered
+    closeDte: null,              // was 7 — off: hold to expiry unless take-profit (expired / assigned handled below)
     maxPerSector: 2,
     repriceAfterMin: 45,         // minutes an unfilled entry waits before stepping its price down
     repriceSteps: 3,             // mid → mid − 1/3, 2/3, 3/3 of (mid − bid), floored at the min premium
@@ -127,6 +133,15 @@ async function pickPut(client, underlying, price, now = new Date()) {
     return choosePut(r.data?.snapshots || {}, today);
 }
 
+/**
+ * Contracts traded on the most recent day with a trade, if that day is within 5 calendar days.
+ * dailyBar is the last day that traded (it can be weeks old on a dead contract), so age matters.
+ */
+function recentVolume(s, today) {
+    const fresh = b => b?.t && dayDiff(today, String(b.t).slice(0, 10)) <= 5 ? Number(b.v) || 0 : 0;
+    return Math.max(fresh(s?.dailyBar), fresh(s?.prevDailyBar));
+}
+
 /** Selection rules over a snapshots map — exported for tests. */
 function choosePut(snapshots, today) {
     const parse = sym => {
@@ -143,6 +158,7 @@ function choosePut(snapshots, today) {
         if (dte < CFG.minDte || dte > CFG.maxDte) continue;
         if (delta < CFG.minDelta || delta > CFG.maxDelta) continue;
         if ((ask - bid) / mid * 100 > CFG.maxSpreadPct) continue;
+        if (CFG.minContractVolume && recentVolume(s, today) < CFG.minContractVolume) continue;
         const premiumPct = mid / p.strike * 100;
         if (premiumPct < CFG.minPremiumPct) continue;
         if (p.strike * 100 > CFG.maxCollateralEach) continue;
@@ -326,8 +342,8 @@ async function runManagement(userId, now = new Date()) {
             if (!(ask > 0)) continue;
             const entry = Number(t.entry_premium);
             const reason = ask <= entry * CFG.takeProfitFrac ? 'take profit (50%)'
-                : ask >= entry * CFG.stopMultiple ? 'stop (3× premium)'
-                : dte <= CFG.closeDte ? `close near expiry (${dte}d)` : null;
+                : CFG.stopMultiple && ask >= entry * CFG.stopMultiple ? `stop (${CFG.stopMultiple}× premium)`
+                : CFG.closeDte != null && dte <= CFG.closeDte ? `close near expiry (${dte}d)` : null;
             if (!reason) continue;
             // Record-only: the quote and stock price behind this exit. Never blocks the exit.
             const bid = s?.latestQuote?.bp > 0 ? s.latestQuote.bp : null;
@@ -528,11 +544,11 @@ async function summary() {
 function exitPlan(t, { mark = null, stockPrice = null } = {}) {
     const entry = Number(t.premium ?? t.entry_premium), strike = Number(t.strike);
     const exp = new Date(`${ymd(t.expiry)}T00:00:00Z`);
-    const closeBy = new Date(exp.getTime() - CFG.closeDte * 86400000).toISOString().slice(0, 10);
+    const closeBy = new Date(exp.getTime() - (CFG.closeDte || 0) * 86400000).toISOString().slice(0, 10);
     const earnings = t.next_earnings ? String(t.next_earnings).slice(0, 10) : null;
     const plan = {
         takeProfitAt: Math.round(entry * CFG.takeProfitFrac * 100) / 100,
-        stopAt: Math.round(entry * CFG.stopMultiple * 100) / 100,
+        stopAt: CFG.stopMultiple ? Math.round(entry * CFG.stopMultiple * 100) / 100 : null,
         closeBy, earnings,
         earningsBeforeClose: !!earnings && earnings <= closeBy,
         assignmentCost: strike * 100 * (t.qty || 1),
@@ -542,9 +558,11 @@ function exitPlan(t, { mark = null, stockPrice = null } = {}) {
     plan.flags = [
         ...(stockPrice != null && stockPrice < strike ? ['below strike'] : []),
         ...(plan.earningsBeforeClose ? ['earnings before close'] : []),
-        ...(mark != null && mark >= entry * (CFG.stopMultiple - 1) ? ['near stop'] : []),
+        ...(CFG.stopMultiple && mark != null && mark >= entry * (CFG.stopMultiple - 1) ? ['near stop'] : []),
+        // no stop now: flag a put that has lost 2× its premium so it is visible, not acted on
+        ...(!CFG.stopMultiple && mark != null && mark >= entry * 3 ? ['big paper loss (no stop: held to expiry)'] : []),
     ];
     return plan;
 }
 
-module.exports = { CFG, ymd, exitPlan, choosePut, atmIv, recordIvSnapshot, assignmentPnl, stepDownLimit, nextEarnings, candidateUnderlyings, runEntries, runManagement, runTick, summary, ensureTable };
+module.exports = { CFG, ymd, exitPlan, choosePut, recentVolume, atmIv, recordIvSnapshot, assignmentPnl, stepDownLimit, nextEarnings, candidateUnderlyings, runEntries, runManagement, runTick, summary, ensureTable };

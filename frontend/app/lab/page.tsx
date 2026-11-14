@@ -5,7 +5,7 @@ import { getApiBaseUrl } from '../config';
 
 /** Lab (2026-11-12, admin only): research ideas, ORACLE shadow test, news events, AI spend. Read-only. */
 
-const TABS = ['Ideas', 'ORACLE shadow', 'News events', 'Options IV', 'AI spend'] as const;
+const TABS = ['Daily tips', 'Ideas', 'ORACLE shadow', 'News events', 'Options IV', 'AI spend'] as const;
 type Tab = typeof TABS[number];
 
 const card = 'bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 p-5';
@@ -64,7 +64,8 @@ function IvChart({ history }: { history: { d: string; iv: number }[] }) {
 export default function LabPage() {
     const [data, setData] = useState<any>(null);
     const [error, setError] = useState<string | null>(null);
-    const [tab, setTab] = useState<Tab>('Ideas');
+    const [tab, setTab] = useState<Tab>('Daily tips');
+    const [tipDay, setTipDay] = useState(0);
     const [open, setOpen] = useState<number | null>(null);
     const [ivOpen, setIvOpen] = useState<string | null>(null);
 
@@ -121,6 +122,7 @@ export default function LabPage() {
                     <div>
                         <b>The tabs in one line each:</b>
                         <ul className="list-disc ml-5 mt-1 space-y-0.5">
+                            <li><b>Daily tips:</b> a short evening note in plain English: market mood, top-scored stocks, news on our holdings, one lesson.</li>
                             <li><b>Ideas:</b> every idea tested, with the result in plain words.</li>
                             <li><b>ORACLE shadow:</b> a contest between our free local AI and Gemini, judging the same stocks. Only the local AI&apos;s answer is used to trade.</li>
                             <li><b>News events:</b> 3 years of headlines sorted by type (earnings, upgrades, lawsuits…), raw material for news-based ideas.</li>
@@ -144,6 +146,33 @@ export default function LabPage() {
                         className={`px-4 py-2 rounded-lg text-sm ${tab === t ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'}`}>{t}</button>
                 ))}
             </div>
+
+            {tab === 'Daily tips' && (
+                <div className="space-y-4">
+                    <div className={card}>
+                        <p className="text-sm text-slate-700 dark:text-slate-300">
+                            <b>In plain words:</b> every evening (about 6:30 PM CT) the Lab writes a short note from our own data: the market&apos;s mood,
+                            the bot&apos;s top-scored stocks, whether its score is still working, news on stocks we hold, the options market, and one lesson from past tests.
+                            It&apos;s information to help you understand the day. <b>It doesn&apos;t place trades or change the bot.</b>
+                        </p>
+                        {(data.tips || []).length > 1 && (
+                            <div className="flex flex-wrap gap-2 mt-3">
+                                {(data.tips || []).map((t: any, i: number) => (
+                                    <button key={t.day} onClick={() => setTipDay(i)}
+                                        className={`px-3 py-1 rounded-lg text-xs ${tipDay === i ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'}`}>{day(t.day)}</button>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                    {!(data.tips || []).length && <div className={`${card} text-sm text-slate-500`}>No tips yet. The first note is written this evening.</div>}
+                    {(data.tips?.[tipDay]?.tips || []).map((t: any, i: number) => (
+                        <div key={i} className={card}>
+                            <div className="font-semibold text-slate-900 dark:text-white">{t.icon} {t.title}</div>
+                            <p className="mt-1 text-sm text-slate-700 dark:text-slate-300">{t.text}</p>
+                        </div>
+                    ))}
+                </div>
+            )}
 
             {tab === 'Ideas' && (
                 <div className={card}>

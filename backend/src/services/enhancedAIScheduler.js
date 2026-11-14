@@ -1701,6 +1701,8 @@ function startScheduler() {
         runWeeklyResearchAgent();          // Saturday 12:00 ET: Gemini writes new ideas into the lab queue from the week + lab memory
         runWeeklyResearchLab();            // Saturday 13:00 ET: test every queued idea in the research lab (report only)
         runDailyMistakeReview();           // Weekdays 18:30 ET: label today's losses + missed winners, feed repeats to the agent
+        runDailyNewsLabelling();           // Daily 19:00 ET: sort new headlines into event types (rules, then Gemini ≤ $1/day)
+        runDailyLabTips();                 // Daily 19:30 ET: plain-English Lab tips from the day's data (rules only, free)
         runWeeklyAccountability();         // Friday 16:20 ET: what the app cost to run vs what live accounts gained
         runDailyPredictionCheck();         // Weekdays 08:00 ET: does the nightly score still predict 5-day returns?
         runWeeklyPortfolioLab();           // Saturday 13:30 ET: slots / sizing / exits replayed on real nightly scores
@@ -1856,6 +1858,35 @@ function runWeeklyResearchLab() {
     _researchLabRanDate = etDate;
     require('./researchLabService').runWeekly().catch(err =>
         console.error('[ResearchLab] Weekly run error:', err.message));
+}
+
+function _etParts() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit'
+    }).formatToParts(new Date());
+    const get = t => parts.find(p => p.type === t).value;
+    return { date: `${get('year')}-${get('month')}-${get('day')}`, weekday: get('weekday'), hour: parseInt(get('hour'), 10), minute: parseInt(get('minute'), 10) };
+}
+
+// Daily 19:00 ET — keep news_events current (it was a one-time backfill that stopped 11-07).
+let _newsLabelRanDate = null;
+function runDailyNewsLabelling() {
+    const et = _etParts();
+    if (et.hour !== 19 || _newsLabelRanDate === et.date) return;
+    _newsLabelRanDate = et.date;
+    require('./newsEventService').runDaily().catch(err =>
+        console.error('[NewsEvents] Daily labelling error:', err.message));
+}
+
+// Daily 19:30 ET — Lab tips: plain-English notes from the day's data, shown on the Lab page.
+let _labTipsRanDate = null;
+function runDailyLabTips() {
+    const et = _etParts();
+    if (et.hour !== 19 || et.minute < 30 || _labTipsRanDate === et.date) return;
+    _labTipsRanDate = et.date;
+    require('./labTipsService').runDaily().catch(err =>
+        console.error('[LabTips] Daily run error:', err.message));
 }
 
 // Weekdays 18:30 ET — daily mistake review: Gemini labels recent losing trades and rejected

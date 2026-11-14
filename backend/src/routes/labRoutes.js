@@ -42,7 +42,7 @@ function ivSummary(rows) {
 }
 
 router.get('/summary', async (req, res) => {
-    const [ideas, shadowDaily, shadowByVerdict, shadowMatrix, newsTypes, newsRange, spendDaily, spendByService, subs, ivRows] = await Promise.all([
+    const [ideas, shadowDaily, shadowByVerdict, shadowMatrix, newsTypes, newsRange, spendDaily, spendByService, subs, ivRows, tips] = await Promise.all([
         safe(query(`SELECT id, name, family, idea, source, status, result, created_at, tested_at
                     FROM research_hypotheses ORDER BY COALESCE(tested_at, created_at) DESC, id DESC`), []),
         // Per day: checks, how many each model answered, agreement where both answered.
@@ -81,9 +81,11 @@ router.get('/summary', async (req, res) => {
         // Options IV: last 180 days of the daily ATM implied-volatility snapshot (optionsIncomeService).
         safe(query(`SELECT symbol, d::text AS d, stock_price::float AS price, atm_iv::float AS iv, dte
                     FROM options_iv_history WHERE d > CURRENT_DATE - 180 ORDER BY symbol, d`), []),
+        // Daily plain-English tips (labTipsService), newest first.
+        safe(query(`SELECT day::text AS day, tips, created_at FROM lab_tips ORDER BY day DESC LIMIT 7`), []),
     ]);
     res.json({ ideas, shadow: { daily: shadowDaily, byVerdict: shadowByVerdict, matrix: shadowMatrix },
-               news: { types: newsTypes, range: newsRange[0] || {} }, spend: { daily: spendDaily, byService: spendByService, subscriptions: subs }, iv: ivSummary(ivRows) });
+               news: { types: newsTypes, range: newsRange[0] || {} }, spend: { daily: spendDaily, byService: spendByService, subscriptions: subs }, iv: ivSummary(ivRows), tips });
 });
 
 module.exports = router;

@@ -206,4 +206,18 @@ async function runGeminiPass({ budgetUsd = 25, batch = 100, concurrency = 4, lim
     return { spentUsd: +spent.toFixed(2), classified, calls, stoppedBy };
 }
 
-module.exports = { EVENT_TYPES, classifyRule, ensureTable, runRulePass, runGeminiPass, parseGeminiReply, _prompt };
+/**
+ * Daily top-up (2026-11-14): label headlines that arrived since the last run, so lab news ideas
+ * can use recent months. Rules first (free), Gemini for the rest, capped per day.
+ */
+const DAILY_BUDGET_USD = Number(process.env.NEWS_EVENTS_DAILY_BUDGET_USD || 1);
+async function runDaily({ sinceDays = 14, budgetUsd = DAILY_BUDGET_USD } = {}) {
+    const since = new Date(Date.now() - sinceDays * 86400000).toISOString().slice(0, 10);
+    const rules = await runRulePass({ since });
+    const ruled = Object.values(rules).reduce((s, n) => s + n, 0);
+    const gem = process.env.GEMINI_API_KEY ? await runGeminiPass({ budgetUsd, concurrency: 2 }) : { stoppedBy: 'no key', classified: 0, spentUsd: 0 };
+    logger.info('[NewsEvents] Daily labelling', { since, newHeadlines: ruled, unclassifiedAfterRules: rules.unclassified || 0, ...gem });
+    return { since, newHeadlines: ruled, rules, gemini: gem };
+}
+
+module.exports = { EVENT_TYPES, classifyRule, ensureTable, runRulePass, runGeminiPass, runDaily, parseGeminiReply, _prompt };

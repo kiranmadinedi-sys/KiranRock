@@ -92,6 +92,11 @@ async function ensureTable() {
         ADD COLUMN IF NOT EXISTS exit_ask NUMERIC,
         ADD COLUMN IF NOT EXISTS exit_stock_price NUMERIC,
         ADD COLUMN IF NOT EXISTS exit_quote_at TIMESTAMPTZ`);
+    // Worst point while open (2026-11-14, record-only for the Nov 21 review): with no stop, the
+    // deepest unrealised loss and the price behind it must be visible. Never drives an exit.
+    await query(`ALTER TABLE options_income_trades
+        ADD COLUMN IF NOT EXISTS max_ask NUMERIC,
+        ADD COLUMN IF NOT EXISTS max_ask_at TIMESTAMPTZ`);
     // Daily at-the-money implied volatility (2026-11-11) so IV rank has a history when spreads come.
     await query(`CREATE TABLE IF NOT EXISTS options_iv_history (
         symbol TEXT NOT NULL, d DATE NOT NULL, stock_price NUMERIC, atm_iv NUMERIC,
@@ -340,6 +345,8 @@ async function runManagement(userId, now = new Date()) {
             }).catch(() => ({ data: {} }))).data?.snapshots?.[t.contract];
             const ask = s?.latestQuote?.ap;
             if (!(ask > 0)) continue;
+            await query(`UPDATE options_income_trades SET max_ask = $2, max_ask_at = NOW() WHERE id = $1 AND (max_ask IS NULL OR max_ask < $2)`,
+                [t.id, ask]).catch(() => {});
             const entry = Number(t.entry_premium);
             const reason = ask <= entry * CFG.takeProfitFrac ? 'take profit (50%)'
                 : CFG.stopMultiple && ask >= entry * CFG.stopMultiple ? `stop (${CFG.stopMultiple}× premium)`

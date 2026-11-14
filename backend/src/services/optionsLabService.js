@@ -27,7 +27,10 @@ const { nwTStat, normCdf, bhQ } = require('./researchLabService');
 const DATA = 'https://data.alpaca.markets';
 const TRADING = (process.env.ALPACA_BASE_URL || 'https://paper-api.alpaca.markets/v2').replace(/\/v2\/?$/, '');
 const HOLDOUT_START = '2025-07-01';
-const HAIRCUT = 0.05;          // 5% of the option price each way, stand-in for the unseen spread
+// 5% of the OPTION PRICE each way (sell at close × 0.95, buy back at close × 1.05), not of the
+// contract value or collateral. Real spreads on our puts (2026-11-14) ran 5-50% of mid (median ~16%,
+// i.e. ~8% each way), so on thin contracts this is optimistic: real results would be lower.
+const HAIRCUT = 0.05;
 const FEE_PER_SHARE = 0.0005;  // ~$0.05 regulatory fees per contract per side
 const RF = 0.04;               // T-bill rate for the cash the collateral could have earned
 const ENTRY_DTE = [25, 45];    // monthly expiry inside this window

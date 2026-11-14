@@ -96,7 +96,9 @@ async function ensureTable() {
     // deepest unrealised loss and the price behind it must be visible. Never drives an exit.
     await query(`ALTER TABLE options_income_trades
         ADD COLUMN IF NOT EXISTS max_ask NUMERIC,
-        ADD COLUMN IF NOT EXISTS max_ask_at TIMESTAMPTZ`);
+        ADD COLUMN IF NOT EXISTS max_ask_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS max_mid NUMERIC,
+        ADD COLUMN IF NOT EXISTS max_mid_at TIMESTAMPTZ`);
     // Daily at-the-money implied volatility (2026-11-11) so IV rank has a history when spreads come.
     await query(`CREATE TABLE IF NOT EXISTS options_iv_history (
         symbol TEXT NOT NULL, d DATE NOT NULL, stock_price NUMERIC, atm_iv NUMERIC,
@@ -347,6 +349,13 @@ async function runManagement(userId, now = new Date()) {
             if (!(ask > 0)) continue;
             await query(`UPDATE options_income_trades SET max_ask = $2, max_ask_at = NOW() WHERE id = $1 AND (max_ask IS NULL OR max_ask < $2)`,
                 [t.id, ask]).catch(() => {});
+            // The ask alone overstates the loss when the spread is wide (5-50% on our puts, 2026-11-14);
+            // the mid of a two-sided quote is the fairer worst mark. Record-only.
+            const bidNow = s?.latestQuote?.bp;
+            if (bidNow > 0) {
+                await query(`UPDATE options_income_trades SET max_mid = $2, max_mid_at = NOW() WHERE id = $1 AND (max_mid IS NULL OR max_mid < $2)`,
+                    [t.id, (bidNow + ask) / 2]).catch(() => {});
+            }
             const entry = Number(t.entry_premium);
             const reason = ask <= entry * CFG.takeProfitFrac ? 'take profit (50%)'
                 : CFG.stopMultiple && ask >= entry * CFG.stopMultiple ? `stop (${CFG.stopMultiple}× premium)`

@@ -1787,8 +1787,13 @@ async function analyzeStockWithAI(symbol, vixLevel, yahooFinanceInstance = null,
         _stepTimes.pulseMs = Date.now() - _tPulseStart;
 
         // PROPHET — earnings direction forecast (only fires 15-45 days before earnings)
+        // 2026-11-14: off in the nightly scan (PROPHET_IN_SCAN=true re-enables). Study of 166 scan
+        // forecasts with known results: 95% "IN_LINE"; its MISS calls actually beat 57% of the time
+        // (base rate 54%), and over 3 weeks it moved only 10 of 39,165 scan rows across the 75 line.
+        // It was the scan's only regular 27B use: every call reloaded ~17 GB and took free RAM to ~0.6 GB.
         const _tProphetStart = Date.now();
-        const prophetResult = await prophetService.forecastEarnings(symbol, daysToEarnings, headlines, fundamentals, { fast: liveMode }).catch(() => null);
+        const prophetResult = (!liveMode && process.env.PROPHET_IN_SCAN !== 'true') ? null
+            : await prophetService.forecastEarnings(symbol, daysToEarnings, headlines, fundamentals, { fast: liveMode }).catch(() => null);
         _stepTimes.prophetMs = Date.now() - _tProphetStart;
 
         // ORACLE patterns — synchronous, uses already-fetched OHLCV

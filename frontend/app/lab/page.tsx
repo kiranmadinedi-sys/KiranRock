@@ -26,6 +26,20 @@ function Stat({ label, value, sub }: { label: string; value: string; sub?: strin
     );
 }
 
+/** Beginner wording for one tested idea, from its stored result. */
+function plainResult(i: any): string {
+    const r = i.result || {};
+    if (i.status === 'queued') return 'Waiting to be tested (next Saturday run).';
+    if (i.status === 'error') return 'The test could not run; nothing was learned.';
+    if (i.status === 'pass') return 'Beat the market in both the old and the recent test. Next step: a trial in the practice (paper) account. Never live without your approval.';
+    const tr = r.train?.edgePp, ho = r.holdout?.edgePp;
+    if (tr == null) return 'Too few past examples to judge.';
+    if (tr <= 0 && (ho == null || ho <= 0)) return 'Did worse than simply buying any stock that day. Not useful.';
+    if (tr > 0 && ho != null && ho <= 0) return 'Looked good in older years, but stopped working recently. Probably luck.';
+    if (tr > 0 && (r.train?.t ?? 0) < 2.5) return 'Slightly better than average, but too small to rule out luck.';
+    return 'Close, but missed at least one check (recent months or too many losing years).';
+}
+
 /** Small IV line for one symbol; one dot per day until there's enough for a line. */
 function IvChart({ history }: { history: { d: string; iv: number }[] }) {
     const pts = history.filter(h => h.iv != null);
@@ -87,6 +101,36 @@ export default function LabPage() {
                 </p>
             </div>
 
+            <details open className={`${card} text-sm text-slate-700 dark:text-slate-300`}>
+                <summary className="cursor-pointer font-semibold text-slate-900 dark:text-white">New here? How to read the Lab (2-minute guide)</summary>
+                <div className="mt-3 space-y-3">
+                    <p><b>What the Lab is:</b> a testing room for trading ideas. It does <b>not</b> predict which stock goes up tomorrow; the daily stock picks are on the Dashboard.
+                        An &ldquo;idea&rdquo; is a shortcut such as <i>&ldquo;when a stock falls 5 days in a row, buy it&rdquo;</i>. The Lab replays about 3 years of real prices to see what would have happened if we had followed it every time.</p>
+                    <p><b>How an idea passes:</b> it must beat simply buying <i>any</i> stock on the same days, first on older years (2023 to mid-2025),
+                        and then again on recent months it was never tuned on. Doing well only once usually means luck, so both must agree.</p>
+                    <p><b>Why most ideas fail, and why that&apos;s good:</b> beating the market is hard, and most shortcuts that sound clever don&apos;t survive an honest test.
+                        Every &ldquo;fail&rdquo; is a bad idea stopped before it cost real money. A &ldquo;pass&rdquo; only earns a trial with practice money (paper account); real accounts change only with your approval.</p>
+                    <div>
+                        <b>What happens every Saturday (Central time):</b>
+                        <ul className="list-disc ml-5 mt-1 space-y-0.5">
+                            <li>9 AM: checks which parts of the bot&apos;s stock score really predicted this week&apos;s moves</li>
+                            <li>11 AM: Gemini (AI) reads the week&apos;s results and past Lab lessons, then writes new ideas</li>
+                            <li>12 PM: every new idea is tested; results appear in the <b>Ideas</b> tab</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <b>The tabs in one line each:</b>
+                        <ul className="list-disc ml-5 mt-1 space-y-0.5">
+                            <li><b>Ideas:</b> every idea tested, with the result in plain words.</li>
+                            <li><b>ORACLE shadow:</b> a contest between our free local AI and Gemini, judging the same stocks. Only the local AI&apos;s answer is used to trade.</li>
+                            <li><b>News events:</b> 3 years of headlines sorted by type (earnings, upgrades, lawsuits…), raw material for news-based ideas.</li>
+                            <li><b>Options IV:</b> how big a price swing the options market expects for each stock (higher = more nervous).</li>
+                            <li><b>AI spend:</b> what the paid AI (Gemini) has cost, by feature and by day.</li>
+                        </ul>
+                    </div>
+                </div>
+            </details>
+
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                 <Stat label="Lab ideas tested" value={`${tested}`} sub={`${passed} passed · ${ideas.length - tested} waiting`} />
                 <Stat label="ORACLE shadow checks" value={num(shTot.checks)} sub={shTot.both ? `agree ${Math.round(shTot.agree / shTot.both * 100)}% where both answered` : 'no paired answers yet'} />
@@ -104,28 +148,32 @@ export default function LabPage() {
             {tab === 'Ideas' && (
                 <div className={card}>
                     <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">
-                        Every idea, tested on about 3 years of prices with a hold-out period. The bar: train edge ≥ 0.3 pp with t ≥ 2.5, hold-out edge ≥ 0.2 pp with t ≥ 1.5.
-                        Runs Saturdays at 1 PM ET; the research agent proposes new ideas the same morning. Click a row for details.
+                        <b>In plain words</b> is the quick answer. For the numbers: <b>Old years</b> and <b>Recent months</b> show how much better (+) or worse (−) each trade did
+                        than buying any stock that day, in percent; &ldquo;t&rdquo; is how sure we are it isn&apos;t luck (2.5 or more is convincing).
+                        To pass: old years +0.3% with t 2.5 or more, recent months +0.2% with t 1.5 or more. <b>From</b>: starter = first batch, agent = written by Gemini, manual = you or me.
+                        Click a row for details.
                     </p>
                     <div className="overflow-x-auto"><table className="w-full text-sm">
-                        <thead><tr>{['Idea', 'Family', 'From', 'Result', 'Train edge', 'Hold-out edge', 'Trades', 'Tested'].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
+                        <thead><tr>{['Idea', 'Result', 'In plain words', 'Old years (to Jun 2025)', 'Recent months', 'Times it fired', 'From', 'Tested'].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
                         <tbody>{ideas.map(i => {
                             const r = i.result || {};
                             return (
                                 <React.Fragment key={i.id}>
                                     <tr className="border-t border-slate-100 dark:border-slate-700 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700/40" onClick={() => setOpen(open === i.id ? null : i.id)}>
-                                        <td className={`${td} font-medium text-slate-900 dark:text-white`}>{i.name}</td>
-                                        <td className={td}>{i.family || '—'}</td>
-                                        <td className={td}>{i.source || '—'}</td>
+                                        <td className={`${td} font-medium text-slate-900 dark:text-white whitespace-normal min-w-[14rem]`}>{i.name}</td>
                                         <td className={td}><span className={`px-2 py-0.5 rounded-full text-xs ${i.status === 'pass' ? 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300' : i.status === 'fail' ? 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300' : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'}`}>{i.status}</span></td>
+                                        <td className={`${td} whitespace-normal min-w-[16rem]`}>{plainResult(i)}</td>
                                         <td className={td}>{r.train ? `${pct(r.train.edgePp)} (t ${r.train.t})` : '—'}</td>
                                         <td className={td}>{r.holdout ? `${pct(r.holdout.edgePp)} (t ${r.holdout.t})` : '—'}</td>
                                         <td className={td}>{num(r.trades)}</td>
+                                        <td className={td}>{i.source || '—'}</td>
                                         <td className={td}>{day(i.tested_at)}</td>
                                     </tr>
                                     {open === i.id && (
                                         <tr><td colSpan={8} className="pb-3 text-sm text-slate-600 dark:text-slate-300 whitespace-normal">
                                             <div className="mt-1"><b>Idea:</b> {i.idea || '—'}</div>
+                                            {i.family && <div className="mt-1"><b>Group:</b> {i.family}</div>}
+                                            {r.winPct != null && <div className="mt-1"><b>Winning trades:</b> {r.winPct}% of {num(r.trades)}</div>}
                                             {r.why && <div className="mt-1"><b>Why:</b> {r.why}</div>}
                                             {r.years && <div className="mt-1"><b>By year:</b> {Object.entries(r.years).map(([y, v]) => `${y} ${pct(Number(v))}`).join(' · ')}</div>}
                                         </td></tr>
@@ -140,6 +188,11 @@ export default function LabPage() {
             {tab === 'ORACLE shadow' && (
                 <div className="space-y-4">
                     <div className={card}>
+                        <p className="text-sm text-slate-700 dark:text-slate-300 mb-2">
+                            <b>In plain words:</b> before buying, the bot asks an AI &ldquo;should I trade this stock?&rdquo;. Today that&apos;s our free AI running on this PC.
+                            As a test, Gemini (paid, fast) secretly answers the same question. After 5 trading days we check whose &ldquo;trade&rdquo; picks actually went up.
+                            If Gemini proves clearly better, switching would need your approval.
+                        </p>
                         <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">
                             Gemini answers the same live candidate check as the local model, logged side by side. Gemini&apos;s answer is never used to trade.
                             &ldquo;No answer&rdquo; on the local side means the local model was busy or timed out. Local answered {num(shTot.local)} of {num(shTot.checks)}.
@@ -187,6 +240,10 @@ export default function LabPage() {
 
             {tab === 'News events' && (
                 <div className={card}>
+                    <p className="text-sm text-slate-700 dark:text-slate-300 mb-2">
+                        <b>In plain words:</b> a library of past headlines, each labelled by type. It lets the Lab test ideas like
+                        &ldquo;do stocks keep rising after an analyst upgrade?&rdquo;. On its own it doesn&apos;t make any trades.
+                    </p>
                     <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">
                         Headlines from {day(news.range?.first)} to {day(news.range?.last)}, sorted into event types so lab ideas can test them
                         (rules first, Gemini for the rest: {num(news.range?.by_gemini)} by Gemini). A one-time sort; about $24 of the Gemini spend.
@@ -204,6 +261,11 @@ export default function LabPage() {
 
             {tab === 'Options IV' && (
                 <div className={card}>
+                    <p className="text-sm text-slate-700 dark:text-slate-300 mb-2">
+                        <b>In plain words:</b> how jumpy the options market thinks each stock will be over the next month. SPY at 14% means a normal month moves it about ±4%;
+                        a stock at 80% could easily move ±23%. Selling options pays more on jumpy stocks, but they&apos;re riskier.
+                        The useful signal comes later: when a stock is much jumpier than its <i>own</i> normal (high IV rank), option sellers are being paid extra.
+                    </p>
                     <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">
                         Implied volatility: the yearly price swing the options market is pricing in, from at-the-money options about 30 days out.
                         Recorded once a day near the close for the index ETFs, the biggest option names, open puts and the put candidates.
@@ -237,6 +299,12 @@ export default function LabPage() {
 
             {tab === 'AI spend' && (
                 <div className="space-y-4">
+                    <p className="text-sm text-slate-700 dark:text-slate-300">
+                        <b>In plain words:</b> what the paid AI (Gemini) has cost. &ldquo;pulse&rdquo; = reading news for held and candidate stocks,
+                        &ldquo;news&rdquo; = the one-time sorting of 3 years of headlines, &ldquo;oracle_shadow&rdquo; = the AI contest, &ldquo;research_agent&rdquo; = Saturday idea writing,
+                        &ldquo;mistake_review&rdquo; = the daily look at losing trades, &ldquo;enquiry_chat&rdquo; = the chat page.
+                        The local AI on this PC is free and isn&apos;t listed.
+                    </p>
                     <div className={card}>
                         <h3 className="font-semibold text-slate-900 dark:text-white mb-3">By feature (all time)</h3>
                         <table className="w-full text-sm">

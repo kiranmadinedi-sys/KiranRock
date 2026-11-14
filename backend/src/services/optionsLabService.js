@@ -31,7 +31,7 @@ const HAIRCUT = 0.05;          // 5% of the option price each way, stand-in for 
 const FEE_PER_SHARE = 0.0005;  // ~$0.05 regulatory fees per contract per side
 const RF = 0.04;               // T-bill rate for the cash the collateral could have earned
 const ENTRY_DTE = [25, 45];    // monthly expiry inside this window
-const PASS = { trades: 100, dates: 40, pf: 1.15, sharpe: 1.0, fdrQ: 0.10 };
+const PASS = { trades: 100, dates: 40, pf: 1.15, sharpe: 1.0, fdrQ: 0.10, holdT: 1.0 };
 
 // ── safety guard ─────────────────────────────────────────────────────────────
 const ALLOWED = [`${DATA}/v1beta1/options/bars`, `${TRADING}/v2/options/contracts`];
@@ -432,6 +432,8 @@ async function evaluate(entries) {
         if (v.train.dates + v.holdout.dates < PASS.dates) why.push(`only ${v.train.dates + v.holdout.dates} entry weeks`);
         if (!(v.train.avgExRocPct > 0)) why.push('no profit over T-bills in older data');
         if (!(v.holdout.avgExRocPct > 0)) why.push('no profit over T-bills in recent data');
+        // 2026-11-14: "recent > 0" alone let a +0.07%/trade, t 0.35 holdout pass; the recent period must hold up on its own
+        else if (!(v.holdout.t >= PASS.holdT)) why.push(`recent profit too thin to trust (t ${v.holdout.t}, needs ${PASS.holdT})`);
         if (!(v.profitFactor > PASS.pf)) why.push(`profit factor ${v.profitFactor} (needs >${PASS.pf})`);
         if (!(v.sharpe > PASS.sharpe)) why.push(`Sharpe ${v.sharpe} (needs >${PASS.sharpe})`);
         if (!(v.fdrQ <= PASS.fdrQ)) why.push(`could be luck (q ${v.fdrQ})`);

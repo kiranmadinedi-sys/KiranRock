@@ -29,6 +29,9 @@ async function _memory() {
             name: h.name, family: h.family, idea: h.idea, spec: h.spec, status: h.status,
             ...(h.status === 'queued' ? {} : {
                 trainEdgePp: res.train?.edgePp, trainT: res.train?.t, holdoutEdgePp: res.holdout?.edgePp, holdoutT: res.holdout?.t,
+                // 2026-11-14 stricter grading: after-cost edge, vs SPY, false-discovery q
+                trainNetPp: res.train?.netPp, holdoutNetPp: res.holdout?.netPp, holdoutVsSpyPp: res.holdout?.vsSpyPp, fdrQ: res.fdrQ,
+                regimes: res.regimes, horizons: res.horizons,
                 trades: res.trades, years: res.years, why: res.why,
             }),
         };

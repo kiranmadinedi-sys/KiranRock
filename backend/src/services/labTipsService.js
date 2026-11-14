@@ -172,12 +172,13 @@ async function mistakesTip() {
 
 /** One honest lesson from the Lab, rotating through tested ideas day by day. */
 async function labLessonTip(day) {
-    const r = await query(`SELECT name, status, result FROM research_hypotheses WHERE status IN ('pass', 'fail') ORDER BY id`);
+    const r = await query(`SELECT name, status, result FROM research_hypotheses WHERE status IN ('pass', 'promising', 'fail') ORDER BY id`);
     if (!r.rows.length) return null;
     const i = Math.floor(new Date(`${day}T12:00:00Z`).getTime() / 86400000) % r.rows.length;
     const x = r.rows[i], res = x.result || {};
-    const tr = res.train?.edgePp, ho = res.holdout?.edgePp;
-    const how = x.status === 'pass' ? 'It beat the market in both tests and is in a practice-money trial.'
+    const tr = res.train?.netPp ?? res.train?.edgePp, ho = res.holdout?.netPp ?? res.holdout?.edgePp;
+    const how = x.status === 'pass' ? 'It beat the market in both tests, after costs, and is in a practice-money trial.'
+        : x.status === 'promising' ? `It made money after costs in older years (${fmtPct(tr, 2)}) and recent months (${fmtPct(ho, 2)}), but the proof isn't strong enough yet. We re-test it every Saturday and don't trade it.`
         : tr != null && tr <= 0 ? `On average it did worse than buying any stock (${fmtPct(tr, 2)} per trade), so we don't use it.`
         : tr != null && ho != null && ho <= 0 ? `It looked good in older years (${fmtPct(tr, 2)}) but failed in recent months (${fmtPct(ho, 2)}), so it was probably luck.`
         : 'Its advantage was too small to rule out luck, so we don\'t use it.';

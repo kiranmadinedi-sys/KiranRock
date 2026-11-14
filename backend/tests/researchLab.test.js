@@ -123,3 +123,37 @@ describe('news events in specs', () => {
         expect(() => lab.validateSpec({ when: [], event: 'noise' })).toThrow(/unknown event/);
     });
 });
+
+describe('stricter grading (2026-11-14)', () => {
+    test('bhQ matches hand-computed Benjamini-Hochberg values', () => {
+        const q = lab.bhQ([0.01, 0.04, 0.03, 0.20]);
+        expect(q[0]).toBeCloseTo(0.04);   // 0.01*4/1
+        expect(q[2]).toBeCloseTo(0.0533, 3); // min(0.03*4/2, 0.04*4/3)
+        expect(q[1]).toBeCloseTo(0.0533, 3);
+        expect(q[3]).toBeCloseTo(0.20);
+    });
+    test('normCdf is close to the standard table', () => {
+        expect(lab.normCdf(0)).toBeCloseTo(0.5, 5);
+        expect(lab.normCdf(1.96)).toBeCloseTo(0.975, 3);
+        expect(lab.normCdf(-2.5)).toBeCloseTo(0.0062, 3);
+    });
+    test('Newey-West shrinks t when overlapping holds repeat the same move', () => {
+        // the same value on 5 consecutive days, then a new value: 5-day holds overlapping
+        const pts = Array.from({ length: 200 }, (_, i) => ({ i, v: 0.3 + (Math.floor(i / 5) % 2 ? 1 : -1) }));
+        expect(Math.abs(lab.nwTStat(pts, 5))).toBeLessThan(Math.abs(lab.nwTStat(pts, 1)));
+    });
+    test('applyFdr turns a lone lucky pass among many tests into promising', () => {
+        const res = [{ verdict: 'pass', train: { t: 2.6 } }, ...Array.from({ length: 40 }, () => ({ verdict: 'fail', train: { t: 0 } }))];
+        const g = lab.applyFdr(res);
+        expect(g[0].verdict).toBe('promising');
+        expect(g[0].why).toMatch(/could be luck/);
+        expect(g[0].testedIdeas).toBe(41);
+    });
+    test('applyFdr keeps a strong pass', () => {
+        const g = lab.applyFdr([{ verdict: 'pass', train: { t: 6 } }, { verdict: 'fail', train: { t: 0 } }]);
+        expect(g[0].verdict).toBe('pass');
+    });
+    test('worstStretch: drawdown and longest losing run', () => {
+        expect(lab.worstStretch([1, -0.5, -0.7, 2, -0.1])).toEqual({ maxDrawdownPp: 1.2, longestLosingDates: 2 });
+    });
+});

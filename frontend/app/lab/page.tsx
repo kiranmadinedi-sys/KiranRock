@@ -31,8 +31,9 @@ function plainResult(i: any): string {
     const r = i.result || {};
     if (i.status === 'queued') return 'Waiting to be tested (next Saturday run).';
     if (i.status === 'error') return 'The test could not run; nothing was learned.';
-    if (i.status === 'pass') return 'Beat the market in both the old and the recent test. Next step: a trial in the practice (paper) account. Never live without your approval.';
-    const tr = r.train?.edgePp, ho = r.holdout?.edgePp;
+    if (i.status === 'pass') return 'Beat the market in both the old and the recent test, after trading costs. Next step: a trial in the practice (paper) account. Never live without your approval.';
+    if (i.status === 'promising') return 'Made money after costs in both tests, but the proof is not strong enough yet. Kept on the list and re-tested every Saturday. Not traded.';
+    const tr = r.train?.netPp ?? r.train?.edgePp, ho = r.holdout?.netPp ?? r.holdout?.edgePp;
     if (tr == null) return 'Too few past examples to judge.';
     if (tr <= 0 && (ho == null || ho <= 0)) return 'Did worse than simply buying any stock that day. Not useful.';
     if (tr > 0 && ho != null && ho <= 0) return 'Looked good in older years, but stopped working recently. Probably luck.';
@@ -85,7 +86,9 @@ export default function LabPage() {
 
     const ideas: any[] = data.ideas || [];
     const passed = ideas.filter(i => i.status === 'pass').length;
-    const tested = ideas.filter(i => i.status === 'pass' || i.status === 'fail').length;
+    const tested = ideas.filter(i => ['pass', 'promising', 'fail'].includes(i.status)).length;
+    const promising = ideas.filter(i => i.status === 'promising').length;
+    const net = (p: any) => (p?.netPp ?? p?.edgePp);
     const sh = data.shadow || {};
     const shTot = (sh.daily || []).reduce((a: any, r: any) => ({
         checks: a.checks + r.checks, both: a.both + r.both, agree: a.agree + r.agree, usd: a.usd + r.gemini_usd, local: a.local + r.local_answered,
@@ -108,7 +111,12 @@ export default function LabPage() {
                     <p><b>What the Lab is:</b> a testing room for trading ideas. It does <b>not</b> predict which stock goes up tomorrow; the daily stock picks are on the Dashboard.
                         An &ldquo;idea&rdquo; is a shortcut such as <i>&ldquo;when a stock falls 5 days in a row, buy it&rdquo;</i>. The Lab replays about 3 years of real prices to see what would have happened if we had followed it every time.</p>
                     <p><b>How an idea passes:</b> it must beat simply buying <i>any</i> stock on the same days, first on older years (2023 to mid-2025),
-                        and then again on recent months it was never tuned on. Doing well only once usually means luck, so both must agree.</p>
+                        and then again on recent months it was never tuned on. Doing well only once usually means luck, so both must agree.
+                        Every result already has trading costs taken off (0.15% per trade), the recent months must also beat simply holding the S&amp;P 500 (SPY),
+                        and because we test many ideas, a &ldquo;luck check&rdquo; makes sure a winner isn&apos;t just the lucky one out of many.</p>
+                    <p><b>Three results:</b> <span className="text-green-700 dark:text-green-400 font-semibold">pass</span> (strong proof, goes to a practice-money trial),
+                        <span className="text-amber-700 dark:text-amber-400 font-semibold"> promising</span> (made money in both tests but proof not strong enough yet; re-tested every Saturday, never traded),
+                        <span className="text-red-700 dark:text-red-400 font-semibold"> fail</span> (no real advantage).</p>
                     <p><b>Why most ideas fail, and why that&apos;s good:</b> beating the market is hard, and most shortcuts that sound clever don&apos;t survive an honest test.
                         Every &ldquo;fail&rdquo; is a bad idea stopped before it cost real money. A &ldquo;pass&rdquo; only earns a trial with practice money (paper account); real accounts change only with your approval.</p>
                     <div>
@@ -134,7 +142,7 @@ export default function LabPage() {
             </details>
 
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                <Stat label="Lab ideas tested" value={`${tested}`} sub={`${passed} passed · ${ideas.length - tested} waiting`} />
+                <Stat label="Lab ideas tested" value={`${tested}`} sub={`${passed} passed · ${promising} promising · ${ideas.length - tested} waiting`} />
                 <Stat label="ORACLE shadow checks" value={num(shTot.checks)} sub={shTot.both ? `agree ${Math.round(shTot.agree / shTot.both * 100)}% where both answered` : 'no paired answers yet'} />
                 <Stat label="News headlines sorted" value={num(news.range?.n)} sub={`${day(news.range?.first)} → ${day(news.range?.last)}`} />
                 <Stat label="Gemini spend (all time)" value={usd(spendTotal)} sub="metered calls, from the cost ledger" />
@@ -178,31 +186,39 @@ export default function LabPage() {
                 <div className={card}>
                     <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">
                         <b>In plain words</b> is the quick answer. For the numbers: <b>Old years</b> and <b>Recent months</b> show how much better (+) or worse (−) each trade did
-                        than buying any stock that day, in percent; &ldquo;t&rdquo; is how sure we are it isn&apos;t luck (2.5 or more is convincing).
-                        To pass: old years +0.3% with t 2.5 or more, recent months +0.2% with t 1.5 or more. <b>From</b>: starter = first batch, agent = written by Gemini, manual = you or me.
+                        than buying any stock that day, in percent, <b>after trading costs</b>; &ldquo;t&rdquo; is how sure we are it isn&apos;t luck (2.5 or more is convincing).
+                        <b> vs S&amp;P 500</b> compares the recent months with simply holding SPY. <b>Luck check</b>: below 0.10 means it is very unlikely to be a lucky fluke among all the ideas we tried.
+                        To pass: old years +0.3% with t 2.5+, recent months +0.2% with t 1.5+, beats SPY, luck check 0.10 or less. <b>From</b>: starter = first batch, agent = written by Gemini, manual = you or me.
                         Click a row for details.
                     </p>
                     <div className="overflow-x-auto"><table className="w-full text-sm">
-                        <thead><tr>{['Idea', 'Result', 'In plain words', 'Old years (to Jun 2025)', 'Recent months', 'Times it fired', 'From', 'Tested'].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
-                        <tbody>{ideas.map(i => {
+                        <thead><tr>{['Idea', 'Result', 'In plain words', 'Old years (to Jun 2025)', 'Recent months', 'vs S&P 500', 'Luck check', 'Times it fired', 'From', 'Tested'].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
+                        <tbody>{[...ideas].sort((a, b) => ['pass', 'promising', 'queued'].indexOf(b.status) - ['pass', 'promising', 'queued'].indexOf(a.status)).map(i => {
                             const r = i.result || {};
                             return (
                                 <React.Fragment key={i.id}>
                                     <tr className="border-t border-slate-100 dark:border-slate-700 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700/40" onClick={() => setOpen(open === i.id ? null : i.id)}>
                                         <td className={`${td} font-medium text-slate-900 dark:text-white whitespace-normal min-w-[14rem]`}>{i.name}</td>
-                                        <td className={td}><span className={`px-2 py-0.5 rounded-full text-xs ${i.status === 'pass' ? 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300' : i.status === 'fail' ? 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300' : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'}`}>{i.status}</span></td>
+                                        <td className={td}><span className={`px-2 py-0.5 rounded-full text-xs ${i.status === 'pass' ? 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300' : i.status === 'promising' ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300' : i.status === 'fail' ? 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300' : 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-300'}`}>{i.status}</span></td>
                                         <td className={`${td} whitespace-normal min-w-[16rem]`}>{plainResult(i)}</td>
-                                        <td className={td}>{r.train ? `${pct(r.train.edgePp)} (t ${r.train.t})` : '—'}</td>
-                                        <td className={td}>{r.holdout ? `${pct(r.holdout.edgePp)} (t ${r.holdout.t})` : '—'}</td>
+                                        <td className={td}>{r.train ? `${pct(net(r.train))} (t ${r.train.t})` : '—'}</td>
+                                        <td className={td}>{r.holdout ? `${pct(net(r.holdout))} (t ${r.holdout.t})` : '—'}</td>
+                                        <td className={td}>{r.holdout?.vsSpyPp != null ? pct(r.holdout.vsSpyPp) : '—'}</td>
+                                        <td className={td}>{r.fdrQ != null ? r.fdrQ.toFixed(2) : '—'}</td>
                                         <td className={td}>{num(r.trades)}</td>
                                         <td className={td}>{i.source || '—'}</td>
                                         <td className={td}>{day(i.tested_at)}</td>
                                     </tr>
                                     {open === i.id && (
-                                        <tr><td colSpan={8} className="pb-3 text-sm text-slate-600 dark:text-slate-300 whitespace-normal">
+                                        <tr><td colSpan={10} className="pb-3 text-sm text-slate-600 dark:text-slate-300 whitespace-normal">
                                             <div className="mt-1"><b>Idea:</b> {i.idea || '—'}</div>
                                             {i.family && <div className="mt-1"><b>Group:</b> {i.family}</div>}
                                             {r.winPct != null && <div className="mt-1"><b>Winning trades:</b> {r.winPct}% of {num(r.trades)}</div>}
+                                            {r.profitFactor != null && <div className="mt-1"><b>Profit factor:</b> {r.profitFactor} (money won ÷ money lost; above 1 = more won than lost, before comparing with the market)
+                                                {r.avgWinPct != null && <> · average win {pct(r.avgWinPct)}, average loss {pct(r.avgLossPct)}</>}</div>}
+                                            {r.maxDrawdownPp != null && <div className="mt-1"><b>Worst losing stretch vs the market:</b> about −{r.maxDrawdownPp}% · longest run of losing days: {r.longestLosingDates}</div>}
+                                            {r.regimes && <div className="mt-1"><b>When the market was rising / falling</b> (S&amp;P 500 above / below its 200-day average): {r.regimes.spyAbove200 ? pct(r.regimes.spyAbove200.netPp) : '—'} / {r.regimes.spyBelow200 ? pct(r.regimes.spyBelow200.netPp) : '—'}</div>}
+                                            {r.horizons && <div className="mt-1"><b>Holding longer or shorter</b> (recent months, after costs): {Object.entries(r.horizons).map(([h, v]: [string, any]) => `${h} days ${v.holdoutNetPp != null ? pct(v.holdoutNetPp) : '—'}`).join(' · ')}</div>}
                                             {r.why && <div className="mt-1"><b>Why:</b> {r.why}</div>}
                                             {r.years && <div className="mt-1"><b>By year:</b> {Object.entries(r.years).map(([y, v]) => `${y} ${pct(Number(v))}`).join(' · ')}</div>}
                                         </td></tr>

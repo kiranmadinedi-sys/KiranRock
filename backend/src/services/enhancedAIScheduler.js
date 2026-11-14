@@ -1857,7 +1857,14 @@ function runWeeklyResearchLab() {
     if (_researchLabRanDate === etDate) return;
     _researchLabRanDate = etDate;
     require('./researchLabService').runWeekly().catch(err =>
-        console.error('[ResearchLab] Weekly run error:', err.message));
+        console.error('[ResearchLab] Weekly run error:', err.message))
+        // Options lab (2026-11-14, research only): replay our own puts weekly; full CSP backtest on
+        // the first Saturday of the month (option bars are cached, so reruns fetch only new data).
+        .then(async () => {
+            const ol = require('./optionsLabService');
+            await ol.replayOwnTrades().catch(err => console.error('[OptionsLab] Own-trade replay error:', err.message));
+            if (parseInt(get('day'), 10) <= 7) await ol.runCspBacktest().catch(err => console.error('[OptionsLab] CSP backtest error:', err.message));
+        });
 }
 
 function _etParts() {

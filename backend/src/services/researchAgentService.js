@@ -95,6 +95,13 @@ RULES:
 - If mistakesLast30Days shows a repeated cause (e.g. chased_extended, filter_too_strict), at least one idea should test a rule that would have avoided it or caught the missed move.
 - Prefer ideas that are different from everything in memory. Small parameter tweaks of failed ideas waste the test budget.
 - Plenty of trades: avoid conditions so narrow they fire on fewer than ~100 days.
+- GRADING (since 2026-11-14): 0.15% round-trip cost comes off every edge; t-stats are Newey-West (overlapping holds no longer inflate them);
+  a false-discovery check runs across ALL ideas ever tested, so each extra weak idea makes passing harder for everyone; the recent period
+  must also beat SPY; a pass must survive nearby settings (hold ×0.7/×1.4, thresholds ±20%). Fewer, better-reasoned ideas beat many guesses.
+- COMBINATIONS: single news events and single price patterns have all failed so far. Prefer ideas that combine a news event with a
+  price/volume context that explains WHY the reaction should continue (e.g. event + uptrend + rising volume, event + not already extended),
+  or that build on a "promising" idea in memory with a different, economically motivated filter (not a re-tune of its numbers).
+- Use regimes/horizons in memory: if an idea only worked with SPY above (or below) its 200-day, say so and add spyAbove200 explicitly.
 - name: short snake_case, unique, ending in the hold (e.g. "_5d").
 
 PORTFOLIO RULES (optional, up to ${MAX_PORTFOLIO_IDEAS}): you may also propose changes to HOW the picks are traded — our biggest past drags were idle cash and caps blocking winners, not stock picks. A portfolio bench replays the real nightly scores since 2026-05-28 and must beat today's rules (control) in BOTH halves with drawdown ≤ 2pp worse.

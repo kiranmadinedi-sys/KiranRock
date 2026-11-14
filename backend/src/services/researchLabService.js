@@ -354,6 +354,17 @@ async function runQueued({ ids = null, batch = 300, includePromising = false } =
         ids ? [ids] : [])).rows;
     if (!rows.length) return [];
     const specs = rows.map(r => ({ id: r.id, ...validateSpec(r.spec) }));
+    const t0 = Date.now();
+    const fresh = await evaluateSpecs(specs, { batch });
+    await _addRobustness(fresh, specs, { batch });
+    return _gradeAndSave(fresh, t0);
+}
+
+/**
+ * One pass over history_bars for a list of specs ({id, when, hold, stopPct, event}).
+ * Returns Map id → result (not saved, no FDR). Shared by runQueued and the robustness check.
+ */
+async function evaluateSpecs(specs, { batch = 300 } = {}) {
     const baseKeys = [...new Set([...specs.map(s => `${s.hold}|${s.stopPct ?? ''}`), ...HORIZONS.map(h => `${h}|`)])];
     const sig = new Map(specs.map(s => [s.id, new Map()]));
     const sigH = new Map(specs.map(s => [s.id, new Map(HORIZONS.map(h => [h, new Map()]))]));
@@ -369,7 +380,6 @@ async function runQueued({ ids = null, batch = 300, includePromising = false } =
     const eventSets = await _eventDays([...new Set(specs.flatMap(s => s.event || []))], calendar, calIdx);
     const hasEvent = (sp, sym, d) => !sp.event || sp.event.some(t => eventSets.get(t).has(`${sym}|${d}`));
     const symbols = (await query(`SELECT DISTINCT symbol FROM history_bars WHERE symbol <> 'SPY' ORDER BY symbol`)).rows.map(r => r.symbol);
-    const t0 = Date.now();
     for (let s = 0; s < symbols.length; s += batch) {
         const res = await query(`SELECT symbol, d::text AS d, o, h, l, c, v::float AS v FROM history_bars WHERE symbol = ANY($1) ORDER BY symbol, d`, [symbols.slice(s, s + batch)]);
         const bySym = new Map();
@@ -412,12 +422,68 @@ async function runQueued({ ids = null, batch = 300, includePromising = false } =
         }));
         fresh.set(sp.id, result);
     }
+    return fresh;
+}
+
+/**
+ * Nearby settings for one spec, changing one thing at a time: hold ×0.7 / ×1.4 and each number
+ * in the conditions ±20% (a 0 threshold moves ±1). A real edge survives small changes.
+ */
+function neighbours(spec) {
+    const out = [];
+    for (const h of [...new Set([Math.max(1, Math.round(spec.hold * 0.7)), Math.min(60, Math.round(spec.hold * 1.4))])]) {
+        if (h !== spec.hold) out.push({ label: `hold ${h} days`, spec: { ...spec, hold: h } });
+    }
+    const nudge = (v, up) => (v === 0 ? (up ? 1 : -1) : +(v * (up ? 1.2 : 0.8)).toFixed(4));
+    spec.when.forEach(([k, op, v], i) => {
+        for (const up of [false, true]) {
+            const nv = Array.isArray(v) ? v.map(x => nudge(x, up)) : nudge(v, up);
+            const when = spec.when.map((c, j) => (j === i ? [k, op, nv] : c));
+            out.push({ label: `${k} ${op} ${JSON.stringify(nv)}`, spec: { ...spec, when } });
+        }
+    });
+    return out;
+}
+
+const ROBUST_SHARE = 0.6; // a pass needs most nearby settings positive after costs in both periods
+
+/** For ideas that look like a pass or promising, test nearby settings and attach the result. */
+async function _addRobustness(fresh, specs, { batch }) {
+    const prelim = applyFdr([...fresh.values()]);
+    const keys = [...fresh.keys()];
+    const targets = specs.filter((sp, k) => ['pass', 'promising'].includes(prelim[keys.indexOf(sp.id)]?.verdict));
+    if (!targets.length) return;
+    const nspecs = [], owner = new Map();
+    for (const sp of targets) {
+        for (const n of neighbours(sp)) {
+            const id = `n${nspecs.length}`;
+            nspecs.push({ ...n.spec, id });
+            owner.set(id, { parent: sp.id, label: n.label });
+        }
+    }
+    const res = await evaluateSpecs(nspecs, { batch });
+    for (const sp of targets) {
+        const variants = [...owner].filter(([, o]) => o.parent === sp.id).map(([id, o]) => {
+            const r = res.get(id);
+            return { label: o.label, trainNetPp: r.train.netPp, holdoutNetPp: r.holdout.netPp };
+        });
+        const ok = variants.filter(v => v.trainNetPp > 0 && v.holdoutNetPp > 0).length;
+        fresh.get(sp.id).robustness = { tested: variants.length, positiveBoth: ok, share: variants.length ? +(ok / variants.length).toFixed(2) : null, variants };
+    }
+}
+
+async function _gradeAndSave(fresh, t0) {
     // FDR across every idea ever tested (fresh results replace stored ones), then save.
     const prior = (await query(`SELECT id, result FROM research_hypotheses WHERE status NOT IN ('queued', 'error') AND result IS NOT NULL`)).rows;
     const all = new Map(prior.map(p => [p.id, p.result]));
     for (const [id, r] of fresh) all.set(id, r);
     const allIds = [...all.keys()];
-    const graded = applyFdr(allIds.map(id => all.get(id)));
+    const graded = applyFdr(allIds.map(id => all.get(id))).map(g => {
+        if (g.verdict === 'pass' && g.robustness && !(g.robustness.share >= ROBUST_SHARE)) {
+            return { ...g, verdict: 'promising', why: `fragile: only ${g.robustness.positiveBoth}/${g.robustness.tested} nearby settings stayed positive (needs ${ROBUST_SHARE * 100}%)` };
+        }
+        return g;
+    });
     const out = [];
     for (let k = 0; k < allIds.length; k++) {
         const id = allIds[k], g = graded[k];
@@ -462,5 +528,5 @@ async function runWeekly() {
 module.exports = {
     ensureTable, addHypothesis, runQueued, runWeekly, validateSpec, computeFeatures, tradeReturn, scoreIdea, matches, eventSignalDay,
     formatResult, rollingExtreme, FEATURES, PASS, HOLDOUT_START,
-    nwTStat, normCdf, bhQ, applyFdr, worstStretch, COST_PP, FDR_Q,
+    nwTStat, normCdf, bhQ, applyFdr, worstStretch, COST_PP, FDR_Q, evaluateSpecs, neighbours,
 };

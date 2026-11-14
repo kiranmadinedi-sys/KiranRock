@@ -5,7 +5,7 @@ import { getApiBaseUrl } from '../config';
 
 /** Lab (2026-11-12, admin only): research ideas, ORACLE shadow test, news events, AI spend. Read-only. */
 
-const TABS = ['Daily tips', 'Ideas', 'ORACLE shadow', 'News events', 'Options IV', 'AI spend'] as const;
+const TABS = ['Daily tips', 'Ideas', 'ORACLE shadow', 'News events', 'Options IV', 'Options lab', 'AI spend'] as const;
 type Tab = typeof TABS[number];
 
 const card = 'bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 p-5';
@@ -134,7 +134,8 @@ export default function LabPage() {
                             <li><b>Ideas:</b> every idea tested, with the result in plain words.</li>
                             <li><b>ORACLE shadow:</b> a contest between our free local AI and Gemini, judging the same stocks. Only the local AI&apos;s answer is used to trade.</li>
                             <li><b>News events:</b> 3 years of headlines sorted by type (earnings, upgrades, lawsuits…), raw material for news-based ideas.</li>
-                            <li><b>Options IV:</b> how big a price swing the options market expects for each stock (higher = more nervous).</li>
+                            <li><b>Options IV:</b> how big a price swing the options market expects for each stock (higher = more nervous), and whether that&apos;s more or less than the stock really moves.</li>
+                            <li><b>Options lab:</b> replays real past option prices to test put-selling rules, and replays our own put trades with other exit rules. Research only.</li>
                             <li><b>AI spend:</b> what the paid AI (Gemini) has cost, by feature and by day.</li>
                         </ul>
                     </div>
@@ -218,6 +219,9 @@ export default function LabPage() {
                                                 {r.avgWinPct != null && <> · average win {pct(r.avgWinPct)}, average loss {pct(r.avgLossPct)}</>}</div>}
                                             {r.maxDrawdownPp != null && <div className="mt-1"><b>Worst losing stretch vs the market:</b> about −{r.maxDrawdownPp}% · longest run of losing days: {r.longestLosingDates}</div>}
                                             {r.regimes && <div className="mt-1"><b>When the market was rising / falling</b> (S&amp;P 500 above / below its 200-day average): {r.regimes.spyAbove200 ? pct(r.regimes.spyAbove200.netPp) : '—'} / {r.regimes.spyBelow200 ? pct(r.regimes.spyBelow200.netPp) : '—'}</div>}
+                                            {r.robustness && <div className="mt-1"><b>Robustness:</b> {r.robustness.positiveBoth} of {r.robustness.tested} nearby settings still made money after costs in both tests
+                                                {' '}({r.robustness.share >= 0.6 ? 'solid: a real pattern usually survives small changes' : 'fragile: it may only work with these exact numbers'}).
+                                                <span className="text-slate-500"> {r.robustness.variants.map((v: any) => `${v.label}: ${pct(v.trainNetPp)} / ${pct(v.holdoutNetPp)}`).join(' · ')}</span></div>}
                                             {r.horizons && <div className="mt-1"><b>Holding longer or shorter</b> (recent months, after costs): {Object.entries(r.horizons).map(([h, v]: [string, any]) => `${h} days ${v.holdoutNetPp != null ? pct(v.holdoutNetPp) : '—'}`).join(' · ')}</div>}
                                             {r.why && <div className="mt-1"><b>Why:</b> {r.why}</div>}
                                             {r.years && <div className="mt-1"><b>By year:</b> {Object.entries(r.years).map(([y, v]) => `${y} ${pct(Number(v))}`).join(' · ')}</div>}
@@ -258,14 +262,23 @@ export default function LabPage() {
                     <div className="grid md:grid-cols-2 gap-4">
                         <div className={card}>
                             <h3 className="font-semibold text-slate-900 dark:text-white mb-1">Who was right?</h3>
-                            <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">Stock return over the 5 trading days after each check, by verdict. Needs 5 trading days to fill in.</p>
+                            <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
+                                What each stock did after each verdict (one count per stock per day). <b>vs S&amp;P</b> = better (+) or worse (−) than the S&amp;P 500 over the same days,
+                                so a rising market doesn&apos;t make every answer look right. <b>Best move</b> / <b>Worst dip</b> = on average, how high it went and how far it fell within 10 days:
+                                a good &ldquo;TRADE&rdquo; call should have a bigger best move and a smaller dip. Columns fill in as days pass (5, 10, then 20 trading days).
+                            </p>
                             <table className="w-full text-sm">
-                                <thead><tr>{['Model', 'Verdict', 'Checks', 'With outcome', 'Avg 5-day', 'Went up'].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
+                                <thead><tr>{['Model', 'Verdict', 'Stocks', 'With outcome', 'Avg 5-day', 'Went up', 'vs S&P 5 days', 'vs S&P 10 days', 'vs S&P 20 days', 'Best move (10 days)', 'Worst dip (10 days)'].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
                                 <tbody>{(sh.byVerdict || []).map((r: any) => (
                                     <tr key={`${r.model}-${r.verdict}`} className="border-t border-slate-100 dark:border-slate-700">
                                         <td className={td}>{r.model}</td><td className={td}>{r.verdict}</td><td className={td}>{r.n}</td>
                                         <td className={td}>{r.n_with_outcome}</td><td className={td}>{pct(r.avg_5d_pct)}</td>
                                         <td className={td}>{r.up_pct == null ? '—' : `${r.up_pct}%`}</td>
+                                        <td className={td}>{r.vs_spy_5d == null ? '—' : pct(r.vs_spy_5d)}</td>
+                                        <td className={td}>{r.vs_spy_10d == null ? '—' : pct(r.vs_spy_10d)}</td>
+                                        <td className={td}>{r.vs_spy_20d == null ? '—' : `${pct(r.vs_spy_20d)} (${r.n_20d})`}</td>
+                                        <td className={td}>{r.best_10d == null ? '—' : pct(r.best_10d)}</td>
+                                        <td className={td}>{r.worst_10d == null ? '—' : pct(r.worst_10d)}</td>
                                     </tr>))}</tbody>
                             </table>
                         </div>
@@ -311,6 +324,12 @@ export default function LabPage() {
                         a stock at 80% could easily move ±23%. Selling options pays more on jumpy stocks, but they&apos;re riskier.
                         The useful signal comes later: when a stock is much jumpier than its <i>own</i> normal (high IV rank), option sellers are being paid extra.
                     </p>
+                    <p className="text-sm text-slate-700 dark:text-slate-300 mb-2">
+                        <b>IV ÷ actual</b> compares what options <i>expect</i> with how much the stock <i>really</i> swung over the last 20 days.
+                        <span className="text-green-700 dark:text-green-400"> Green (1.2 or more)</span>: options pay for bigger swings than the stock is making, so selling is better paid.
+                        <span className="text-red-700 dark:text-red-400"> Red (below 0.9)</span>: the stock is moving more than options pay for, so selling puts there is underpaid risk.
+                        <b> IV percentile</b>: on what share of past days IV was lower than today (fills in after 20 days).
+                    </p>
                     <p className="text-sm text-slate-500 dark:text-slate-400 mb-3">
                         Implied volatility: the yearly price swing the options market is pricing in, from at-the-money options about 30 days out.
                         Recorded once a day near the close for the index ETFs, the biggest option names, open puts and the put candidates.
@@ -319,7 +338,7 @@ export default function LabPage() {
                         {' '}{data.iv?.days ? `${data.iv.days} day(s) so far, ${day(data.iv.first)} → ${day(data.iv.last)}.` : 'No snapshots yet.'} Click a row for its history.
                     </p>
                     <div className="overflow-x-auto"><table className="w-full text-sm">
-                        <thead><tr>{['Symbol', 'Price', 'IV', '≈ 1-month move', 'Change vs prior day', 'IV rank', 'Range seen', 'Days'].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
+                        <thead><tr>{['Symbol', 'Price', 'IV', '≈ 1-month move', 'Actual swings (20 days)', 'IV ÷ actual', 'Change vs prior day', 'IV rank', 'IV percentile', 'Range seen', 'Days'].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
                         <tbody>{(data.iv?.latest || []).map((r: any) => (
                             <React.Fragment key={r.symbol}>
                                 <tr className="border-t border-slate-100 dark:border-slate-700 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700/40" onClick={() => setIvOpen(ivOpen === r.symbol ? null : r.symbol)}>
@@ -327,20 +346,102 @@ export default function LabPage() {
                                     <td className={td}>{r.price == null ? '—' : `$${Number(r.price).toFixed(2)}`}</td>
                                     <td className={td}>{r.iv == null ? '—' : `${(r.iv * 100).toFixed(1)}%`}</td>
                                     <td className={td}>{r.iv == null ? '—' : `±${(r.iv * 100 / Math.sqrt(12)).toFixed(1)}%`}</td>
+                                    <td className={td}>{r.rv20 == null ? '—' : `${(r.rv20 * 100).toFixed(1)}%`}</td>
+                                    <td className={`${td} ${r.ivVsRv >= 1.2 ? 'text-green-600 dark:text-green-400' : r.ivVsRv != null && r.ivVsRv < 0.9 ? 'text-red-600 dark:text-red-400' : ''}`}
+                                        title={r.ivVsRv >= 1.2 ? 'Premium is rich: options price in bigger swings than the stock is making' : r.ivVsRv != null && r.ivVsRv < 0.9 ? 'Premium is cheap: the stock is swinging more than options price in' : ''}>
+                                        {r.ivVsRv == null ? '—' : r.ivVsRv.toFixed(2)}</td>
                                     <td className={`${td} ${r.change > 0 ? 'text-red-600 dark:text-red-400' : r.change < 0 ? 'text-green-600 dark:text-green-400' : ''}`}>
                                         {r.change == null ? '—' : `${r.change >= 0 ? '+' : ''}${(r.change * 100).toFixed(1)} pts`}</td>
                                     <td className={td}>{r.rank == null ? `needs ${data.iv.rankMinDays} days` : r.rank}</td>
+                                    <td className={td}>{r.percentile == null ? `needs ${data.iv.rankMinDays} days` : `${r.percentile}%`}</td>
                                     <td className={td}>{r.lo == null ? '—' : `${(r.lo * 100).toFixed(0)}–${(r.hi * 100).toFixed(0)}%`}</td>
                                     <td className={td}>{r.days}</td>
                                 </tr>
                                 {ivOpen === r.symbol && (
-                                    <tr><td colSpan={8} className="pb-3"><IvChart history={r.history} /></td></tr>
+                                    <tr><td colSpan={11} className="pb-3"><IvChart history={r.history} /></td></tr>
                                 )}
                             </React.Fragment>
                         ))}</tbody>
                     </table></div>
                 </div>
             )}
+
+            {tab === 'Options lab' && (() => {
+                const own = data.optionsLab?.own_trades, csp = data.optionsLab?.csp_backtest;
+                const exitLabel: Record<string, string> = { current: 'our rules (50% profit · 3× stop · close 7 days left)', tp50_hold: '50% profit, else hold', hold: 'hold to expiry', tp50_stop2: '50% profit · 2× stop', tp50_close14: '50% profit · close 14 days left' };
+                const filterLabel: Record<string, string> = { none: 'all', uptrend: 'stock above 200-day', no_earnings: 'no earnings before expiry', iv_rich: 'IV ≥ 1.2× actual swings', liquid: 'busy contracts (20+ traded)' };
+                return (
+                    <div className="space-y-4">
+                        <div className={card}>
+                            <p className="text-sm text-slate-700 dark:text-slate-300">
+                                <b>In plain words:</b> we sell &ldquo;cash-secured puts&rdquo;: we get paid now, and in return promise to buy the stock at a lower price (the strike) if it falls below it.
+                                This tab replays <b>real past option prices</b> to see which rules would have made money, and replays our own trades with other exit rules.
+                                <b> Research only:</b> it can&apos;t place orders, and options rules change only after the Nov 21 review with your approval.
+                            </p>
+                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
+                                Honest limits: Alpaca only has option prices from Feb 2024, with daily trade prices but no bid/ask, so we add a 5% cost to every sale and buy-back.
+                                Thinly traded contracts can go days without a trade, so some prices are stale. Nothing is invented: a day with no trade is simply not checked.
+                            </p>
+                        </div>
+
+                        <div className={card}>
+                            <h3 className="font-semibold text-slate-900 dark:text-white mb-1">Our own put trades, replayed {own?.at ? `(${day(own.at)})` : ''}</h3>
+                            {!own ? <p className="text-sm text-slate-500">Runs every Saturday afternoon.</p> : (<>
+                                <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
+                                    &ldquo;Actual&rdquo; is what the paper account really did. The other columns replay the same puts on real daily closing prices with a different exit rule
+                                    (&ldquo;open&rdquo; = not finished yet). A big gap between actual and &ldquo;our rules&rdquo; means our real fills were worse than the market: usually wide, jumpy quotes on rarely traded contracts.
+                                </p>
+                                <div className="flex flex-wrap gap-3 mb-3">
+                                    {Object.entries(own.totals || {}).map(([k, v]: [string, any]) => (
+                                        <div key={k} className="rounded-lg bg-slate-50 dark:bg-slate-700/40 px-3 py-2 text-sm">
+                                            <div className="text-xs text-slate-500">{k === 'actual' ? 'actual (paper account)' : k}</div>
+                                            <div className={`font-semibold ${v.pnl >= 0 ? 'text-green-700 dark:text-green-400' : 'text-red-700 dark:text-red-400'}`}>{usd(v.pnl)}</div>
+                                            <div className="text-xs text-slate-500">{v.wins} wins of {v.settled} finished</div>
+                                        </div>))}
+                                </div>
+                                <div className="overflow-x-auto"><table className="w-full text-sm">
+                                    <thead><tr>{['Contract', 'Opened', 'Premium', 'IV at open', 'Actual swings', 'Biggest stock drop', 'Days it traded', 'Actual result', ...Object.keys(own.trades?.[0]?.policies || {})].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
+                                    <tbody>{(own.trades || []).map((t: any) => (
+                                        <tr key={t.id} className="border-t border-slate-100 dark:border-slate-700">
+                                            <td className={`${td} font-medium`}>{t.contract}</td><td className={td}>{t.opened}</td><td className={td}>{usd(t.premium * 100)}</td>
+                                            <td className={td}>{t.ivAtOpen == null ? '—' : `${t.ivAtOpen}%`}</td><td className={td}>{t.rv20AtOpen == null ? '—' : `${t.rv20AtOpen}%`}</td>
+                                            <td className={td}>{t.maxDropPct == null ? '—' : `${t.maxDropPct}%`}</td><td className={td}>{t.optionTradeDays}</td>
+                                            <td className={td}>{t.actual.pnl == null ? 'open' : `${usd(t.actual.pnl)} (${t.actual.reason || t.actual.status})`}</td>
+                                            {Object.values(t.policies).map((p: any, i) => <td key={i} className={td}>{p.open ? 'open' : `${usd(p.pnl)} · ${p.reason}`}</td>)}
+                                        </tr>))}</tbody>
+                                </table></div>
+                            </>)}
+                        </div>
+
+                        <div className={card}>
+                            <h3 className="font-semibold text-slate-900 dark:text-white mb-1">Which put-selling rules worked? {csp?.at ? `(${day(csp.at)})` : ''}</h3>
+                            {!csp ? <p className="text-sm text-slate-500">The first run is in progress; it then refreshes on the first Saturday of each month.</p> : (<>
+                                <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
+                                    {csp.symbols} stocks, a new put every week from {csp.from} to {csp.to} ({num(csp.entries)} test trades). <b>Delta</b> = roughly the chance the put ends up in trouble
+                                    (0.15 = safer and pays less, 0.30 = pays more and riskier). <b>Profit over cash</b> = return on the money set aside, minus what it would have earned in T-bills (4%/yr).
+                                    To pass: 100+ trades, 40+ weeks, profit over cash in both old and recent data, profit factor above 1.15, Sharpe above 1, and the luck check.
+                                    {' '}<b>{csp.passed} passed, {csp.promising} promising</b> of {csp.variants?.length} rule sets.
+                                </p>
+                                <div className="overflow-x-auto"><table className="w-full text-sm">
+                                    <thead><tr>{['Result', 'Delta', 'Exit rule', 'Which stocks', 'Trades', 'Win rate', 'Profit factor', 'Yearly return on cash set aside', 'Profit over cash: old', 'Profit over cash: recent', 'Ended up owning shares', 'Worst trade', 'Luck check'].map(h => <th key={h} className={th}>{h}</th>)}</tr></thead>
+                                    <tbody>{(csp.variants || []).slice(0, 40).map((v: any, i: number) => (
+                                        <tr key={i} className="border-t border-slate-100 dark:border-slate-700" title={v.why}>
+                                            <td className={td}><span className={`px-2 py-0.5 rounded-full text-xs ${v.verdict === 'pass' ? 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300' : v.verdict === 'promising' ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300' : 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300'}`}>{v.verdict}</span></td>
+                                            <td className={td}>{v.delta}</td><td className={td}>{exitLabel[v.exit] || v.exit}</td><td className={td}>{filterLabel[v.filter] || v.filter}</td>
+                                            <td className={td}>{num(v.trades)}</td><td className={td}>{v.winPct == null ? '—' : `${v.winPct}%`}</td><td className={td}>{v.profitFactor ?? '—'}</td>
+                                            <td className={td}>{v.annualizedRocPct == null ? '—' : `${v.annualizedRocPct}%`}</td>
+                                            <td className={td}>{pct(v.train.avgExRocPct)} <span className="text-slate-400">(t {v.train.t ?? '—'})</span></td>
+                                            <td className={td}>{pct(v.holdout.avgExRocPct)} <span className="text-slate-400">(t {v.holdout.t ?? '—'})</span></td>
+                                            <td className={td}>{v.assignedPct == null ? '—' : `${v.assignedPct}%`}</td>
+                                            <td className={td}>{v.worstTradePnl == null ? '—' : usd(v.worstTradePnl)}</td><td className={td}>{v.fdrQ}</td>
+                                        </tr>))}</tbody>
+                                </table></div>
+                                <p className="text-xs text-slate-500 mt-2">Sorted by recent results. Hover a row to see why it passed or failed. Showing the top 40.</p>
+                            </>)}
+                        </div>
+                    </div>
+                );
+            })()}
 
             {tab === 'AI spend' && (
                 <div className="space-y-4">

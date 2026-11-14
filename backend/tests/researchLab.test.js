@@ -157,3 +157,11 @@ describe('stricter grading (2026-11-14)', () => {
         expect(lab.worstStretch([1, -0.5, -0.7, 2, -0.1])).toEqual({ maxDrawdownPp: 1.2, longestLosingDates: 2 });
     });
 });
+
+test('neighbours: one change at a time, hold ×0.7/×1.4 and each threshold ±20% (0 moves ±1)', () => {
+    const n = lab.neighbours({ when: [['ret5', '<', -5], ['sma200Dist', '>', 0]], hold: 10, stopPct: null });
+    const labels = n.map(x => x.label);
+    expect(labels).toEqual(expect.arrayContaining(['hold 7 days', 'hold 14 days', 'ret5 < -4', 'ret5 < -6', 'sma200Dist > -1', 'sma200Dist > 1']));
+    expect(n).toHaveLength(6);
+    expect(n.find(x => x.label === 'ret5 < -6').spec.when[1]).toEqual(['sma200Dist', '>', 0]); // other condition untouched
+});

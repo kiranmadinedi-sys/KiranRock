@@ -6205,7 +6205,11 @@ async function manageExistingPositions(userId) {
                         // Broker says the position doesn't exist (already closed at broker level
                         // but our DB is stale). Remove the ghost holding immediately so the
                         // next cycle doesn't attempt another sell + extend exit-pending to 2h.
-                        if (/don.t own|you don.*own|insufficient.*(qty|shares|quantity)|position.*not.*found|no.*position|already.*closed/i.test(sellErr.message)) {
+                        // "Insufficient shares. You have X…" is OUR DB's message, raised after the broker may already
+                        // have filled the sell — deleting the holding there loses the trade record (ABBV 2026-11-16).
+                        // Leave it to the reconciler, which records the broker-side exit properly.
+                        const ownDbCheck = /^Insufficient shares\. You have/.test(sellErr.message);
+                        if (!ownDbCheck && /don.t own|you don.*own|insufficient.*(qty|shares|quantity)|position.*not.*found|no.*position|already.*closed/i.test(sellErr.message)) {
                             logger.warn('[SellFail] Broker position not found — removing stale DB record', { userId, symbol: holding.symbol, error: sellErr.message });
                             try { await holdingsDb.deleteHolding(userId, holding.symbol); } catch (_) {}
                             _exitPending.set(sellKey, Date.now() + 2 * 3600_000);

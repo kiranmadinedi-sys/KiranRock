@@ -321,7 +321,10 @@ const executeSellOrder = async (userId, symbol, quantity, executedBy = 'MANUAL',
             
             const holding = holdingResult.rows[0];
             
-            if (holding.quantity < quantity) {
+            // Tolerance (2026-11-16): Alpaca reports fractional qty to 9 decimals, holdings store 8.
+            // A full exit synced to Alpaca's qty (0.502618412) vs stored 0.50261841 failed here AFTER the
+            // broker had filled the sell; the caller then deleted the holding with no SELL row (ABBV).
+            if (Number(holding.quantity) - quantity < -1e-6) {
                 throw new Error(
                     `Insufficient shares. You have ${holding.quantity} shares, trying to sell ${quantity}`
                 );

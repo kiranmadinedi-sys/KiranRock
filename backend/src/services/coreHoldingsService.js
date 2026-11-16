@@ -319,7 +319,7 @@ async function coreSummary(userId) {
     if (!rows.length) return null;
     const syms = rows.map(r => r.symbol);
     const r = await query(
-        `SELECT symbol, quantity::float AS qty, average_price::float AS avg, current_price::float AS px, market_value::float AS mv, gain_loss::float AS pl
+        `SELECT symbol, quantity::float AS qty, average_price::float AS avg, current_price::float AS px, market_value::float AS mv, gain_loss::float AS pl, updated_at AS "asOf"
          FROM holdings WHERE user_id = $1 AND symbol = ANY($2) AND quantity > 0`,
         [userId, syms]
     );
@@ -344,16 +344,60 @@ async function _addonStatus(userId, symbols) {
     }
 }
 
+/**
+ * Where every dollar of the account sits (2026-11-16): core, cash-sweep SGOV (not core), swing positions, option
+ * contracts (sold puts are negative: the cost to close them), cash.
+ * "other" is whatever the broker's equity doesn't match (normally ~0; non-zero means a pending settlement or a
+ * position type we don't classify). Pure — unit-tested.
+ */
+function accountBreakdown({ positions, coreSymbols, equity, cash, sweepSymbol = 'SGOV', sweepQty = 0 }) {
+    let core = 0, sweep = 0, swing = 0, swingCount = 0, options = 0, optionsCount = 0;
+    for (const p of positions) {
+        const sym = String(p.symbol).toUpperCase(), qty = parseFloat(p.qty) || 0, mv = parseFloat(p.marketValue) || 0;
+        // Option contracts (OCC symbols) — sold puts show a negative value: what it would cost to buy them back.
+        if (/^[A-Z]{1,6}\d{6}[CP]\d{8}$/.test(sym)) { options += mv; optionsCount++; continue; }
+        if (!(qty > 0)) continue;
+        if (coreSymbols.has(sym)) {
+            const sw = sym === sweepSymbol && sweepQty > 0 ? Math.min(mv, mv / qty * sweepQty) : 0;
+            sweep += sw; core += mv - sw;
+        } else if (sym === sweepSymbol && sweepQty > 0) {
+            sweep += mv;
+        } else { swing += mv; swingCount++; }
+    }
+    const pct = v => equity ? +(v / equity * 100).toFixed(1) : null;
+    const other = equity - core - sweep - swing - options - (cash || 0);
+    return {
+        core: { usd: +core.toFixed(2), pct: pct(core) }, sweep: { usd: +sweep.toFixed(2), pct: pct(sweep) },
+        swing: { usd: +swing.toFixed(2), pct: pct(swing), count: swingCount }, cash: { usd: +(cash || 0).toFixed(2), pct: pct(cash || 0) },
+        options: { usd: +options.toFixed(2), pct: pct(options), count: optionsCount },
+        other: { usd: +other.toFixed(2), pct: pct(other) },
+    };
+}
+
 /** Everything the Settings screen shows. */
 async function getStatus(userId) {
     const [settings, rows] = await Promise.all([getSettings(userId), getCoreRows(userId)]);
     const summary = await coreSummary(userId).catch(() => null);
-    let equity = null, cash = null;
+    let equity = null, cash = null, live = null;
+    const broker = require('./brokerService');
     try {
-        const acct = await require('./brokerService').getAccountInfo(userId);
+        const acct = await broker.getAccountInfo(userId);
         equity = acct.portfolioValue; cash = acct.cashBalance;
     } catch (_) { /* the screen still loads without live account numbers */ }
-    const bySym = Object.fromEntries((summary?.positions || []).map(p => [p.symbol.toUpperCase(), p]));
+    try { live = await broker.getPositions(userId); } catch (_) { live = null; }
+    // Prefer the broker's live positions (one consistent moment); fall back to the DB copy with its own timestamp.
+    const liveAt = new Date().toISOString();
+    const bySym = live
+        ? Object.fromEntries(live.filter(p => parseFloat(p.qty) > 0).map(p => [String(p.symbol).toUpperCase(),
+            { qty: parseFloat(p.qty), avg: p.avgEntryPrice ?? null, px: p.currentPrice ?? null, mv: parseFloat(p.marketValue) || 0,
+              pl: p.unrealizedPL ?? p.unrealizedPl ?? 0, asOf: liveAt, source: 'broker (live)' }]))
+        : Object.fromEntries((summary?.positions || []).map(p => [p.symbol.toUpperCase(), { ...p, source: 'saved copy' }]));
+    const coreSet = new Set(rows.map(r => r.symbol));
+    const addons = await _addonStatus(userId, rows.map(r => r.symbol));
+    const breakdown = live && equity ? accountBreakdown({ positions: live, coreSymbols: coreSet, equity, cash,
+        sweepSymbol: addons?.sweep?.symbol, sweepQty: addons?.sweep?.qty || 0 }) : null;
+    const coreValue = rows.reduce((sum, r) => sum + (bySym[r.symbol]?.mv || 0), 0);
+    const corePl = rows.reduce((sum, r) => sum + (bySym[r.symbol]?.pl || 0), 0);
     return {
         settings,
         equity, cash,
@@ -365,16 +409,18 @@ async function getStatus(userId) {
                 targetUsd: equity != null ? +(equity * r.targetPct / 100).toFixed(2) : null,
                 qty: p?.qty ?? 0, avgPrice: p?.avg ?? null, price: p?.px ?? null,
                 value: p?.mv ?? 0, unrealizedPl: p?.pl ?? 0,
+                priceAsOf: p?.asOf ?? null, priceSource: p?.source ?? null,
                 currentPct: equity ? +((p?.mv ?? 0) / equity * 100).toFixed(1) : null,
             };
         }),
-        totals: summary ? { value: summary.value, unrealizedPl: summary.unrealizedPl, cost: summary.cost } : { value: 0, unrealizedPl: 0, cost: 0 },
+        totals: { value: coreValue, unrealizedPl: corePl, cost: coreValue - corePl },
+        breakdown,
         limits: { maxSymbols: MAX_SYMBOLS, maxTotalPct: MAX_TOTAL_PCT, maxSinglePct: MAX_SINGLE_PCT },
-        addons: await _addonStatus(userId, rows.map(r => r.symbol)),
+        addons,
     };
 }
 
 module.exports = {
     ensureTable, getCoreRows, getCoreSymbols, setSatelliteSymbols, setOptionsProtected, getSettings, setEnabled, saveConfig, getStatus,
-    rebalanceCore, runDailyRebalance, coreSummary, _clearCache,
+    rebalanceCore, runDailyRebalance, coreSummary, accountBreakdown, _clearCache,
 };

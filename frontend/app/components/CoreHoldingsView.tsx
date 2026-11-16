@@ -13,6 +13,14 @@ interface CoreHolding {
     value: number;
     unrealizedPl: number;
     currentPct: number | null;
+    priceAsOf?: string | null;
+    priceSource?: string | null;
+}
+
+interface Slice { usd: number; pct: number | null; count?: number }
+interface Benchmark {
+    since: string | null; through?: string | null; tradingDays: number; note?: string;
+    corePct?: number; spyPct?: number; tbillPct?: number; vsSpyPp?: number; vsTbillPp?: number; rfPct?: number;
 }
 
 interface CoreStatus {
@@ -22,6 +30,7 @@ interface CoreStatus {
     totalTargetPct: number;
     holdings: CoreHolding[];
     totals: { value: number; unrealizedPl: number; cost: number };
+    breakdown?: { core: Slice; sweep: Slice; swing: Slice; cash: Slice; options?: Slice; other: Slice } | null;
     limits: { maxSymbols: number; maxTotalPct: number; maxSinglePct: number };
     addons?: {
         sweep?: { enabled: boolean; qty: number; symbol: string; allowed: boolean };
@@ -39,6 +48,7 @@ const money = (v: number | null | undefined) =>
 
 export default function CoreHoldingsView() {
     const [status, setStatus] = useState<CoreStatus | null>(null);
+    const [bench, setBench] = useState<Benchmark | null>(null);
     const [rows, setRows] = useState<EditRow[]>([]);
     const [reserve, setReserve] = useState('25');
     const [release, setRelease] = useState<string[]>([]);
@@ -56,6 +66,8 @@ export default function CoreHoldingsView() {
             if (!res.ok) throw new Error(`Status fetch failed: ${res.status}`);
             const data: CoreStatus = await res.json();
             setStatus(data);
+            fetch(`${getApiBaseUrl()}/api/core-holdings/benchmark`, { headers: authHeaders() })
+                .then(r => (r.ok ? r.json() : null)).then(setBench).catch(() => {});
             if (resetForm) {
                 setRows(data.holdings.map(h => ({ symbol: h.symbol, targetPct: String(h.targetPct) })));
                 setReserve(String(data.settings.cashReservePct));
@@ -198,7 +210,70 @@ export default function CoreHoldingsView() {
                         <div className="text-xs text-slate-500 dark:text-slate-400">cash {money(status.cash)}</div>
                     </div>
                 </div>
+
+                {status.breakdown && (() => {
+                    const b = status.breakdown;
+                    const parts: { label: string; s: Slice; color: string; hint: string }[] = [
+                        { label: 'Core', s: b.core, color: 'bg-blue-500', hint: 'long-term holdings, never sold automatically' },
+                        { label: `Swing (${b.swing.count ?? 0} stocks)`, s: b.swing, color: 'bg-amber-500', hint: 'short-term trades run by the swing bot' },
+                        { label: 'Cash-sweep SGOV', s: b.sweep, color: 'bg-teal-500', hint: 'parked cash, sold back when swing needs it (paper only)' },
+                        { label: 'Cash', s: b.cash, color: 'bg-slate-400', hint: `includes the ${status.settings.cashReservePct}% kept free for swing` },
+                    ].filter(p => p.s.usd > 0.5 || p.label === 'Cash');
+                    if (b.options && b.options.count) parts.push({ label: `Sold puts (${b.options.count})`, s: b.options, color: 'bg-rose-400',
+                        hint: 'negative = what it would cost to buy them back today; this is subtracted from the account' });
+                    return (
+                        <div className="mt-5">
+                            <div className="text-xs text-slate-500 dark:text-slate-400 mb-1">Where every dollar of the account is</div>
+                            <div className="flex h-3 w-full overflow-hidden rounded-full bg-slate-100 dark:bg-slate-700">
+                                {parts.map(p => <div key={p.label} className={p.color} style={{ width: `${Math.max(0, p.s.pct ?? 0)}%` }} title={`${p.label}: ${money(p.s.usd)}`} />)}
+                            </div>
+                            <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                                {parts.map(p => (
+                                    <div key={p.label} className="flex items-start gap-2">
+                                        <span className={`mt-1 inline-block h-2 w-2 rounded-full ${p.color}`} />
+                                        <div>
+                                            <div className="text-slate-900 dark:text-white font-medium">{p.label}: {money(p.s.usd)} ({p.s.pct ?? 0}%)</div>
+                                            <div className="text-slate-500 dark:text-slate-400">{p.hint}</div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                            {Math.abs(b.other.usd) >= 5 && (
+                                <div className="mt-2 text-xs text-amber-600 dark:text-amber-400">
+                                    {money(b.other.usd)} doesn&apos;t match any position or cash right now — usually a trade still settling. If it stays, tell the admin.
+                                </div>
+                            )}
+                        </div>
+                    );
+                })()}
             </div>
+
+            {/* Core vs SPY vs T-bills (2026-11-16) */}
+            {bench && (
+                <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 p-6">
+                    <h3 className="text-md font-semibold text-slate-900 dark:text-white mb-1">Is core beating just buying SPY?</h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
+                        Tracks what each dollar in core earned, compared with the S&amp;P 500 (SPY) and safe T-bills. New buys are not counted as gains. One week means little — judge it over many months.
+                    </p>
+                    {!bench.tradingDays ? (
+                        <div className="text-sm text-slate-500 dark:text-slate-400">Tracking started{bench.since ? ` ${bench.since}` : ''}. Results appear after the second trading day.</div>
+                    ) : (
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                            {([['Core', bench.corePct], ['S&P 500 (SPY)', bench.spyPct], [`T-bills (${bench.rfPct}%/yr)`, bench.tbillPct]] as [string, number | undefined][]).map(([l, v]) => (
+                                <div key={l}>
+                                    <div className="text-xs text-slate-500 dark:text-slate-400">{l}</div>
+                                    <div className={`text-xl font-semibold ${(v ?? 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{(v ?? 0) >= 0 ? '+' : ''}{(v ?? 0).toFixed(2)}%</div>
+                                </div>
+                            ))}
+                            <div>
+                                <div className="text-xs text-slate-500 dark:text-slate-400">Core vs SPY</div>
+                                <div className={`text-xl font-semibold ${(bench.vsSpyPp ?? 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{(bench.vsSpyPp ?? 0) >= 0 ? 'ahead ' : 'behind '}{Math.abs(bench.vsSpyPp ?? 0).toFixed(2)} pts</div>
+                                <div className="text-xs text-slate-500 dark:text-slate-400">since {bench.since} · {bench.tradingDays} trading days</div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
 
             {/* Positions */}
             {status.holdings.length > 0 && (
@@ -238,6 +313,17 @@ export default function CoreHoldingsView() {
                             </tbody>
                         </table>
                     </div>
+                    {(() => {
+                        const h = status.holdings.find(x => x.priceAsOf);
+                        if (!h?.priceAsOf) return null;
+                        const t = new Date(h.priceAsOf);
+                        return (
+                            <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+                                Prices from {h.priceSource || 'broker'} as of {t.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}. All rows use the same moment.
+                                {' '}The watchlist uses each stock&apos;s last daily close, so its prices can differ from these.
+                            </p>
+                        );
+                    })()}
                 </div>
             )}
 

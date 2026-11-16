@@ -18,6 +18,7 @@ const KINDS = {
     premarket_brief: 'Pre-market overnight check',
     core_watchlist: 'Core watchlist',
     core_guidance: 'Core guidance',
+    core_benchmark: 'Core vs SPY (weekly)',
     accountability: 'Weekly accountability (cost vs gains)',
     mistake_review: 'Daily mistake review',
     research_lab: 'Research lab',

@@ -41,7 +41,9 @@ function putLine(t, riskFreePct = 4) {
     const entry = Number(t.entry_premium), close = t.close_premium == null ? null : Number(t.close_premium);
     const reason = t.close_reason || t.status;
     const cfg = require('./optionsIncomeService').CFG;
-    const trigger = /^stop/.test(reason) ? entry * cfg.stopMultiple : /^take profit/.test(reason) ? entry * cfg.takeProfitFrac : null;
+    // Stops are off for new puts (stopMultiple null since 11-14); older stopped trades carry their multiple in the reason.
+    const stopMult = Number(String(reason).match(/(\d+(?:\.\d+)?)×/)?.[1]) || cfg.stopMultiple || 3;
+    const trigger = /^stop/.test(reason) ? entry * stopMult :/^take profit/.test(reason) ? entry * cfg.takeProfitFrac : null;
     const days = Math.max(1, Math.round((new Date(t.closed_at) - new Date(t.opened_at)) / 86400000));
     const annPct = t.pnl != null && t.collateral ? t.pnl / t.collateral * 365 / days * 100 : null;
     const parts = [

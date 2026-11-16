@@ -10,7 +10,7 @@
  * Every alert is stored with the suggested symbol's price and SPY at alert time; getScorecard()
  * compares what happened afterwards by rule and by the user's decision. No rule is automatic today.
  *
- * Rules: idle_cash, opportunity, drift, concentration, stay_calm. Selling is never suggested as an
+ * Rules: idle_cash, opportunity, drift, concentration, single_stock, stay_calm. Selling is never suggested as an
  * automatic action — a "story changed" review stays the user's call.
  */
 const { query } = require('../config/database');
@@ -21,12 +21,16 @@ const RULES = {
     opportunity:   { label: 'Opportunity',        level: 1, actionable: true },
     drift:         { label: 'Drift above target', level: 1, actionable: false },
     concentration: { label: 'Sector concentration', level: 1, actionable: false },
+    single_stock:  { label: 'Single-stock concentration', level: 1, actionable: false },
     stay_calm:     { label: 'Stay calm',          level: 0, actionable: false },
 };
 const IDLE_DAYS = 10;           // trading days cash must sit above reserve + buffer
 const IDLE_BUFFER_PCT = 5;
 const DRIFT_PP = 10;            // holding this many points above its target
 const SECTOR_LIMIT_PCT = 35;    // one sector > 35% of the account (single stocks, core + swing)
+const SINGLE_STOCK_LIMIT_PCT = 10; // one company > 10% of the account (core + swing combined)
+// Funds are diversified by design, so they never trigger the single-stock alert.
+const FUNDS = new Set(['SPY', 'VOO', 'IVV', 'VTI', 'QQQ', 'IWM', 'DIA', 'SGOV', 'BIL', 'SHV', 'TLT', 'IEF', 'AGG', 'BND', 'GLD', 'SCHD', 'VUG', 'VTV', 'VXUS', 'VEA', 'VWO']);
 const OPP_TARGET_PCT = 5;
 const OPP_COOLDOWN_DAYS = 14;
 
@@ -71,7 +75,17 @@ function concentrationRule(positions, equity) {
     return Object.entries(by).map(([sector, v]) => ({ sector, pct: v / equity * 100 })).filter(x => x.pct > SECTOR_LIMIT_PCT);
 }
 
+/** positions: [{symbol, value}] — one company above the limit (funds excluded). */
+function singleStockRule(positions, equity) {
+    if (!(equity > 0)) return [];
+    const by = {};
+    for (const p of positions) if (!FUNDS.has(p.symbol)) by[p.symbol] = (by[p.symbol] || 0) + p.value;
+    return Object.entries(by).map(([symbol, v]) => ({ symbol, pct: v / equity * 100 })).filter(x => x.pct > SINGLE_STOCK_LIMIT_PCT);
+}
+
 // ── context ──────────────────────────────────────────────────────────────────
+
+const dow = day => new Date(`${day}T12:00:00Z`).getUTCDay();
 
 async function _price(symbol) {
     const q = await require('./dataProvider').getQuote(symbol).catch(() => null);
@@ -120,6 +134,8 @@ async function evaluateUser(userId, now = new Date()) {
                  ON CONFLICT (user_id, day) DO UPDATE SET cash_pct = EXCLUDED.cash_pct, reserve_pct = EXCLUDED.reserve_pct`,
         [uid, day, cashPct, reservePct]);
     const created = [];
+    await require('./coreBenchmarkService').recordDaily(uid, status, day).catch(err => logger.warn('[CoreBenchmark] snapshot failed', { userId: uid, error: err.message }));
+    if (dow(day) === 5) await require('./coreBenchmarkService').weeklyReport(uid).catch(() => {});
     const isPaper = (await require('./userDatabaseService').getUserAlpacaCredentials(userId)).isPaper !== false;
 
     // 1. idle cash (skipped where the paper cash sweep already puts it to work)
@@ -171,6 +187,15 @@ async function evaluateUser(userId, now = new Date()) {
         const names = withSector.filter(p => p.sector === c.sector).map(p => p.symbol).join(', ');
         const a = await _create(uid, 'concentration', `${c.sector}:${Math.floor(c.pct / 5) * 5}`, `${c.sector} is ${c.pct.toFixed(0)}% of the account`,
             `Across core and swing positions (${names}), one sector is above ${SECTOR_LIMIT_PCT}% of the account. A single bad news day for that sector hits all of them at once. Consider pausing new buys in ${c.sector}.`);
+        if (a) created.push(a);
+    }
+
+    // 4b. single-company concentration (core + swing; funds excluded). Information only.
+    for (const c of singleStockRule(withSector, status.equity)) {
+        const tgt = status.holdings.find(h => h.symbol === c.symbol)?.targetPct;
+        const a = await _create(uid, 'single_stock', `${c.symbol}:${Math.floor(c.pct / 5) * 5}`, `${c.symbol} is ${c.pct.toFixed(0)}% of the account`,
+            `One company is above ${SINGLE_STOCK_LIMIT_PCT}% of the account${tgt ? ` (its core target is ${tgt}%)` : ''}. A single bad earnings report or lawsuit hits that much of your money at once — SPY also already holds most large companies, so your real exposure is a little higher. Nothing is sold automatically; if you want less, lower its core target and core simply stops adding.`,
+            { symbol: c.symbol });
         if (a) created.push(a);
     }
 
@@ -255,4 +280,4 @@ async function getScorecard(userId = null) {
     return { rules: RULES, counts, outcomes: out };
 }
 
-module.exports = { RULES, idleCashRule, driftRule, concentrationRule, evaluateUser, runDaily, recordDecision, listAlerts, getScorecard, ensureTables };
+module.exports = { RULES, idleCashRule, driftRule, concentrationRule, singleStockRule, SINGLE_STOCK_LIMIT_PCT, evaluateUser, runDaily, recordDecision, listAlerts, getScorecard, ensureTables };

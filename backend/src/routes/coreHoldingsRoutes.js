@@ -74,6 +74,11 @@ router.get('/guidance', async (req, res) => {
         res.json({ alerts: await g.listAlerts(req.userId), scorecard: await g.getScorecard(req.userId) });
     } catch (error) { res.status(500).json({ error: error.message }); }
 });
+/** Core vs SPY vs T-bills (2026-11-16) — read-only, from daily snapshots. */
+router.get('/benchmark', async (req, res) => {
+    try { res.json(await require('./../services/coreBenchmarkService').getComparison(req.userId)); }
+    catch (error) { res.status(500).json({ error: error.message }); }
+});
 /** Cash sweep on/off (paper only). */
 router.put('/sweep', async (req, res) => {
     try { res.json(await require('./../services/coreAddonsService').setSweepEnabled(req.userId, !!req.body?.enabled)); }

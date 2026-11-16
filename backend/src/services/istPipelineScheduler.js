@@ -124,6 +124,12 @@ async function stageORACLE(users) {
         const dataProvider     = require('./dataProvider');
         const { getStockUniverse } = require('./stockUniverseService');
 
+        // Off by default (2026-11-16): the watchlist this builds is never read anywhere, the inputs are
+        // mostly null, and each run held the local 27B model for ~40 min (RAM 98%, every call timed out).
+        if (process.env.IST_ORACLE !== 'true') {
+            logger.info('[IST-ORACLE] Skipped (IST_ORACLE not enabled; output was unused)');
+            return { ok: true, detail: 'skipped — disabled' };
+        }
         if (!oracleService.isEnabled()) {
             logger.info('[IST-ORACLE] ORACLE disabled (no API key) — skipping');
             return { ok: true, detail: 'skipped — no API key' };

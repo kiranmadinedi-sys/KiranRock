@@ -1,5 +1,5 @@
 jest.mock('../src/config/database', () => ({ query: jest.fn() }));
-const { compare } = require('../src/services/coreBenchmarkService');
+const { compare, maxDrawdown } = require('../src/services/coreBenchmarkService');
 const { singleStockRule } = require('../src/services/coreGuidanceService');
 const { accountBreakdown } = require('../src/services/coreHoldingsService');
 
@@ -32,6 +32,28 @@ describe('core vs SPY comparison', () => {
         ], 0);
         expect(c.corePct).toBe(0);
     });
+    test('dividends count for core and SPY alike; a buy is never profit', () => {
+        const divs = { V: [{ ex: '2026-11-17', rate: 1 }], SPY: [{ ex: '2026-11-17', rate: 2 }] };
+        const c = compare([
+            snap('2026-11-16', { V: { qty: 10, px: 100 } }, 100),
+            snap('2026-11-17', { V: { qty: 11, px: 99 } }, 98), // ex-div: price drops by the dividend, bought 1 more
+        ], 0, divs);
+        expect(c.corePct).toBeCloseTo(0, 5);
+        expect(c.spyPct).toBeCloseTo(0, 5);
+        expect(c.dividendsUsd).toBe(10);
+        expect(c.newMoneyUsd).toBe(99);
+    });
+    test('same deposits into SPY: equal when core behaves like SPY', () => {
+        const c = compare([
+            snap('2026-11-16', { SPY: { qty: 1, px: 100 } }, 100),
+            snap('2026-11-17', { SPY: { qty: 2, px: 110 } }, 110),
+        ], 0);
+        expect(c.sameDepositsInSpy.diffUsd).toBeCloseTo(0, 5);
+        expect(c.sameDepositsInSpy.spyUsd).toBeCloseTo(220, 5);
+    });
+    test('max drawdown measures the worst fall from a high', () => {
+        expect(maxDrawdown([1, 1.2, 0.9, 1.3])).toBe(-25);
+    });
     test('T-bills accrue by calendar day', () => {
         const c = compare([snap('2026-01-01', { SPY: { qty: 1, px: 100 } }, 100), snap('2027-01-01', { SPY: { qty: 1, px: 100 } }, 100)], 4);
         expect(c.tbillPct).toBeCloseTo(4, 1);
@@ -62,7 +84,8 @@ describe('account breakdown', () => {
     test('sold puts are their own (negative) slice so the total still matches equity', () => {
         const b = accountBreakdown({ positions: [{ symbol: 'SPY', qty: 1, marketValue: 700 }, { symbol: 'F251219P00012000', qty: -1, marketValue: -40 }],
             coreSymbols: new Set(['SPY']), equity: 960, cash: 300 });
-        expect(b.options).toEqual({ usd: -40, pct: -4.2, count: 1 });
+        expect(b.options).toEqual({ usd: -40, pct: -4.2, count: 1, collateralUsd: 1200 });
+        expect(b.freeCashUsd).toBe(0);
         expect(b.other.usd).toBe(0);
     });
 });

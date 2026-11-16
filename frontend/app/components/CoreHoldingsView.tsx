@@ -21,6 +21,8 @@ interface Slice { usd: number; pct: number | null; count?: number }
 interface Benchmark {
     since: string | null; through?: string | null; tradingDays: number; note?: string;
     corePct?: number; spyPct?: number; tbillPct?: number; vsSpyPp?: number; vsTbillPp?: number; rfPct?: number;
+    coreMaxDrawdownPct?: number; spyMaxDrawdownPct?: number; dividendsUsd?: number; newMoneyUsd?: number; dividendsKnown?: boolean;
+    sameDepositsInSpy?: { coreUsd: number; spyUsd: number; diffUsd: number } | null;
 }
 
 interface CoreStatus {
@@ -30,7 +32,7 @@ interface CoreStatus {
     totalTargetPct: number;
     holdings: CoreHolding[];
     totals: { value: number; unrealizedPl: number; cost: number };
-    breakdown?: { core: Slice; sweep: Slice; swing: Slice; cash: Slice; options?: Slice; other: Slice } | null;
+    breakdown?: { core: Slice; sweep: Slice; swing: Slice; cash: Slice; options?: Slice & { collateralUsd?: number }; freeCashUsd?: number; other: Slice } | null;
     limits: { maxSymbols: number; maxTotalPct: number; maxSinglePct: number };
     addons?: {
         sweep?: { enabled: boolean; qty: number; symbol: string; allowed: boolean };
@@ -217,7 +219,9 @@ export default function CoreHoldingsView() {
                         { label: 'Core', s: b.core, color: 'bg-blue-500', hint: 'long-term holdings, never sold automatically' },
                         { label: `Swing (${b.swing.count ?? 0} stocks)`, s: b.swing, color: 'bg-amber-500', hint: 'short-term trades run by the swing bot' },
                         { label: 'Cash-sweep SGOV', s: b.sweep, color: 'bg-teal-500', hint: 'parked cash, sold back when swing needs it (paper only)' },
-                        { label: 'Cash', s: b.cash, color: 'bg-slate-400', hint: `includes the ${status.settings.cashReservePct}% kept free for swing` },
+                        { label: 'Cash', s: b.cash, color: 'bg-slate-400', hint: b.options?.collateralUsd
+                            ? `${money(b.options.collateralUsd)} is held back as collateral for sold puts — free to use: ${money(b.freeCashUsd ?? 0)}`
+                            : `includes the ${status.settings.cashReservePct}% kept free for swing` },
                     ].filter(p => p.s.usd > 0.5 || p.label === 'Cash');
                     if (b.options && b.options.count) parts.push({ label: `Sold puts (${b.options.count})`, s: b.options, color: 'bg-rose-400',
                         hint: 'negative = what it would cost to buy them back today; this is subtracted from the account' });
@@ -269,6 +273,18 @@ export default function CoreHoldingsView() {
                                 <div className="text-xs text-slate-500 dark:text-slate-400">Core vs SPY</div>
                                 <div className={`text-xl font-semibold ${(bench.vsSpyPp ?? 0) >= 0 ? 'text-green-600' : 'text-red-600'}`}>{(bench.vsSpyPp ?? 0) >= 0 ? 'ahead ' : 'behind '}{Math.abs(bench.vsSpyPp ?? 0).toFixed(2)} pts</div>
                                 <div className="text-xs text-slate-500 dark:text-slate-400">since {bench.since} · {bench.tradingDays} trading days</div>
+                            </div>
+                        </div>
+                    )}
+                    {!!bench.tradingDays && (
+                        <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs text-slate-600 dark:text-slate-300">
+                            <div>Worst drop from a high: core {bench.coreMaxDrawdownPct}% · SPY {bench.spyMaxDrawdownPct}%</div>
+                            <div>Dividends received: {money(bench.dividendsUsd ?? 0)}{bench.dividendsKnown === false ? ' (dividend data unavailable — price only)' : ''} · new money added: {money(bench.newMoneyUsd ?? 0)} (not a gain)</div>
+                            {bench.sameDepositsInSpy && (
+                                <div>Same deposits into SPY on the same days: {money(bench.sameDepositsInSpy.spyUsd)} vs core {money(bench.sameDepositsInSpy.coreUsd)}</div>
+                            )}
+                            <div className="md:col-span-3 text-slate-500 dark:text-slate-400">
+                                Both core and SPY include dividends. Give it about 3 months before a first read, and 6–12 months before changing targets. Swing trading is measured separately.
                             </div>
                         </div>
                     )}

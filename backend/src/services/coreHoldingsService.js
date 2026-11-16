@@ -351,11 +351,16 @@ async function _addonStatus(userId, symbols) {
  * position type we don't classify). Pure — unit-tested.
  */
 function accountBreakdown({ positions, coreSymbols, equity, cash, sweepSymbol = 'SGOV', sweepQty = 0 }) {
-    let core = 0, sweep = 0, swing = 0, swingCount = 0, options = 0, optionsCount = 0;
+    let core = 0, sweep = 0, swing = 0, swingCount = 0, options = 0, optionsCount = 0, collateral = 0;
     for (const p of positions) {
         const sym = String(p.symbol).toUpperCase(), qty = parseFloat(p.qty) || 0, mv = parseFloat(p.marketValue) || 0;
         // Option contracts (OCC symbols) — sold puts show a negative value: what it would cost to buy them back.
-        if (/^[A-Z]{1,6}\d{6}[CP]\d{8}$/.test(sym)) { options += mv; optionsCount++; continue; }
+        const occ = sym.match(/^[A-Z]{1,6}\d{6}([CP])(\d{8})$/);
+        if (occ) {
+            options += mv; optionsCount++;
+            if (occ[1] === 'P' && qty < 0) collateral += Number(occ[2]) / 1000 * 100 * Math.abs(qty); // cash held back for a sold put
+            continue;
+        }
         if (!(qty > 0)) continue;
         if (coreSymbols.has(sym)) {
             const sw = sym === sweepSymbol && sweepQty > 0 ? Math.min(mv, mv / qty * sweepQty) : 0;
@@ -369,7 +374,8 @@ function accountBreakdown({ positions, coreSymbols, equity, cash, sweepSymbol = 
     return {
         core: { usd: +core.toFixed(2), pct: pct(core) }, sweep: { usd: +sweep.toFixed(2), pct: pct(sweep) },
         swing: { usd: +swing.toFixed(2), pct: pct(swing), count: swingCount }, cash: { usd: +(cash || 0).toFixed(2), pct: pct(cash || 0) },
-        options: { usd: +options.toFixed(2), pct: pct(options), count: optionsCount },
+        options: { usd: +options.toFixed(2), pct: pct(options), count: optionsCount, collateralUsd: +collateral.toFixed(2) },
+        freeCashUsd: +Math.max(0, (cash || 0) - collateral).toFixed(2), // cash not tied up as put collateral
         other: { usd: +other.toFixed(2), pct: pct(other) },
     };
 }

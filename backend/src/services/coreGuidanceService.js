@@ -135,7 +135,7 @@ async function evaluateUser(userId, now = new Date()) {
         [uid, day, cashPct, reservePct]);
     const created = [];
     await require('./coreBenchmarkService').recordDaily(uid, status, day).catch(err => logger.warn('[CoreBenchmark] snapshot failed', { userId: uid, error: err.message }));
-    if (dow(day) === 5) await require('./coreBenchmarkService').weeklyReport(uid).catch(() => {});
+    if (dow(day) === 5) await require('./coreBenchmarkService').weeklyReport(uid, status).catch(() => {});
     const isPaper = (await require('./userDatabaseService').getUserAlpacaCredentials(userId)).isPaper !== false;
 
     // 1. idle cash (skipped where the paper cash sweep already puts it to work)

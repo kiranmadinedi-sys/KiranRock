@@ -81,3 +81,16 @@ describe('atmIv (2026-11-11 IV history)', () => {
         expect(atmIv(snaps, 0, '2026-11-12')).toBeNull();
     });
 });
+
+describe('fully cash-secured rule (2026-11-16)', () => {
+    const { cashSecuredRoom } = require('../src/services/optionsIncomeService');
+    test('margin buying power never counts — only cash minus reserved collateral minus buffer', () => {
+        // paper 11-16: cash $16,291, equity $93,852, $29,800 already reserved → no room
+        expect(cashSecuredRoom({ cash: 16291, equity: 93852, reserved: 29800, bufferPct: 5 })).toBe(0);
+        expect(cashSecuredRoom({ cash: 30000, equity: 100000, reserved: 10000, bufferPct: 5 })).toBe(15000);
+    });
+    test('bad account numbers give no room (fail closed)', () => {
+        expect(cashSecuredRoom({ cash: NaN, equity: 1000, reserved: 0 })).toBe(0);
+        expect(cashSecuredRoom({ cash: 1000, equity: 0, reserved: 0 })).toBe(0);
+    });
+});

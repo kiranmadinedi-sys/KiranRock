@@ -12,7 +12,8 @@
  *            mid premium ≥ 0.6% of strike, bid/ask spread ≤ 25% of mid; underlying from the
  *            latest scan (score ≥ 70, above its 200-day average, no earnings before expiry,
  *            not Gemini Strong Bearish, not a fund); one position per underlying.
- *   limits — ≤ 5 open, ≤ $10K collateral each, ≤ OPTIONS_INCOME_MAX_COLLATERAL ($30K) total.
+ *   limits — ≤ 5 open, ≤ $10K collateral each, ≤ OPTIONS_INCOME_MAX_COLLATERAL ($30K) total, and
+ *   fully cash-secured: all open strikes × 100 ≤ cash − OPTIONS_CASH_BUFFER_PCT (5%) of equity (2026-11-16).
  *   exit   — buy back at 50% of the premium (take the profit), or with ≤ 7 days left, or if the
  *            put costs ≥ 3× what we sold it for (stop). Day limit orders; reconciled each tick.
  *
@@ -53,6 +54,15 @@ const CFG = {
 };
 const riskFreePct = () => parseFloat(process.env.RISK_FREE_PCT || '4');
 const maxCollateralTotal = () => parseFloat(process.env.OPTIONS_INCOME_MAX_COLLATERAL || '30000');
+// Fully cash-secured (2026-11-16): every open put's strike × 100 must be covered by real cash, never by
+// margin buying power. Core SGOV and other holdings don't count. A safety buffer of equity stays untouched.
+const cashBufferPct = () => parseFloat(process.env.OPTIONS_CASH_BUFFER_PCT || '5');
+
+/** Cash still free to back a new put: cash − collateral already reserved − buffer. Pure (unit-tested). */
+function cashSecuredRoom({ cash, equity, reserved, bufferPct = cashBufferPct() }) {
+    if (!(cash >= 0) || !(equity > 0)) return 0;
+    return Math.max(0, cash - (reserved || 0) - equity * bufferPct / 100);
+}
 const userIds = () => (process.env.OPTIONS_INCOME_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 
 let _ready = false;
@@ -239,6 +249,16 @@ async function runEntries(userId, now = new Date()) {
     const owned = new Set((await query(`SELECT UPPER(symbol) AS s FROM holdings WHERE user_id = $1 AND quantity > 0`, [String(userId)])).rows.map(r => r.s));
     const coreSyms = await require('./coreHoldingsService').getCoreSymbols(userId).catch(() => null);
     if (!coreSyms) return { opened: [], reason: 'could not read protected symbols' };
+    // Real cash, not buying power (a margin account shows several times its cash as buying power).
+    let room;
+    try {
+        const acct = (await axios.get(`${client.trade}/v2/account`, { headers: client.headers, timeout: 15000 })).data;
+        room = cashSecuredRoom({ cash: parseFloat(acct.cash), equity: parseFloat(acct.equity), reserved: collateral });
+    } catch (err) { return { opened: [], reason: `could not read account cash: ${err.message}` }; }
+    if (room <= 0) {
+        logger.info('[OptionsIncome] No new puts — not enough free cash to fully secure one', { userId, reservedCollateral: collateral, bufferPct: cashBufferPct() });
+        return { opened: [], reason: 'not enough free cash (fully cash-secured rule)' };
+    }
     const opened = [];
     for (const u of await candidateUnderlyings()) {
         if (slots <= 0) break;
@@ -255,6 +275,7 @@ async function runEntries(userId, now = new Date()) {
         }
         const need = pick.strike * 100;
         if (collateral + need > maxCollateralTotal()) continue;
+        if (need > room) { logger.info('[OptionsIncome] Skipped — would not be fully cash-secured', { symbol: u.symbol, need, freeCash: Math.round(room) }); continue; }
         const limit = roundTick(pick.mid);
         try {
             const o = (await axios.post(`${client.trade}/v2/orders`, {
@@ -268,7 +289,7 @@ async function runEntries(userId, now = new Date()) {
             sectorCount[u.sector] = (sectorCount[u.sector] || 0) + 1;
             logger.info('[OptionsIncome] Sell-to-open placed', { userId, contract: pick.contract, limit, delta: pick.delta, dte: pick.dte, premiumPct: pick.premiumPct.toFixed(2) });
             opened.push({ contract: pick.contract, limit, collateral: need });
-            held.add(u.symbol); slots--; collateral += need;
+            held.add(u.symbol); slots--; collateral += need; room -= need;
         } catch (err) {
             logger.warn('[OptionsIncome] Order rejected', { userId, contract: pick.contract, error: err.response?.data?.message || err.message });
         }
@@ -581,4 +602,4 @@ function exitPlan(t, { mark = null, stockPrice = null } = {}) {
     return plan;
 }
 
-module.exports = { CFG, ymd, exitPlan, choosePut, recentVolume, atmIv, recordIvSnapshot, assignmentPnl, stepDownLimit, nextEarnings, candidateUnderlyings, runEntries, runManagement, runTick, summary, ensureTable };
+module.exports = { cashSecuredRoom, CFG, ymd, exitPlan, choosePut, recentVolume, atmIv, recordIvSnapshot, assignmentPnl, stepDownLimit, nextEarnings, candidateUnderlyings, runEntries, runManagement, runTick, summary, ensureTable };

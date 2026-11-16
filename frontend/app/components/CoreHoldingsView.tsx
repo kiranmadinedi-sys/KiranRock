@@ -334,7 +334,8 @@ export default function CoreHoldingsView() {
             {/* How it works */}
             <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 p-6 text-sm text-slate-600 dark:text-slate-300 space-y-2">
                 <h3 className="text-md font-semibold text-slate-900 dark:text-white mb-2">How it works</h3>
-                <p>• Once each trading day after 10:00 AM ET, buys whole shares toward your targets, keeping the cash reserve free for the swing bot. Large targets build up over a few days (per-order limit).</p>
+                <p>• Once each trading day after 10:00 AM ET, buys toward your targets using fractional shares (so a $40 gap can be filled even when one share costs $500), keeping the cash reserve free for the swing bot. Small gaps (under $50 or under 10% of the target) are left alone to avoid tiny orders. Large targets build up over a few days (per-order limit).</p>
+                <p>• SGOV appears twice in the accounting: your <b>core SGOV target</b> is never sold, while <b>cash-sweep SGOV</b> (paper only) is tracked separately and is the only part sold back when swing trading needs cash.</p>
                 <p>• <b>Never sells automatically.</b> Selling core is always your decision.</p>
                 <p>• No stop-loss on core positions, and the swing bot never touches them — they don't count toward its position limit.</p>
                 <p>• Core moves with the market: since 2023 the S&P 500's worst drop was about −19% and the Nasdaq's about −23%. Use money you can hold through that.</p>

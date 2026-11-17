@@ -117,6 +117,21 @@ const JUMP_GUARD_SQL = MAX_SCAN_DAY_JUMP_PCT > 0
     : '';
 
 /**
+ * Dead-ticker guard (2026-11-17): drop symbols whose newest daily bar is more than
+ * STALE_BAR_DAYS calendar days older than the scan date. Acquired/delisted stocks stay in
+ * asset_universe (the sync only upserts active assets, never marks old ones inactive), so
+ * the nightly scan kept scoring them on their last pre-deal bars. Found: ROKU (bought by
+ * FOXA, closed 11-06) scored 100 on the 11-16 scan; all 3 accounts tried to buy at 9:01,
+ * Alpaca rejected (asset inactive), and it held one of the 40 candidate slots all day.
+ * Same pool also had KVUE, PRA, TBPH, NSA. A symbol with no bars at all is kept (unknown).
+ */
+const STALE_BAR_DAYS = parseInt(process.env.STALE_BAR_DAYS || '7', 10);
+const STALE_GUARD_SQL = STALE_BAR_DAYS > 0
+    ? `AND COALESCE((SELECT MAX(b.timestamp) FROM daily_bars b WHERE b.symbol = daily_universe_analysis.symbol),
+                    'infinity'::timestamptz) >= daily_universe_analysis.analysis_date - INTERVAL '${STALE_BAR_DAYS} days'`
+    : '';
+
+/**
  * Hype-gap guard (2026-10-17): drop stocks that gapped up ≥5% at the open on ≥2.5× their
  * 20-day volume WITHOUT earnings news, on the scan day or the 4 trading days before.
  * 3-year study (Jun 2023 → Oct 2026, entry at the gap day's close): −8.25% vs the S&P
@@ -198,6 +213,7 @@ async function loadCandidates({ minScore = 85, limit = 120, rankBy = 'score', on
                AND passed_prescreen = true
                AND ai_score >= $1
                ${JUMP_GUARD_SQL}
+               ${STALE_GUARD_SQL}
              ORDER BY ai_score DESC, md5(symbol || analysis_date::text) ASC`,
             [minScore]
         );
@@ -241,6 +257,7 @@ async function loadCandidates({ minScore = 85, limit = 120, rankBy = 'score', on
            AND passed_prescreen = true
            AND ai_score >= $1
            ${JUMP_GUARD_SQL}
+           ${STALE_GUARD_SQL}
          ORDER BY ai_score DESC, md5(symbol || analysis_date::text) ASC
          LIMIT $2`,
         [minScore, limit + 15]

@@ -32,6 +32,9 @@ market falls. It has three parts ("legs"):
   doing. A bug fix must not change any threshold, filter or rule. Each fix is described to the owner
   before it is made, then logged in section 10 with the trades it affected.
 - **Live trading:** not considered at 30 days under any result (section 7).
+- **Not part of this assessment:** the mega-cap reversal put shadow log (`reversalPutShadowService`,
+  added 2026-11-21, before Day 1). It places no orders, shares no code or state with the bear side, and
+  only reads market data. It is judged separately, in its own weekly-review section.
 
 ## 2. Timeline (NYSE trading days; closed 11-26, 12-25 and 1-1)
 

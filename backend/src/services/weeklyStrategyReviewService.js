@@ -173,6 +173,21 @@ const REVIEWS = [
         },
     },
     {
+        key: 'reversal_puts', title: 'Mega-cap reversal → puts (SHADOW LOG ONLY — no orders)',
+        question: 'When a big stock opens high then reverses on a weak-market day, would buying puts have paid after real bid/ask costs? Judge by DAYS, not signals (one market-wide reversal fires many stocks at once).',
+        async data() {
+            const s = await require('./reversalPutShadowService').summary();
+            if (!s.signals) return ['No signals logged yet (needs a weak-market day with mega-cap reversals)'];
+            const lines = [`${s.signals} signals on ${s.days} day(s)`];
+            for (const [h, x] of Object.entries(s.byHorizon)) {
+                if (!x.graded) continue;
+                const puts = Object.entries(x.puts).map(([k, a]) => `${k} n=${a.n} avg ${pct(a.avgAskToBidPct)} (mid ${pct(a.avgMidPct)}), won ${pct(a.wonPct)}`).join(' · ');
+                lines.push(`${h}: stock ${pct(x.avgStockMovePct)} · near ATM by day: ${x.nearAtmByDay.days} days, avg ${pct(x.nearAtmByDay.avgAskToBidPct)}, days won ${pct(x.nearAtmByDay.daysWonPct)} · ${puts}`);
+            }
+            return lines;
+        },
+    },
+    {
         key: 'exit', title: "Exit profile ('wide' on paper vs standard on live)",
         question: 'Has the wider exit held up on real trades? → propose it for live, or not.',
         async data(now) {

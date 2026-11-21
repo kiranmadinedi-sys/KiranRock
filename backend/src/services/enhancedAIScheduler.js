@@ -1717,6 +1717,9 @@ function startScheduler() {
         require('./bearSideService').runTick().catch(err =>
             console.warn('[BearSide] Tick failed:', err.message)
         );                                 // market hours: paper bear side (inverse ETFs, shorts, put spreads) while regime is BEAR
+        require('./reversalPutShadowService').runTick().catch(err =>
+            console.warn('[ReversalShadow] Tick failed:', err.message)
+        );                                 // market hours: SHADOW LOG ONLY (no orders) — mega-cap reversal → put prices, graded later
         require('./researchArchiveService').syncRecentNews().catch(() => {}); // every tick, 24/7: all-ticker news archive
         runCryptoWatchdog();               // every tick, 24/7: alert if the crypto process went silent while positions are open
         runMorningBriefing();              // 8:00 AM ET Mon-Fri: STRONG BUY pre-market alert

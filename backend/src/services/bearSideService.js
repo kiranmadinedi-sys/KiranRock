@@ -46,6 +46,18 @@
  * Every day in BEAR the top-20 short candidates are logged with their price (bear_short_candidates), so
  * shorting is graded on all of them, not only the few traded.
  *
+ * Second review pass (2026-11-21): stale/fallback regime readings are "unknown" (hold, no entries, no timers);
+ * BULL_STRONG/BULL_MILD close the book (the regime service never says plain 'BULL' — that rule had never fired);
+ * any fresh non-bear reading restarts the BEAR confirmation, which must also span two trading sessions. Shorts:
+ * dividends due inside the hold are looked up (Alpaca corporate actions) and counted in max loss — special or
+ * > 1%-of-price dividends are skipped, and an open short is covered before one goes ex; no entry into a stock up
+ * 4%+ today or under a short-sale restriction; borrow re-checked hourly; squeeze warnings (6% in 15 min, 4×
+ * volume, gap-up, possible halt) alert but never widen the stop. Exits: an unfilled hedge sell stays
+ * pending_close until the broker confirms it; spread closes re-order only what the broker still holds; a
+ * liquidation not done in 30 min alerts, and when done it is confirmed flat at the broker. Report: +10/20/30%
+ * single-short gap stress, dividend liability, results by regime (BEAR moderate/high VIX, PANIC, recovery),
+ * and an RSI-band shadow test of the rejected candidates.
+ *
  * HARD GUARD: refuses any account whose Alpaca credentials are not paper. Enabled per account via
  * BEAR_SIDE_USER_IDS. Anything for real money would go through an approval request.
  */
@@ -87,6 +99,19 @@ const CFG = {
     recoveryBounce5dPct: 3,      // SPY +3% in 5 days, or back above its 20-day average = recovering: no new entries
     stressGapPct: 5,             // report-only stress test: overnight market gap up of 5%
     shortStressBeta: 1.5,
+    // 2026-11-21 second review pass (checked against code + Alpaca data):
+    stressSingleGapsPct: [10, 20, 30], // report-only: one short (and all shorts) gapping up this much overnight
+    staleRegimeMin: 30,          // a regime reading older than this (data-failure fallback) = unknown: no entries, no timers
+    divMaxPctOfPrice: 1,         // skip a short whose dividend due inside the hold is > 1% of the price, or any special dividend
+    entryMaxDayUpPct: 4,         // don't short a stock already up 4%+ today (squeezing / gapping up)
+    ssrDropPct: 10,              // short-sale restriction (Rule 201): −10% from the prior close → skip today and the next day
+    squeezeRisePct: 6,           // open short up 6%+ off its 15-minute low → alert (stop is never widened)
+    squeezeWindowMin: 15,
+    squeezeVolMult: 4,           // 15-minute volume ≥ 4× a normal 15 minutes while rising → alert
+    gapUpAlertPct: 5,            // open short opened 5%+ above yesterday's close → alert
+    haltNoQuoteMin: 10,          // no quote/trade for 10 min in market hours → possibly halted → alert
+    borrowCheckMin: 60,          // re-check borrow status hourly (Alpaca has no recall / buy-in notice API)
+    closeStuckMin: 30,           // liquidation still not done after 30 min → alert
 };
 const hedgePct = () => num('BEAR_HEDGE_PCT', 10);
 const shortEachPct = () => num('BEAR_SHORT_EACH_PCT', 2);
@@ -158,7 +183,10 @@ async function ensureTables() {
             checked_at    TIMESTAMPTZ
         )`);
     await query(`ALTER TABLE bear_positions ADD COLUMN IF NOT EXISTS risk_usd NUMERIC, ADD COLUMN IF NOT EXISTS sector TEXT`);
-    await query(`ALTER TABLE bear_state ADD COLUMN IF NOT EXISTS bear_since TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS recovering BOOLEAN`);
+    await query(`ALTER TABLE bear_state ADD COLUMN IF NOT EXISTS bear_since TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS recovering BOOLEAN,
+                 ADD COLUMN IF NOT EXISTS liquidating_since TIMESTAMPTZ`);
+    await query(`ALTER TABLE bear_short_candidates ADD COLUMN IF NOT EXISTS rsi NUMERIC, ADD COLUMN IF NOT EXISTS passed BOOLEAN NOT NULL DEFAULT true,
+                 ADD COLUMN IF NOT EXISTS reject_reason TEXT`);
     _ready = true;
 }
 
@@ -213,16 +241,23 @@ async function _optionQuotes(client, contracts) {
  *   BULL    → close at once
  */
 function regimeDecision({ regimeType, lastBearAt, bearSince = null, recovering = false, now = new Date(),
-                          exitHours = exitAfterHours(), confirmHours = CFG.bearConfirmHours }) {
+                          exitHours = exitAfterHours(), confirmHours = CFG.bearConfirmHours, stale = false }) {
+    // a stale / fallback reading says nothing new: keep what is open (stops stay on), enter nothing
+    if (stale) return { bearNow: false, hold: true, enter: false, stale: true, why: 'regime reading stale (data fallback): hold, no entries' };
     const bearNow = BEAR_REGIMES.has(regimeType);
     if (bearNow) {
         const bearHours = bearSince ? (now.getTime() - new Date(bearSince).getTime()) / 3600000 : 0;
-        const enter = regimeType === 'BEAR' && bearHours >= confirmHours && !recovering;
-        const why = regimeType !== 'BEAR' ? 'PANIC: no new entries' : bearHours < confirmHours ? `BEAR only ${bearHours.toFixed(1)}h old (needs ${confirmHours}h)`
+        // the streak must span two trading sessions as well as confirmHours (weekend hours alone don't confirm)
+        const priorSession = bearSince ? etToday(new Date(bearSince)) < etToday(now) : false;
+        const enter = regimeType === 'BEAR' && bearHours >= confirmHours && priorSession && !recovering;
+        const why = regimeType !== 'BEAR' ? 'PANIC: no new entries'
+            : bearHours < confirmHours ? `BEAR only ${bearHours.toFixed(1)}h old (needs ${confirmHours}h)`
+            : !priorSession ? 'BEAR first seen this session (needs a second session)'
             : recovering ? 'market bouncing: no new entries' : null;
         return { bearNow, hold: true, enter, why };
     }
-    if (regimeType === 'BULL') return { bearNow, hold: false, enter: false, why: 'BULL: close' };
+    // the regime service reports BULL_STRONG / BULL_MILD (never plain 'BULL')
+    if (/^BULL/.test(String(regimeType))) return { bearNow, hold: false, enter: false, why: `${regimeType}: close` };
     const since = lastBearAt ? (now.getTime() - new Date(lastBearAt).getTime()) / 3600000 : Infinity;
     return { bearNow, hold: since < exitHours, enter: false, hoursSinceBear: since, why: `not bear for ${Number.isFinite(since) ? since.toFixed(1) + 'h' : 'ever'}` };
 }
@@ -249,29 +284,84 @@ async function _regimeState(userId, now, client) {
     const regime = await require('./marketRegimeService').getMarketRegime();
     const regimeType = regime?.regimeType || regime?.regime || 'NEUTRAL';
     const uid = String(userId);
+    const stale = regimeStale(regime, now);
+    if (stale) {
+        // don't let a fallback reading start, extend or end the bear streak
+        await query(`INSERT INTO bear_state (user_id, checked_at) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET checked_at = $2`, [uid, now]);
+        const st0 = (await query(`SELECT last_bear_at FROM bear_state WHERE user_id = $1`, [uid])).rows[0];
+        if (st0?.last_bear_at && now - new Date(st0.last_bear_at) > 3600000) {
+            await _alert(userId, 'regime-stale', `Market-regime reading is stale (${regime?.timestamp || 'no data'}). Bear side is holding, with no new entries, until it is fresh.`, now);
+        }
+        return { regimeType, recovery: { recovering: false }, vix: regime?.vixLevel ?? null, ...regimeDecision({ regimeType, stale: true }) };
+    }
     const rec = client ? recoverySignal(await _spyCloses(client).catch(() => [])) : { recovering: false };
     if (BEAR_REGIMES.has(regimeType)) {
         await query(`INSERT INTO bear_state (user_id, last_bear_at, bear_since, last_regime, checked_at, recovering) VALUES ($1, $2, $2, $3, $2, $4)
                      ON CONFLICT (user_id) DO UPDATE SET last_bear_at = $2, bear_since = COALESCE(bear_state.bear_since, $2),
                      last_regime = $3, checked_at = $2, recovering = $4`, [uid, now, regimeType, rec.recovering]);
     } else {
+        // a fresh non-bear reading breaks the streak: the next BEAR is confirmed from scratch
+        // (holding open positions still runs off last_bear_at + the exit timer)
         await query(`INSERT INTO bear_state (user_id, last_regime, checked_at, recovering) VALUES ($1, $2, $3, $4)
-                     ON CONFLICT (user_id) DO UPDATE SET last_regime = $2, checked_at = $3, recovering = $4`, [uid, regimeType, now, rec.recovering]);
+                     ON CONFLICT (user_id) DO UPDATE SET last_regime = $2, checked_at = $3, recovering = $4, bear_since = NULL`, [uid, regimeType, now, rec.recovering]);
     }
     const st = (await query(`SELECT last_bear_at, bear_since FROM bear_state WHERE user_id = $1`, [uid])).rows[0];
     const d = regimeDecision({ regimeType, lastBearAt: st?.last_bear_at, bearSince: st?.bear_since, recovering: rec.recovering, now });
-    // the bear streak ends when the book is told to close: the next BEAR must be confirmed again
-    if (!d.hold && st?.bear_since) await query(`UPDATE bear_state SET bear_since = NULL WHERE user_id = $1`, [uid]);
-    return { regimeType, recovery: rec, ...d };
+    return { regimeType, recovery: rec, vix: regime?.vixLevel ?? null, ...d };
+}
+
+/** Pure: is a regime reading too old to act on? (The regime service falls back to a ≤6h-old copy, or to NEUTRAL with no data.) */
+function regimeStale(regime, now = new Date(), maxMin = CFG.staleRegimeMin) {
+    if (!regime || regime.spyPrice == null || !regime.timestamp) return true;
+    return (now.getTime() - new Date(regime.timestamp).getTime()) / 60000 > maxMin;
 }
 
 // ─── Risk (pure, unit-tested) ────────────────────────────────────────────────
 
 /** The most one position can lose: hedge/short = distance to its stop; spread = the debit paid. */
-function positionRisk({ leg, qty, price, debit }) {
+function positionRisk({ leg, qty, price, debit, dividendUsd = 0 }) {
     if (leg === 'spread') return r2((debit || 0) * 100 * (qty || 0));
     const stopPct = leg === 'short' ? CFG.shortStopPct : CFG.hedgeStopPct;
-    return r2((qty || 0) * (price || 0) * stopPct / 100);
+    // a short owes any dividend that goes ex while it is open — part of what it can lose
+    return r2((qty || 0) * (price || 0) * stopPct / 100 + (leg === 'short' ? dividendUsd : 0));
+}
+
+/**
+ * Pure: dividends a short would owe if held from today for holdDays. divs = Alpaca cash_dividends rows
+ * (ex_date, rate, special) for the past ~13 months and any announced ones. Announced ex-dates inside the
+ * hold count in full; if none is announced, a regular payer's next ex-date is projected from its usual
+ * interval (estimated). ok=false for any special dividend in the hold, or > maxPct of the price.
+ */
+function dividendExposure(divs, { today, holdDays = CFG.shortMaxDays, price, maxPct = CFG.divMaxPctOfPrice } = {}) {
+    const rows = (divs || []).filter(d => d?.ex_date && d.rate > 0).sort((a, b) => a.ex_date.localeCompare(b.ex_date));
+    const inHold = d => { const n = dayDiff(d, today); return n >= 0 && n <= holdDays; };
+    const announced = rows.filter(d => inHold(d.ex_date));
+    let perShare = announced.reduce((s, d) => s + Number(d.rate), 0), estimated = false, exDate = announced[0]?.ex_date || null;
+    const special = announced.some(d => d.special);
+    if (!announced.length) {
+        const regular = rows.filter(d => !d.special && d.ex_date < today);
+        if (regular.length >= 2) {
+            const gaps = regular.slice(1).map((d, i) => dayDiff(d.ex_date, regular[i].ex_date)).sort((a, b) => a - b);
+            const gap = gaps[Math.floor(gaps.length / 2)];
+            const last = regular[regular.length - 1];
+            const next = new Date(new Date(last.ex_date).getTime() + gap * 86400000).toISOString().slice(0, 10);
+            // projected inside the hold (allow a week of drift in either direction)
+            const n = dayDiff(next, today);
+            if (gap >= 20 && n >= -7 && n <= holdDays + 7) { perShare = Number(last.rate); estimated = true; exDate = next; }
+        }
+    }
+    const pct = price > 0 ? perShare / price * 100 : 0;
+    const ok = !special && pct <= maxPct;
+    return { ok, perShare: r2(perShare * 1e4) / 1e4, pctOfPrice: r2(pct), exDate, estimated, special,
+             why: special ? 'special dividend inside the hold' : !ok ? `dividend ${r2(pct)}% of price inside the hold` : null };
+}
+
+async function _dividends(client, symbol, today) {
+    const start = new Date(new Date(today).getTime() - 400 * 86400000).toISOString().slice(0, 10);
+    const end = new Date(new Date(today).getTime() + (CFG.shortMaxDays + 10) * 86400000).toISOString().slice(0, 10);
+    const r = await axios.get(`${DATA}/v1/corporate-actions`, { headers: client.headers, timeout: 15000,
+        params: { symbols: symbol, types: 'cash_dividend', start, end, limit: 1000 } });
+    return r.data?.corporate_actions?.cash_dividends || [];
 }
 
 /** Room left for new risk: total budget minus open risk, and the per-position cap. */
@@ -315,6 +405,58 @@ function stressLoss(open, { gapPct = CFG.stressGapPct, beta = CFG.shortStressBet
         else if (p.leg === 'spread') loss += Math.min(p.debitUsd || 0, (p.debitUsd || 0) * 0.5 * gapPct / 5); // ~half the debit on a 5% gap, never more than the debit
     }
     return r2(loss);
+}
+
+/**
+ * Pure: report-only single-stock gap stress — a short gapping up X% opens above its stop, so the loss is the
+ * whole gap. Shows the largest short alone and every short at once, for each X in gaps.
+ */
+function shortGapStress(open, { gaps = CFG.stressSingleGapsPct } = {}) {
+    const vals = open.filter(p => p.leg === 'short').map(p => Math.abs(p.value || 0));
+    const largest = vals.length ? Math.max(...vals) : 0, all = vals.reduce((s, v) => s + v, 0);
+    return gaps.map(g => ({ gapPct: g, largestShortUsd: r2(largest * g / 100), allShortsUsd: r2(all * g / 100) }));
+}
+
+/**
+ * Pure: entry-day tape checks for a new short from an Alpaca snapshot. prevPrevClose = the close before
+ * prevDailyBar (for yesterday's short-sale-restriction check). ok=false with the reason if it should be skipped.
+ */
+function entryTape(snap, prevPrevClose, { maxUpPct = CFG.entryMaxDayUpPct, ssrPct = CFG.ssrDropPct } = {}) {
+    const prev = snap?.prevDailyBar?.c, px = snap?.latestTrade?.p || snap?.dailyBar?.c;
+    if (!(prev > 0) || !(px > 0)) return { ok: false, reason: 'no snapshot' };
+    const dayPct = (px / prev - 1) * 100;
+    if (dayPct >= maxUpPct) return { ok: false, reason: `up ${r2(dayPct)}% today (squeeze / gap-up)`, dayPct: r2(dayPct) };
+    const low = Math.min(snap?.dailyBar?.l || px, px);
+    if ((low / prev - 1) * 100 <= -ssrPct) return { ok: false, reason: 'short-sale restriction likely today (−10% from prior close)', dayPct: r2(dayPct) };
+    if (prevPrevClose > 0 && snap?.prevDailyBar?.l > 0 && (snap.prevDailyBar.l / prevPrevClose - 1) * 100 <= -ssrPct) {
+        return { ok: false, reason: 'short-sale restriction carried over from yesterday', dayPct: r2(dayPct) };
+    }
+    return { ok: true, dayPct: r2(dayPct) };
+}
+
+/**
+ * Pure: squeeze warning signs for an open short. bars = recent 1-minute bars (oldest first, {t,h,l,c,v});
+ * snap = Alpaca snapshot. Returns a list of flags (empty = nothing unusual). Alert-only: the stop is never widened.
+ */
+function squeezeFlags({ bars = [], snap = null, nowMs = Date.now(), windowMin = CFG.squeezeWindowMin, risePct = CFG.squeezeRisePct,
+                        volMult = CFG.squeezeVolMult, gapPct = CFG.gapUpAlertPct, haltMin = CFG.haltNoQuoteMin } = {}) {
+    const flags = [];
+    const recent = bars.filter(b => nowMs - new Date(b.t).getTime() <= windowMin * 60000);
+    const last = recent[recent.length - 1]?.c ?? snap?.latestTrade?.p;
+    if (recent.length) {
+        const low = Math.min(...recent.map(b => b.l));
+        const rise = (last / low - 1) * 100;
+        if (rise >= risePct) flags.push(`up ${r2(rise)}% in ${windowMin} min`);
+        const prevVol = snap?.prevDailyBar?.v;
+        const vol = recent.reduce((s, b) => s + (b.v || 0), 0);
+        if (prevVol > 0 && vol >= prevVol / (390 / windowMin) * volMult && last > recent[0].o) flags.push(`volume ${r2(vol / (prevVol / (390 / windowMin)))}× normal while rising`);
+    }
+    const prevC = snap?.prevDailyBar?.c, open = snap?.dailyBar?.o;
+    const todayBar = snap?.dailyBar?.t && etToday(new Date(snap.dailyBar.t)) === etToday(new Date(nowMs));
+    if (todayBar && prevC > 0 && open > 0 && (open / prevC - 1) * 100 >= gapPct) flags.push(`gapped up ${r2((open / prevC - 1) * 100)}% at the open`);
+    const lastSeen = Math.max(new Date(snap?.latestTrade?.t || 0).getTime(), new Date(snap?.latestQuote?.t || 0).getTime());
+    if (snap && lastSeen > 0 && (nowMs - lastSeen) / 60000 >= haltMin) flags.push(`no trade or quote for ${Math.round((nowMs - lastSeen) / 60000)} min (possible halt)`);
+    return flags;
 }
 
 // ─── Money available ─────────────────────────────────────────────────────────
@@ -398,7 +540,7 @@ async function _enterHedge(client, userId, f, rows, regimeType) {
             await query(`INSERT INTO bear_positions (user_id, leg, symbol, qty, status, entry_price, entry_order_id, regime, closed_at, risk_usd, meta)
                          VALUES ($1, 'hedge', $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
                 [String(userId), etf.symbol, filled || qty, filled > 0 ? 'open' : 'not_filled', fillPx, res.orderId || null, regimeType, filled > 0 ? null : new Date(),
-                 risk, JSON.stringify({ decisionPx: px, slippagePct: r2((fillPx / px - 1) * 100) })]);
+                 risk, JSON.stringify({ decisionPx: px, slippagePct: r2((fillPx / px - 1) * 100), vixAtEntry: f.vix ?? null })]);
             _book(f, filled * fillPx, { usesCash: true, risk });
             out.push({ leg: 'hedge', symbol: etf.symbol, qty: filled, price: res.filledAvgPrice });
         } catch (err) {
@@ -423,10 +565,36 @@ async function _closeHedge(userId, r, reason, px, liveQty) {
     const broker = require('./brokerService');
     if (!(liveQty > 0)) return _hedgeGone(userId, r, px);
     const res = await broker.sellMarket(userId, r.symbol, liveQty, { executedBy: 'BEAR_HEDGE', reason: `Bear-side hedge exit: ${reason}` });
+    const filled = Number(res.filledQty) || 0;
+    if (filled < liveQty) {
+        // not (fully) filled yet — sellMarket returns early on a resting/partial order. Keep it open as
+        // pending_close and confirm against the broker next tick; never mark closed on an unfilled sell.
+        await query(`UPDATE bear_positions SET status = 'pending_close', exit_order_id = $2, exit_reason = $3,
+                     meta = meta || jsonb_build_object('closeStartedAt', COALESCE(meta->>'closeStartedAt', NOW()::text)) WHERE id = $1`,
+            [r.id, res.orderId || null, reason]);
+        logger.warn('[BearSide] Hedge sell not fully filled — will confirm next tick', { userId, symbol: r.symbol, want: liveQty, filled, status: res.status });
+        return { symbol: r.symbol, leg: 'hedge', pendingClose: true, filled };
+    }
     const exit = Number(res.filledAvgPrice) || px;
     await query(`UPDATE bear_positions SET status = 'closed', closed_at = NOW(), exit_price = $2, exit_reason = $3, exit_order_id = $4,
-                 pnl = ($2::numeric - entry_price) * $5::numeric WHERE id = $1`, [r.id, exit, reason, res.orderId || null, Number(res.filledQty) || liveQty]);
+                 pnl = ($2::numeric - entry_price) * qty WHERE id = $1`, [r.id, exit, reason, res.orderId || null]);
     return { symbol: r.symbol, reason, exit };
+}
+
+/** A hedge whose exit sell was not fully filled: closed once the broker no longer holds it; re-sells if the order died. */
+async function _manageHedgeClosing(client, userId, r, px, liveQty, now) {
+    const o = r.exit_order_id ? await _get(client, `/v2/orders/${r.exit_order_id}`).catch(() => undefined) : null;
+    if (o === undefined) return null; // couldn't read the order — never re-sell blind
+    if (!(liveQty > 0)) {
+        const exit = parseFloat(o?.filled_avg_price) || px || Number(r.entry_price);
+        await query(`UPDATE bear_positions SET status = 'closed', closed_at = NOW(), exit_price = $2, pnl = ($2::numeric - entry_price) * qty WHERE id = $1`, [r.id, exit]);
+        return { symbol: r.symbol, leg: 'hedge', reason: r.exit_reason, exit };
+    }
+    if (!o || ['canceled', 'expired', 'rejected', 'filled'].includes(o.status)) {
+        // the order is finished but shares remain (partial fill / rejection): sell what is still held
+        return _closeHedge(userId, r, r.exit_reason || 'retry exit', px, liveQty);
+    }
+    return null; // still working
 }
 
 // ─── Leg 2: short selling ────────────────────────────────────────────────────
@@ -487,9 +655,25 @@ async function _logCandidates(cands, regimeType, today) {
     const top = cands.slice(0, CFG.candidatesLogged);
     for (let i = 0; i < top.length; i++) {
         const c = top[i];
-        await query(`INSERT INTO bear_short_candidates (d, symbol, rank, price, ret63, ret5, regime) VALUES ($1,$2,$3,$4,$5,$6,$7)
-                     ON CONFLICT (d, symbol) DO NOTHING`, [today, c.symbol, i + 1, c.price, c.ret63, c.ret5, regimeType]);
+        await query(`INSERT INTO bear_short_candidates (d, symbol, rank, price, ret63, ret5, regime, rsi, passed) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true)
+                     ON CONFLICT (d, symbol) DO NOTHING`, [today, c.symbol, i + 1, c.price, c.ret63, c.ret5, regimeType, c.rsi ?? null]);
     }
+}
+
+/** Shadow only: candidates the short-quality filter rejected (RSI < 30, recent +8% day), for grading the cut-off. */
+async function _logRejected(rejected, regimeType, today) {
+    for (let i = 0; i < rejected.length; i++) {
+        const c = rejected[i];
+        await query(`INSERT INTO bear_short_candidates (d, symbol, rank, price, ret63, ret5, regime, rsi, passed, reject_reason)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,false,$9) ON CONFLICT (d, symbol) DO NOTHING`,
+            [today, c.symbol, i + 1, c.price, c.ret63, c.ret5, regimeType, c.rsi ?? null, String(c.reject || '').slice(0, 200)]);
+    }
+}
+
+/** Pure: the RSI band the review proposed (for the shadow comparison only — trading still uses RSI ≥ 30). */
+function rsiBand(rsi) {
+    if (rsi == null) return 'unknown';
+    return rsi < 25 ? '<25' : rsi < 30 ? '25-30' : rsi < 40 ? '30-40' : rsi < 50 ? '40-50' : '50+';
 }
 
 async function _enterShorts(client, userId, f, rows, regimeType, today, now) {
@@ -505,13 +689,15 @@ async function _enterShorts(client, userId, f, rows, regimeType, today, now) {
     // short-specific checks on the strongest-looking 40: not extremely oversold, no recent squeeze-type day
     const closes = await _recentCloses(ranked.slice(0, 40).map(c => c.symbol));
     const { resolveSector } = require('./sectorMetadataService');
-    const cands = [];
+    const cands = [], rejected = [];
     for (const c of ranked.slice(0, 40)) {
         const q = shortQuality(closes[c.symbol] || []);
-        if (!q.ok) continue;
+        if (!q.ok) { rejected.push({ ...c, rsi: q.rsi ?? rsi14(closes[c.symbol] || []), reject: q.reason }); continue; }
         cands.push({ ...c, rsi: q.rsi, sector: resolveSector(c.symbol) || null });
     }
     await _logCandidates(cands, regimeType, today);
+    // shadow only: the rejected ones too, with their RSI band, so the RSI 30 cut-off can be graded (never traded)
+    await _logRejected(rejected, regimeType, today).catch(err => logger.warn('[BearSide] Rejected-candidate log failed', { error: err.message }));
     if (slots <= 0) return out;
     const nextEarnings = require('./optionsIncomeService').nextEarnings;
     const sectorCount = {};
@@ -528,16 +714,30 @@ async function _enterShorts(client, userId, f, rows, regimeType, today, now) {
             const earn = await nextEarnings(c.symbol, now);
             if (earn === undefined) continue; // lookup failed — fail closed
             if (earn && dayDiff(earn, today) <= CFG.shortMaxDays) continue;
-            const px = (await _stockPrices(client, [c.symbol]))[c.symbol] || c.price;
-            const qty = Math.floor(notional / px);
+            // today's tape: not squeezing / gapping up, no short-sale restriction (today or carried from yesterday)
+            const snap = (await axios.get(`${DATA}/v2/stocks/snapshots`, { headers: client.headers, timeout: 15000, params: { symbols: c.symbol, feed: 'iex' } })).data?.[c.symbol];
+            const cl = closes[c.symbol] || [];
+            const prevDate = snap?.prevDailyBar?.t ? etToday(new Date(snap.prevDailyBar.t)) : null;
+            const ppc = prevDate ? (await query(`SELECT close::float AS c FROM daily_bars WHERE symbol = $1 AND (timestamp AT TIME ZONE 'UTC')::date < $2
+                                                 ORDER BY timestamp DESC LIMIT 1`, [c.symbol, prevDate])).rows[0]?.c : cl[cl.length - 2];
+            const tape = entryTape(snap, ppc);
+            if (!tape.ok) { out.push({ leg: 'short', symbol: c.symbol, skipped: tape.reason }); continue; }
+            const px = snap?.latestTrade?.p || (await _stockPrices(client, [c.symbol]))[c.symbol] || c.price;
+            // dividends owed while short: worked out before opening; fail closed if the lookup fails
+            const div = dividendExposure(await _dividends(client, c.symbol, today), { today, price: px });
+            if (!div.ok) { out.push({ leg: 'short', symbol: c.symbol, skipped: div.why }); continue; }
+            let qty = Math.floor(notional / px);
+            // the expected dividend counts toward the position's max loss
+            while (qty >= 1 && positionRisk({ leg: 'short', qty, price: px, dividendUsd: qty * div.perShare }) > _tradeRisk(f)) qty--;
             if (qty < 1) continue;
-            const res = await _openShort(client, userId, c.symbol, qty, regimeType, rows, { sector: c.sector, decisionPx: px });
+            const res = await _openShort(client, userId, c.symbol, qty, regimeType, rows,
+                { sector: c.sector, decisionPx: px, dividend: div, rsi: c.rsi, vix: f.vix ?? null });
             if (res) {
                 out.push(res);
                 if (res.qty > 0 || res.pending) {
                     // a pending order is booked at its intended size so a slow fill can't open a sixth short
                     const q = res.qty > 0 ? res.qty : qty, p = res.price || px;
-                    slots--; _book(f, q * p, { usesCash: false, risk: positionRisk({ leg: 'short', qty: q, price: p }) });
+                    slots--; _book(f, q * p, { usesCash: false, risk: positionRisk({ leg: 'short', qty: q, price: p, dividendUsd: q * div.perShare }) });
                     sectorCount[c.sector || 'Unknown'] = (sectorCount[c.sector || 'Unknown'] || 0) + 1;
                     await query(`UPDATE bear_short_candidates SET traded = true WHERE d = $1 AND symbol = $2`, [today, c.symbol]);
                 }
@@ -549,13 +749,16 @@ async function _enterShorts(client, userId, f, rows, regimeType, today, now) {
     return out;
 }
 
-async function _openShort(client, userId, symbol, qty, regimeType, rows, { sector = null, decisionPx = null } = {}) {
+async function _openShort(client, userId, symbol, qty, regimeType, rows, { sector = null, decisionPx = null, dividend = null, rsi = null, vix = null } = {}) {
     // protect first: a swing buy of this symbol would quietly cover the short
     await require('./coreHoldingsService').setBearSymbols(userId, [...new Set([...rows.filter(r => r.leg !== 'spread').map(r => r.symbol), symbol])]);
     const o = await _post(client, '/v2/orders', { symbol, qty: String(qty), side: 'sell', type: 'market', time_in_force: 'day' });
+    const divPs = dividend?.perShare || 0;
     const ins = await query(`INSERT INTO bear_positions (user_id, leg, symbol, qty, status, entry_order_id, regime, sector, risk_usd, meta)
                              VALUES ($1, 'short', $2, $3, 'pending_open', $4, $5, $6, $7, $8) RETURNING id`,
-        [String(userId), symbol, qty, o.id, regimeType, sector, positionRisk({ leg: 'short', qty, price: decisionPx }), JSON.stringify({ decisionPx })]);
+        [String(userId), symbol, qty, o.id, regimeType, sector, positionRisk({ leg: 'short', qty, price: decisionPx, dividendUsd: qty * divPs }),
+         JSON.stringify({ decisionPx, rsi, vixAtEntry: vix,
+                          dividend: dividend ? { perShare: divPs, exDate: dividend.exDate, estimated: dividend.estimated, liabilityUsd: r2(qty * divPs) } : null })]);
     const id = ins.rows[0].id;
     const filled = await _waitFill(client, o.id);
     if (!filled || filled.status !== 'filled') {
@@ -570,7 +773,8 @@ async function _afterShortFill(client, userId, r, filled) {
     const qty = parseFloat(filled.filled_qty), entry = parseFloat(filled.filled_avg_price);
     const stop = r2(entry * (1 + CFG.shortStopPct / 100));
     // slippage for a short: selling below the price we decided on is the cost
-    await query(`UPDATE bear_positions SET status = 'open', qty = $2, entry_price = $3, risk_usd = $4,
+    await query(`UPDATE bear_positions SET status = 'open', qty = $2, entry_price = $3,
+                 risk_usd = $4::numeric + $2::numeric * COALESCE((meta->'dividend'->>'perShare')::numeric, 0),
                  meta = meta || jsonb_build_object('slippagePct', CASE WHEN (meta->>'decisionPx')::numeric > 0 THEN round((1 - $3::numeric / (meta->>'decisionPx')::numeric) * 100, 3) END)
                  WHERE id = $1`, [r.id, qty, entry, positionRisk({ leg: 'short', qty, price: entry })]);
     try {
@@ -598,7 +802,8 @@ async function _coverShort(client, userId, r, reason) {
     const liveQty = pos ? parseFloat(pos.qty) : 0;
     if (!(liveQty < 0)) return _markShortClosed(r, Number(pos?.current_price) || Number(r.entry_price), 'gone at broker', null);
     const o = await _post(client, '/v2/orders', { symbol: r.symbol, qty: String(Math.abs(liveQty)), side: 'buy', type: 'market', time_in_force: 'day' });
-    await query(`UPDATE bear_positions SET status = 'pending_close', exit_order_id = $2, exit_reason = $3 WHERE id = $1`, [r.id, o.id, reason]);
+    await query(`UPDATE bear_positions SET status = 'pending_close', exit_order_id = $2, exit_reason = $3,
+                 meta = meta || jsonb_build_object('closeStartedAt', COALESCE(meta->>'closeStartedAt', NOW()::text)) WHERE id = $1`, [r.id, o.id, reason]);
     const filled = await _waitFill(client, o.id);
     if (filled?.status === 'filled') return _markShortClosed(r, parseFloat(filled.filled_avg_price), reason, o.id);
     return { symbol: r.symbol, pendingCover: true };
@@ -658,6 +863,11 @@ async function _manageShort(client, userId, r, price, hold, now, posQty = null) 
         await _alert(userId, `borrow:${r.id}`, `${r.symbol} is no longer easy to borrow (recall / fee risk) — covering.`, now);
         return _coverShort(client, userId, r, 'no longer easy to borrow');
     }
+    const dv = await _dividendStillOk(client, r, now);
+    if (!dv.ok) {
+        await _alert(userId, `div:${r.id}`, `${r.symbol} short: ${dv.why} — covering before the ex-date.`, now);
+        return _coverShort(client, userId, r, `dividend: ${dv.why}`);
+    }
     const mm = posQty ? brokerMismatch(r, posQty) : null;
     if (mm) await _alert(userId, `mismatch:${r.id}`, `Position mismatch — ${mm}. Not auto-fixed; check the account.`, now);
     if (!(price > 0)) return null;
@@ -700,15 +910,52 @@ function brokerMismatch(r, posQty) {
     return null;
 }
 
-const _borrowChecked = new Set();
-/** Once a day per short: still shortable and easy to borrow? (Recall / hard-to-borrow risk.) */
+const _borrowChecked = new Map();
+/**
+ * Hourly per short: still shortable and easy to borrow? Alpaca has no recall / forced buy-in notice in its
+ * API; a buy-in shows up as the position changing, which brokerMismatch alerts on every tick.
+ */
 async function _borrowStillOk(client, r, now) {
-    const k = `${r.id}:${etToday(now)}`;
-    if (_borrowChecked.has(k)) return true;
+    const last = _borrowChecked.get(r.id);
+    if (last && now.getTime() - last < CFG.borrowCheckMin * 60000) return true;
     const a = await _get(client, `/v2/assets/${r.symbol}`).catch(() => null);
     if (!a) return true; // unreadable: try again next tick
-    _borrowChecked.add(k);
+    _borrowChecked.set(r.id, now.getTime());
     return a.shortable && a.easy_to_borrow;
+}
+
+const _divChecked = new Set();
+/** Daily per short: a special or large dividend announced since entry, going ex within 2 days → cover before it. */
+async function _dividendStillOk(client, r, now) {
+    const today = etToday(now), k = `${r.id}:${today}`;
+    if (_divChecked.has(k)) return { ok: true };
+    let divs;
+    try { divs = await _dividends(client, r.symbol, today); } catch (_) { return { ok: true }; } // retry next tick
+    _divChecked.add(k);
+    const soon = divs.filter(d => d.ex_date && dayDiff(d.ex_date, today) >= 0 && dayDiff(d.ex_date, today) <= 2);
+    const px = Number(r.entry_price) || 0;
+    const bad = soon.find(d => d.special || (px > 0 && d.rate / px * 100 > CFG.divMaxPctOfPrice));
+    return bad ? { ok: false, why: `${bad.special ? 'special ' : ''}dividend $${bad.rate} goes ex ${bad.ex_date}` } : { ok: true };
+}
+
+/** Squeeze alerts for open shorts, one batched data call each per tick. Alert + record only; never widens a stop. */
+async function _squeezeWatch(client, userId, shorts, now) {
+    if (!shorts.length) return;
+    const syms = [...new Set(shorts.map(r => r.symbol))];
+    const start = new Date(now.getTime() - (CFG.squeezeWindowMin + 5) * 60000).toISOString();
+    const [bars, snaps] = await Promise.all([
+        axios.get(`${DATA}/v2/stocks/bars`, { headers: client.headers, timeout: 15000, params: { symbols: syms.join(','), timeframe: '1Min', start, feed: 'iex', limit: 10000 } })
+            .then(r => r.data?.bars || {}),
+        axios.get(`${DATA}/v2/stocks/snapshots`, { headers: client.headers, timeout: 15000, params: { symbols: syms.join(','), feed: 'iex' } }).then(r => r.data || {}),
+    ]);
+    for (const r of shorts) {
+        const flags = squeezeFlags({ bars: bars[r.symbol] || [], snap: snaps[r.symbol], nowMs: now.getTime() });
+        if (!flags.length) continue;
+        await query(`UPDATE bear_positions SET meta = jsonb_set(meta, '{squeezeFlags}', COALESCE(meta->'squeezeFlags', '[]'::jsonb) || $2::jsonb) WHERE id = $1`,
+            [r.id, JSON.stringify([{ at: now.toISOString(), flags }])]).catch(() => {});
+        await _alert(userId, `squeeze:${r.id}:${flags[0].split(' ')[0]}`,
+            `${r.symbol} short — squeeze warning: ${flags.join('; ')}. Buy-stop stays at $${Number(r.stop_price)} (not widened). Review now.`, now);
+    }
 }
 
 // ─── Leg 3: bear put spreads ─────────────────────────────────────────────────
@@ -797,7 +1044,7 @@ async function _enterSpreads(client, userId, f, rows, regimeType, today) {
             await query(`INSERT INTO bear_positions (user_id, leg, symbol, long_contract, short_contract, width, qty, status, entry_order_id, regime, meta, risk_usd)
                          VALUES ($1, 'spread', $2, $3, $4, $5, $6, 'pending_open', $7, $8, $9, $10)`,
                 [String(userId), und, pick.long.contract, pick.short.contract, pick.width, qty, o.id, regimeType,
-                 JSON.stringify({ limit: pick.limit, debitMid: r2(pick.debit), natural: r2(pick.natural), dte: pick.dte, widthPct: pick.widthPct, underlyingPx: px }),
+                 JSON.stringify({ limit: pick.limit, debitMid: r2(pick.debit), natural: r2(pick.natural), dte: pick.dte, widthPct: pick.widthPct, underlyingPx: px, vixAtEntry: f.vix ?? null }),
                  positionRisk({ leg: 'spread', qty, debit: pick.limit })]);
             _book(f, cost * qty, { usesCash: true, risk: cost * qty });
             logger.info('[BearSide] Bear put spread order placed', { userId, und, long: pick.long.contract, short: pick.short.contract, qty, limit: pick.limit, width: pick.width });
@@ -852,11 +1099,13 @@ async function _closeSpreadStep(client, userId, r, reason) {
         if (meta.shortCloseFill == null) {
             // a short leg that is no longer held (expired worthless) needs no close
             const pos = await _get(client, `/v2/positions/${r.short_contract}`).catch(err => (err.response?.status === 404 ? null : undefined));
-            if (pos === null) meta.shortCloseFill = 0;
+            if (pos === undefined) return null; // unreadable — never order blind
+            if (pos === null || !(parseFloat(pos.qty) < 0)) meta.shortCloseFill = meta.shortCloseFill ?? 0;
             else {
                 const ask = q[r.short_contract]?.ask;
                 if (!(ask > 0)) return null;
-                const o = await _post(client, '/v2/orders', { symbol: r.short_contract, qty: String(r.qty), side: 'buy', type: 'limit',
+                // what is still short at the broker (a re-placed close after a partial fill must not over-buy)
+                const o = await _post(client, '/v2/orders', { symbol: r.short_contract, qty: String(Math.abs(parseFloat(pos.qty))), side: 'buy', type: 'limit',
                     limit_price: String(optTick(ask)), time_in_force: 'day', position_intent: 'buy_to_close' });
                 meta.shortCloseOrder = o.id;
                 const f = await _waitFill(client, o.id, 15000);
@@ -874,11 +1123,12 @@ async function _closeSpreadStep(client, userId, r, reason) {
     }
     if (meta.longCloseFill == null) {
         const pos = await _get(client, `/v2/positions/${r.long_contract}`).catch(err => (err.response?.status === 404 ? null : undefined));
-        if (pos === null) meta.longCloseFill = 0;
+        if (pos === undefined) { await query(`UPDATE bear_positions SET meta = $2 WHERE id = $1`, [r.id, JSON.stringify(meta)]); return null; }
+        if (pos === null || !(parseFloat(pos.qty) > 0)) meta.longCloseFill = 0;
         else {
             const bid = q[r.long_contract]?.bid;
             if (!(bid > 0)) { await query(`UPDATE bear_positions SET meta = $2 WHERE id = $1`, [r.id, JSON.stringify(meta)]); return null; }
-            const o = await _post(client, '/v2/orders', { symbol: r.long_contract, qty: String(r.qty), side: 'sell', type: 'limit',
+            const o = await _post(client, '/v2/orders', { symbol: r.long_contract, qty: String(parseFloat(pos.qty)), side: 'sell', type: 'limit',
                 limit_price: String(optTick(bid)), time_in_force: 'day', position_intent: 'sell_to_close' });
             meta.longCloseOrder = o.id;
             const f = await _waitFill(client, o.id, 15000);
@@ -945,6 +1195,53 @@ async function _manageSpread(client, userId, r, hold, now, posQty = null) {
     return _closeSpreadStep(client, userId, { ...r, meta }, reason);
 }
 
+/**
+ * Pure: which closed bear positions does the broker still hold? closed = rows closed during the liquidation;
+ * posQty = { symbol: signed qty }. Returns readable leftovers (empty = confirmed flat).
+ */
+function liquidationLeftovers(closed, posQty) {
+    const left = [];
+    for (const r of closed) {
+        if (r.leg === 'short' && (posQty[r.symbol] || 0) < 0) left.push(`${r.symbol} still short ${posQty[r.symbol]}`);
+        if (r.leg === 'hedge' && (posQty[r.symbol] || 0) > 0) left.push(`${r.symbol} still held ${posQty[r.symbol]}`);
+        if (r.leg === 'spread') {
+            for (const c of [r.long_contract, r.short_contract]) if (c && posQty[c]) left.push(`${c} still ${posQty[c]}`);
+        }
+    }
+    return [...new Set(left)];
+}
+
+/** When the book is told to close (BULL / exit timer): alert if it isn't flat within 30 min, then confirm against the broker. */
+async function _verifyLiquidation(client, userId, st, stillOpen, now) {
+    const uid = String(userId);
+    const s = (await query(`SELECT liquidating_since FROM bear_state WHERE user_id = $1`, [uid])).rows[0];
+    if (st.hold) {
+        if (s?.liquidating_since) await query(`UPDATE bear_state SET liquidating_since = NULL WHERE user_id = $1`, [uid]);
+        return;
+    }
+    const since = s?.liquidating_since ? new Date(s.liquidating_since) : null;
+    if (stillOpen.length) {
+        if (!since) { await query(`UPDATE bear_state SET liquidating_since = $2 WHERE user_id = $1`, [uid, now]); return; }
+        if (now - since > CFG.closeStuckMin * 60000) {
+            await _alert(userId, 'liquidation-slow', `Bear book closing (${st.why}) but ${stillOpen.length} position(s) not closed after ${CFG.closeStuckMin} min: `
+                + stillOpen.map(r => `${r.symbol} ${r.leg} [${r.status}]`).join(', '), now);
+        }
+        return;
+    }
+    if (!since) return; // nothing was open when the close started
+    const closed = (await query(`SELECT leg, symbol, long_contract, short_contract FROM bear_positions WHERE user_id = $1 AND status = 'closed' AND closed_at >= $2 - INTERVAL '10 minutes'`,
+        [uid, since])).rows;
+    const posQty = await _get(client, '/v2/positions').then(ps => Object.fromEntries(ps.map(p => [p.symbol, parseFloat(p.qty)]))).catch(() => null);
+    if (!posQty) return; // try again next tick
+    const left = liquidationLeftovers(closed, posQty);
+    if (left.length) {
+        await _alert(userId, 'liquidation-leftover', `Bear book marked closed but the broker still holds: ${left.join('; ')}. Not auto-fixed; check the account.`, now);
+        return;
+    }
+    await query(`UPDATE bear_state SET liquidating_since = NULL WHERE user_id = $1`, [uid]);
+    await _alert(userId, 'liquidation-done', `Bear book fully closed (${st.why}) — ${closed.length} position(s), confirmed flat at the broker.`, now);
+}
+
 // ─── Tick ────────────────────────────────────────────────────────────────────
 
 /** One account: manage everything open; enter once a day per leg while BEAR. */
@@ -955,6 +1252,7 @@ async function runForUser(userId, now = new Date(), { allowEntries = true } = {}
     const st = await _regimeState(userId, now, client);
     let rows = await _rows(userId);
     const actions = [];
+    const tickStart = new Date();
 
     // manage
     const stockSyms = [...new Set(rows.filter(r => r.leg !== 'spread').map(r => r.symbol))];
@@ -973,6 +1271,8 @@ async function runForUser(userId, now = new Date(), { allowEntries = true } = {}
                     : px > 0 && px <= Number(r.entry_price) * (1 - CFG.hedgeStopPct / 100) ? `stop (−${CFG.hedgeStopPct}%)` : null;
                 if (!(liveQty > 0)) res = await _hedgeGone(userId, r, px);
                 else if (reason) res = await _closeHedge(userId, r, reason, px, liveQty);
+            } else if (r.leg === 'hedge' && r.status === 'pending_close' && posQty) {
+                res = await _manageHedgeClosing(client, userId, r, prices[r.symbol], posQty[r.symbol] || 0, now);
             } else if (r.leg === 'short') {
                 res = await _manageShort(client, userId, r, prices[r.symbol], st.hold, now, posQty);
             } else if (r.leg === 'spread') {
@@ -984,11 +1284,26 @@ async function runForUser(userId, now = new Date(), { allowEntries = true } = {}
         }
     }
     await _syncSleeve(userId).catch(err => logger.warn('[BearSide] Sleeve sync failed', { userId, error: err.message }));
+    // regime context at exit, for the per-regime report (BEAR / PANIC / recovery)
+    await query(`UPDATE bear_positions SET meta = meta || jsonb_build_object('exitRegime', $2::text, 'exitVix', $3::numeric)
+                 WHERE user_id = $1 AND status = 'closed' AND closed_at >= $4 AND NOT (meta ? 'exitRegime')`,
+        [String(userId), st.stale ? 'UNKNOWN' : st.regimeType, st.vix, tickStart]).catch(() => {});
+    const stillOpen = await _rows(userId);
+    await _squeezeWatch(client, userId, stillOpen.filter(r => r.leg === 'short' && r.status === 'open'), now)
+        .catch(err => logger.warn('[BearSide] Squeeze watch failed (non-blocking)', { userId, error: _errMsg(err) }));
+    await _verifyLiquidation(client, userId, st, stillOpen, now)
+        .catch(err => logger.warn('[BearSide] Liquidation check failed (non-blocking)', { userId, error: _errMsg(err) }));
+    for (const r of stillOpen.filter(x => x.status === 'pending_close' && x.meta?.closeStartedAt)) {
+        if (now.getTime() - new Date(r.meta.closeStartedAt).getTime() > CFG.closeStuckMin * 60000) {
+            await _alert(userId, `closestuck:${r.id}`, `${r.symbol} ${r.leg} exit (${r.exit_reason || 'close'}) not confirmed after ${CFG.closeStuckMin} min — still counted as open risk; check the account.`, now);
+        }
+    }
 
     // enter
     if (allowEntries && st.enter) {
         rows = await _rows(userId);
         const f = await _funding(client, userId, rows);
+        f.vix = st.vix;
         const tryLeg = async (leg, fn) => {
             const key = `${userId}:${leg}:${today}`;
             if (_enteredOn.has(key)) return;
@@ -1055,8 +1370,17 @@ function legMetrics(rows, { riskFreePct = num('RISK_FREE_PCT', 4) } = {}) {
         const wins = pnls.filter(p => p > 0), losses = pnls.filter(p => p <= 0);
         const grossWin = wins.reduce((s, p) => s + p, 0), grossLoss = -losses.reduce((s, p) => s + p, 0);
         const risk = closed.reduce((s, r) => s + (Number(r.risk_usd) || 0), 0);
-        let cum = 0, peak = 0, maxDd = 0;
-        for (const p of pnls) { cum += p; peak = Math.max(peak, cum); maxDd = Math.max(maxDd, peak - cum); }
+        let cum = 0, peak = 0, maxDd = 0, peakAt = null, underwaterDays = 0;
+        closed.forEach((r, i) => {
+            cum += pnls[i];
+            const at = new Date(r.closed_at || r.opened_at);
+            if (cum >= peak) { peak = cum; peakAt = at; }
+            else if (peakAt) underwaterDays = Math.max(underwaterDays, (at - peakAt) / 86400000);
+            maxDd = Math.max(maxDd, peak - cum);
+        });
+        // a short stopped out above its stop = an overnight / fast gap through the stop
+        const gapLoss = closed.filter(r => leg === 'short' && r.exit_reason === 'stop' && Number(r.stop_price) > 0 && Number(r.exit_price) > Number(r.stop_price))
+            .reduce((s, r) => s + (Number(r.exit_price) - Number(r.stop_price)) * Number(r.qty), 0);
         const capital = r => leg === 'spread' ? Number(r.entry_price) * 100 * Number(r.qty) : Number(r.entry_price) * Number(r.qty);
         const tbill = closed.reduce((s, r) => s + capital(r) * Math.max(1, (new Date(r.closed_at) - new Date(r.opened_at)) / 86400000) / 365 * riskFreePct / 100, 0);
         const slips = all.map(r => Number(r.meta?.slippagePct)).filter(Number.isFinite);
@@ -1068,26 +1392,56 @@ function legMetrics(rows, { riskFreePct = num('RISK_FREE_PCT', 4) } = {}) {
             returnOnRiskPct: risk > 0 ? r2(cum / risk * 100) : null,
             maxDrawdown: r2(maxDd), tbillSameCapital: r2(tbill), vsTbill: r2(cum - tbill),
             avgSlippagePct: slips.length ? r2(slips.reduce((s, v) => s + v, 0) / slips.length) : null,
+            winRatePct: closed.length ? r2(wins.length / closed.length * 100) : null,
+            longestUnderwaterDays: r2(underwaterDays), gapLossUsd: r2(gapLoss),
         };
     }
     return out;
 }
 
+/** Pure: market context a closed position lived through — VIX at entry and the regime when it closed. */
+function regimeBucket(r, { highVix = 25 } = {}) {
+    const ex = r.meta?.exitRegime;
+    if (ex === 'PANIC') return 'PANIC';
+    if (ex && ex !== 'BEAR' && ex !== 'UNKNOWN') return 'recovery (closed as BEAR ended)';
+    const v = Number(r.meta?.vixAtEntry);
+    if (!Number.isFinite(v) || r.meta?.vixAtEntry == null) return 'BEAR, VIX unknown';
+    return v >= highVix ? 'BEAR, high volatility (VIX ≥ 25)' : 'BEAR, moderate volatility (VIX < 25)';
+}
+
+/** Pure: all-legs results split by market context, so a strategy that only works in one kind of bear shows up. */
+function regimeBreakdown(rows) {
+    const groups = {};
+    for (const r of rows.filter(x => x.status === 'closed' && x.pnl != null)) (groups[regimeBucket(r)] = groups[regimeBucket(r)] || []).push(r);
+    return Object.entries(groups).map(([bucket, rs]) => {
+        const p = rs.map(r => Number(r.pnl)), w = p.filter(v => v > 0);
+        const gl = -p.filter(v => v <= 0).reduce((s, v) => s + v, 0), gw = w.reduce((s, v) => s + v, 0);
+        return { bucket, trades: rs.length, winRatePct: r2(w.length / rs.length * 100), pnl: r2(p.reduce((s, v) => s + v, 0)),
+                 profitFactor: gl > 0 ? r2(gw / gl) : (gw > 0 ? Infinity : null), expectancy: r2(p.reduce((s, v) => s + v, 0) / rs.length),
+                 byLeg: Object.fromEntries(['hedge', 'short', 'spread'].map(l => [l, r2(rs.filter(r => r.leg === l).reduce((s, r) => s + Number(r.pnl), 0))])) };
+    });
+}
+
 async function summary() {
     await ensureTables();
-    const allRows = (await query(`SELECT leg, status, pnl::float, risk_usd::float, entry_price::float, qty::float, opened_at, closed_at, meta
+    const allRows = (await query(`SELECT leg, status, pnl::float, risk_usd::float, entry_price::float, qty::float, opened_at, closed_at, meta,
+                                         exit_reason, stop_price::float, exit_price::float
                                   FROM bear_positions WHERE status <> 'not_filled' ORDER BY COALESCE(closed_at, opened_at)`)).rows;
     const metrics = legMetrics(allRows);
+    const byRegime = regimeBreakdown(allRows);
     const legs = Object.entries(metrics).filter(([, m]) => m.open || m.closed).map(([leg, m]) => ({ leg, ...m }));
     const open = (await query(`SELECT user_id, leg, symbol, long_contract, short_contract, qty::float, entry_price::float, stop_price::float, risk_usd::float,
-                                      sector, status, opened_at, regime
+                                      sector, status, opened_at, regime, meta
                                FROM bear_positions WHERE status IN ('open', 'pending_open', 'pending_close') ORDER BY opened_at`)).rows;
     // risk view of what is open now: capital deployed vs max loss vs a +5% overnight gap
     const deployed = open.reduce((s, p) => s + (p.leg === 'spread' ? (p.entry_price || 0) * 100 * p.qty : (p.entry_price || 0) * p.qty), 0);
     const maxLoss = open.reduce((s, p) => s + (p.risk_usd || 0), 0);
-    const stress = stressLoss(open.map(p => ({ leg: p.leg, value: (p.entry_price || 0) * p.qty, debitUsd: (p.entry_price || 0) * 100 * p.qty })));
-    const shadow = (await query(`
-        WITH c AS (SELECT d, symbol, price::float AS p FROM bear_short_candidates),
+    const openVals = open.map(p => ({ leg: p.leg, value: (p.entry_price || 0) * p.qty, debitUsd: (p.entry_price || 0) * 100 * p.qty }));
+    const stress = stressLoss(openVals);
+    const gapStress = shortGapStress(openVals);
+    const shadowSql = where => `
+        WITH c AS (SELECT d, symbol, price::float AS p, rsi::float AS rsi, passed FROM bear_short_candidates WHERE ${where}),`;
+    const FWD = `
         fwd AS (
             SELECT c.d, c.symbol, c.p,
                    (SELECT close::float FROM daily_bars b WHERE b.symbol = c.symbol AND (b.timestamp AT TIME ZONE 'UTC')::date > c.d
@@ -1099,15 +1453,28 @@ async function summary() {
                    (SELECT close::float FROM daily_bars b WHERE b.symbol = 'SPY' AND (b.timestamp AT TIME ZONE 'UTC')::date > c.d
                     ORDER BY b.timestamp OFFSET 4 LIMIT 1) AS s5
             FROM c)
+`;
+    const shadow = (await query(shadowSql('passed') + FWD + `
         SELECT COUNT(*)::int AS logged, COUNT(DISTINCT d)::int AS days,
                COUNT(c5)::int AS n5, (AVG(c5 / p - 1) * 100)::float AS avg_ret5,
                (AVG(CASE WHEN c5 < p THEN 1.0 ELSE 0 END) FILTER (WHERE c5 IS NOT NULL) * 100)::float AS pct_fell5,
                COUNT(c10)::int AS n10, (AVG(c10 / p - 1) * 100)::float AS avg_ret10,
                (AVG(s5 / s0 - 1) FILTER (WHERE c5 IS NOT NULL) * 100)::float AS spy_ret5
         FROM fwd`)).rows[0];
-    const state = (await query(`SELECT user_id, last_bear_at, bear_since, last_regime, recovering, checked_at FROM bear_state`)).rows;
-    return { legs, open, shadow, state,
-             risk: { deployedUsd: r2(deployed), maxLossUsd: r2(maxLoss), stressGapUsd: stress, stressGapPct: CFG.stressGapPct },
+    // shadow test of the RSI cut-off: forward returns by RSI band, passed and rejected candidates alike
+    // (only RSI ≥ 30 is ever traded; the bands are the review's proposed classification)
+    const byRsi = (await query(shadowSql('true') + FWD.replace('SELECT c.d, c.symbol, c.p,', 'SELECT c.d, c.symbol, c.p, c.rsi, c.passed,') + `
+        SELECT CASE WHEN rsi IS NULL THEN 'unknown' WHEN rsi < 25 THEN '<25' WHEN rsi < 30 THEN '25-30' WHEN rsi < 40 THEN '30-40'
+                    WHEN rsi < 50 THEN '40-50' ELSE '50+' END AS band,
+               COUNT(*)::int AS logged, COUNT(c5)::int AS n5, (AVG(c5 / p - 1) * 100)::float AS avg_ret5,
+               (AVG(CASE WHEN c5 < p THEN 1.0 ELSE 0 END) FILTER (WHERE c5 IS NOT NULL) * 100)::float AS pct_fell5,
+               COUNT(c10)::int AS n10, (AVG(c10 / p - 1) * 100)::float AS avg_ret10,
+               (AVG(s5 / s0 - 1) FILTER (WHERE c5 IS NOT NULL) * 100)::float AS spy_ret5
+        FROM fwd GROUP BY 1 ORDER BY 1`)).rows;
+    const state = (await query(`SELECT user_id, last_bear_at, bear_since, last_regime, recovering, checked_at, liquidating_since FROM bear_state`)).rows;
+    return { legs, open, shadow, shadowByRsi: byRsi, byRegime, state,
+             risk: { deployedUsd: r2(deployed), maxLossUsd: r2(maxLoss), stressGapUsd: stress, stressGapPct: CFG.stressGapPct, shortGapStress: gapStress,
+                     dividendLiabilityUsd: r2(open.reduce((s, p) => s + (Number(p.meta?.dividend?.liabilityUsd) || 0), 0)) },
              config: { hedgePct: hedgePct(), shortEachPct: shortEachPct(), shortMax: CFG.shortMax, spreadPct: spreadPct(),
              grossCapPct: grossCapPct(), maxRiskPct: maxRiskPct(), maxTradeRiskPct: maxTradeRiskPct(), maxShortsPerSector: CFG.maxShortsPerSector,
              exitAfterHours: exitAfterHours(), allowMargin: allowMargin() } };
@@ -1116,5 +1483,6 @@ async function summary() {
 module.exports = {
     CFG, regimeDecision, recoverySignal, fundingRoom, positionRisk, riskRoom, rsi14, shortQuality, stressLoss,
     brokerMismatch, legMetrics, rankShortCandidates, shortPlan, chooseSpread, spreadPlan, parseOcc,
+    regimeStale, dividendExposure, shortGapStress, entryTape, squeezeFlags, liquidationLeftovers, rsiBand, regimeBucket, regimeBreakdown,
     runForUser, runTick, managedOrderIds, summary, ensureTables,
 };

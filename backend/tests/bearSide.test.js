@@ -206,3 +206,82 @@ describe('safety pass (2026-11-20 review)', () => {
         expect(bear.stressLoss([{ leg: 'hedge', value: 4000 }, { leg: 'short', value: 2000 }, { leg: 'spread', debitUsd: 1000 }])).toBe(200 + 150 + 500);
     });
 });
+
+describe('second review pass (2026-11-21)', () => {
+    const now = new Date('2026-11-23T16:00:00Z'); // Monday 11:00 ET
+    test('regime service says BULL_STRONG / BULL_MILD — both close the book', () => {
+        for (const t of ['BULL_STRONG', 'BULL_MILD']) expect(bear.regimeDecision({ regimeType: t, lastBearAt: new Date(now - 3600000), now }).hold).toBe(false);
+    });
+    test('BEAR confirmation needs two trading sessions, not just 18 wall-clock hours', () => {
+        // first seen Monday 9:35 ET → only 1.5h old and the same session: not confirmed
+        expect(bear.regimeDecision({ regimeType: 'BEAR', bearSince: new Date('2026-11-23T14:35:00Z'), now }).enter).toBe(false);
+        // seen Friday afternoon → Monday is a second session and >18h
+        expect(bear.regimeDecision({ regimeType: 'BEAR', bearSince: new Date('2026-11-20T19:00:00Z'), now }).enter).toBe(true);
+    });
+    test('a stale / fallback regime reading: hold, no entries', () => {
+        expect(bear.regimeDecision({ regimeType: 'BULL_MILD', stale: true })).toMatchObject({ hold: true, enter: false, stale: true });
+        expect(bear.regimeStale({ spyPrice: 600, timestamp: new Date(now - 5 * 60000).toISOString() }, now)).toBe(false);
+        expect(bear.regimeStale({ spyPrice: 600, timestamp: new Date(now - 3 * 3600000).toISOString() }, now)).toBe(true);
+        expect(bear.regimeStale({ regimeType: 'NEUTRAL', spyPrice: null }, now)).toBe(true); // default NEUTRAL on data failure
+    });
+    test('dividends: announced in the hold count; special or large → skip; regular payer projected', () => {
+        const today = '2026-11-23';
+        const a = bear.dividendExposure([{ ex_date: '2026-12-01', rate: 0.5, special: false }], { today, price: 100 });
+        expect(a).toMatchObject({ ok: true, perShare: 0.5, exDate: '2026-12-01', estimated: false });
+        expect(bear.dividendExposure([{ ex_date: '2026-12-01', rate: 2, special: true }], { today, price: 100 }).ok).toBe(false);
+        expect(bear.dividendExposure([{ ex_date: '2026-12-01', rate: 1.5, special: false }], { today, price: 100 }).ok).toBe(false);
+        const q = ['2026-03-01', '2026-06-01', '2026-09-01'].map(d => ({ ex_date: d, rate: 0.4, special: false }));
+        expect(bear.dividendExposure(q, { today, price: 100 })).toMatchObject({ estimated: true, perShare: 0.4 });
+        expect(bear.dividendExposure([], { today, price: 100 })).toMatchObject({ ok: true, perShare: 0 });
+        expect(bear.positionRisk({ leg: 'short', qty: 10, price: 100, dividendUsd: 5 })).toBe(85);
+    });
+    test('single-short gap stress at +10/20/30%', () => {
+        expect(bear.shortGapStress([{ leg: 'short', value: 2000 }, { leg: 'short', value: 1000 }, { leg: 'hedge', value: 5000 }]))
+            .toEqual([{ gapPct: 10, largestShortUsd: 200, allShortsUsd: 300 }, { gapPct: 20, largestShortUsd: 400, allShortsUsd: 600 },
+                      { gapPct: 30, largestShortUsd: 600, allShortsUsd: 900 }]);
+    });
+    test('entry tape: skip a stock up 4%+ today or under a short-sale restriction', () => {
+        const snap = (p, l, prevL = 95) => ({ prevDailyBar: { c: 100, l: prevL }, latestTrade: { p }, dailyBar: { l } });
+        expect(bear.entryTape(snap(99, 98), 100).ok).toBe(true);
+        expect(bear.entryTape(snap(105, 99), 100).reason).toMatch(/up 5/);
+        expect(bear.entryTape(snap(92, 89), 100).reason).toMatch(/restriction likely today/);
+        expect(bear.entryTape(snap(99, 98, 88), 100).reason).toMatch(/from yesterday/);
+    });
+    test('squeeze flags: fast rise, heavy volume, gap-up, possible halt', () => {
+        const t0 = now.getTime();
+        const bars = [0, 1, 2].map(i => ({ t: new Date(t0 - (10 - i * 4) * 60000).toISOString(), o: 100 + i * 3, h: 101 + i * 3, l: 100 + i * 3, c: 101 + i * 3.5, v: 50000 }));
+        const snap = { prevDailyBar: { c: 95, v: 390000 }, dailyBar: { o: 100, t: now.toISOString() }, latestTrade: { t: now.toISOString() }, latestQuote: { t: now.toISOString() } };
+        const f = bear.squeezeFlags({ bars, snap, nowMs: t0 });
+        expect(f.join('|')).toMatch(/up .*% in 15 min/);
+        expect(f.join('|')).toMatch(/volume/);
+        expect(f.join('|')).toMatch(/gapped up/);
+        const quiet = { prevDailyBar: { c: 100, v: 1e9 }, dailyBar: { o: 100, t: now.toISOString() }, latestTrade: { t: new Date(t0 - 15 * 60000).toISOString() } };
+        expect(bear.squeezeFlags({ bars: [], snap: quiet, nowMs: t0 })).toEqual([expect.stringMatching(/possible halt/)]);
+    });
+    test('liquidation check: leftovers at the broker are reported', () => {
+        const closed = [{ leg: 'short', symbol: 'RDDT' }, { leg: 'hedge', symbol: 'SH' }, { leg: 'spread', long_contract: 'L1', short_contract: 'S1' }];
+        expect(bear.liquidationLeftovers(closed, {})).toEqual([]);
+        expect(bear.liquidationLeftovers(closed, { RDDT: -5, SH: 10, S1: -1 })).toHaveLength(3);
+    });
+    test('RSI bands and regime buckets for the report', () => {
+        expect([20, 27, 35, 45, 60, null].map(bear.rsiBand)).toEqual(['<25', '25-30', '30-40', '40-50', '50+', 'unknown']);
+        expect(bear.regimeBucket({ meta: { exitRegime: 'PANIC' } })).toBe('PANIC');
+        expect(bear.regimeBucket({ meta: { exitRegime: 'BULL_MILD' } })).toMatch(/recovery/);
+        expect(bear.regimeBucket({ meta: { exitRegime: 'BEAR', vixAtEntry: 30 } })).toMatch(/high/);
+        expect(bear.regimeBucket({ meta: { exitRegime: 'BEAR', vixAtEntry: 20 } })).toMatch(/moderate/);
+        const b = bear.regimeBreakdown([{ status: 'closed', pnl: 100, leg: 'short', meta: { exitRegime: 'PANIC' } }, { status: 'closed', pnl: -50, leg: 'hedge', meta: { exitRegime: 'PANIC' } }]);
+        expect(b[0]).toMatchObject({ bucket: 'PANIC', trades: 2, pnl: 50, profitFactor: 2 });
+    });
+    test('leg metrics: win rate, time underwater, gap-through-stop loss', () => {
+        const d = s => new Date(`2026-11-${s}T20:00:00Z`);
+        const rows = [
+            { leg: 'short', status: 'closed', pnl: 100, qty: 10, entry_price: 50, risk_usd: 40, opened_at: d('01'), closed_at: d('02') },
+            { leg: 'short', status: 'closed', pnl: -80, qty: 10, entry_price: 50, risk_usd: 40, opened_at: d('02'), closed_at: d('05'), exit_reason: 'stop', stop_price: 54, exit_price: 58 },
+            { leg: 'short', status: 'closed', pnl: 90, qty: 10, entry_price: 50, risk_usd: 40, opened_at: d('05'), closed_at: d('09') },
+        ];
+        const m = bear.legMetrics(rows).short;
+        expect(m.winRatePct).toBe(66.67);
+        expect(m.longestUnderwaterDays).toBe(3);
+        expect(m.gapLossUsd).toBe(40);
+    });
+});

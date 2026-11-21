@@ -1551,6 +1551,11 @@ function legMetrics(rows, { riskFreePct = num('RISK_FREE_PCT', 4) } = {}) {
         const tbill = capYears * riskFreePct / 100;
         const divPaid = closed.reduce((s, r) => s + (Number(r.meta?.dividendPaidUsd) || 0), 0);
         const slips = all.map(r => Number(r.meta?.slippagePct)).filter(Number.isFinite);
+        // entry slippage in dollars (vs the price decided on / the spread mid) — a cost already inside pnl
+        const slipUsd = closed.reduce((s, r) => s + Math.max(0, Number(r.meta?.slippagePct) || 0) / 100 * capital(r), 0);
+        // borrow cost sensitivity on short capital × days: Alpaca's API has no fee rate and paper charges none,
+        // so this is a what-if band, never treated as zero or as known
+        const shortCapYears = leg === 'short' ? capYears : 0;
         out[leg] = {
             open: all.filter(r => OPEN_STATUSES.includes(r.status)).length, closed: closed.length, wins: wins.length,
             pnl: r2(cum), avgWin: wins.length ? r2(grossWin / wins.length) : null, avgLoss: losses.length ? r2(-grossLoss / losses.length) : null,
@@ -1565,6 +1570,13 @@ function legMetrics(rows, { riskFreePct = num('RISK_FREE_PCT', 4) } = {}) {
             dividendsPaidUsd: r2(divPaid),
             // annualised return on the capital actually tied up, same basis as the T-bill line
             returnOnCapitalAnnualPct: capYears > 0 ? r2(cum / capYears * 100) : null, tbillAnnualPct: riskFreePct,
+            // three P&L figures for the 60-90 day review
+            pnlGross: r2(cum + divPaid + slipUsd),            // before known costs
+            pnlAdjusted: r2(cum),                              // after dividends owed + slippage (fees $0)
+            pnlEconomic: leg === 'short'                       // adjusted minus an assumed borrow cost
+                ? { borrow0_5pct: r2(cum - shortCapYears * 0.005), borrow3pct: r2(cum - shortCapYears * 0.03) } : null,
+            slippageUsd: r2(slipUsd),
+            borrowFees: leg === 'short' ? 'UNAVAILABLE — not in the Alpaca API and not charged on paper (not zero)' : null,
         };
     }
     return out;

@@ -188,3 +188,19 @@ describe('costs in reported P&L (2026-11-21)', () => {
     });
     const r2 = v => Math.round(v * 100) / 100;
 });
+
+describe('three P&L figures (2026-11-21)', () => {
+    test('gross → adjusted → economic; borrow fees marked unavailable, not zero', () => {
+        const rows = [{ leg: 'short', status: 'closed', pnl: 100, qty: 100, entry_price: 50, risk_usd: 400,
+                        opened_at: new Date('2026-11-01'), closed_at: new Date('2026-11-11T00:00:00Z'), meta: { dividendPaidUsd: 20, slippagePct: 0.2 } }];
+        const m = bear.legMetrics(rows).short;
+        expect(m.slippageUsd).toBe(10);                    // 0.2% of $5,000
+        expect(m.pnlGross).toBe(130);                      // 100 + 20 dividends + 10 slippage
+        expect(m.pnlAdjusted).toBe(100);
+        const capYears = 5000 * 10 / 365;
+        expect(m.pnlEconomic.borrow0_5pct).toBe(Math.round((100 - capYears * 0.005) * 100) / 100);
+        expect(m.pnlEconomic.borrow3pct).toBe(Math.round((100 - capYears * 0.03) * 100) / 100);
+        expect(m.borrowFees).toMatch(/UNAVAILABLE/);
+        expect(bear.legMetrics([{ ...rows[0], leg: 'hedge' }]).hedge.pnlEconomic).toBeNull();
+    });
+});

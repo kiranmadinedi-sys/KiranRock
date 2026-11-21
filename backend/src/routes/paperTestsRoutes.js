@@ -15,8 +15,10 @@ router.use(protect);
  */
 router.post('/bear/resume', async (req, res) => {
     try {
-        const r = await require('../services/bearSideService').resumeBear(String(req.userId), 'api');
-        res.json({ success: true, ...r });
+        // logged in (protect) and only this account's own halt; refused (409) while any broker problem remains
+        const by = `api user ${req.userId}${req.user?.email ? ` (${req.user.email})` : ''} from ${req.ip}`;
+        const r = await require('../services/bearSideService').resumeBear(String(req.userId), by);
+        res.status(r.wasHalted && !r.resumed ? 409 : 200).json({ success: r.resumed || !r.wasHalted, ...r });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }

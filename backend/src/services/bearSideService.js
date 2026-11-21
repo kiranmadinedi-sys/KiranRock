@@ -189,6 +189,17 @@ async function ensureTables() {
     await query(`ALTER TABLE bear_state ADD COLUMN IF NOT EXISTS bear_since TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS recovering BOOLEAN,
                  ADD COLUMN IF NOT EXISTS liquidating_since TIMESTAMPTZ,
                  ADD COLUMN IF NOT EXISTS halted_at TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS halt_reason TEXT`);
+    await query(`
+        CREATE TABLE IF NOT EXISTS bear_resume_log (
+            id          SERIAL      PRIMARY KEY,
+            user_id     TEXT        NOT NULL,
+            at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            by_whom     TEXT        NOT NULL,
+            granted     BOOLEAN     NOT NULL,
+            halt_reason TEXT,
+            halted_at   TIMESTAMPTZ,
+            problems    JSONB       NOT NULL DEFAULT '[]'
+        )`);
     await query(`ALTER TABLE bear_short_candidates ADD COLUMN IF NOT EXISTS rsi NUMERIC, ADD COLUMN IF NOT EXISTS passed BOOLEAN NOT NULL DEFAULT true,
                  ADD COLUMN IF NOT EXISTS reject_reason TEXT`);
     _ready = true;
@@ -1279,12 +1290,60 @@ async function _haltState(userId) {
     return (await query(`SELECT halted_at, halt_reason FROM bear_state WHERE user_id = $1`, [String(userId)])).rows[0] || {};
 }
 
-/** Explicit resume after review. */
+/**
+ * Pure: may the bear engine resume? Every open record must match the broker, no unexplained short, every open
+ * short has a live buy-stop, and stop-based + gap-stress risk are inside their caps. Returns the problems.
+ */
+function resumeProblems({ rows, positions, stopStatus = {}, equity, openRisk, gapStress }) {
+    const problems = [];
+    const posQty = Object.fromEntries(positions.map(p => [p.symbol, parseFloat(p.qty)]));
+    for (const r of rows.filter(x => x.status === 'open')) {
+        const mm = brokerMismatch(r, posQty);
+        if (mm) problems.push(`mismatch: ${mm}`);
+        if (r.leg === 'short' && !['new', 'accepted', 'held', 'pending_new', 'replaced'].includes(stopStatus[r.id])) {
+            problems.push(`${r.symbol} short has no live buy-stop (${stopStatus[r.id] || 'none'})`);
+        }
+    }
+    const unk = unknownShorts(positions, rows);
+    if (unk.length) problems.push(`unknown short(s) at the broker: ${unk.join(', ')}`);
+    if (!(equity > 0)) problems.push('account equity unreadable');
+    else {
+        if (openRisk > equity * maxRiskPct() / 100 * 1.02) problems.push(`stop-based risk $${Math.round(openRisk)} over the ${maxRiskPct()}% cap`);
+        if (gapStress > equity * maxGapRiskPct() / 100) problems.push(`gap stress $${Math.round(gapStress)} over the ${maxGapRiskPct()}% cap`);
+    }
+    return problems;
+}
+
+/**
+ * Explicit resume after review. Re-reconciles against the broker first and REFUSES while any problem
+ * remains; every attempt (granted or refused) is recorded in bear_resume_log with who and when.
+ */
 async function resumeBear(userId, by = 'user') {
     await ensureTables();
-    const r = await query(`UPDATE bear_state SET halted_at = NULL, halt_reason = NULL WHERE user_id = $1 AND halted_at IS NOT NULL RETURNING user_id`, [String(userId)]);
-    logger.warn('[BearSide] Kill switch cleared', { userId, by, wasHalted: r.rows.length > 0 });
-    return { resumed: r.rows.length > 0 };
+    const uid = String(userId);
+    const st = await _haltState(uid);
+    if (!st.halted_at) return { resumed: false, wasHalted: false, problems: [] };
+    let problems;
+    try {
+        const client = await _client(uid);
+        const rows = await _rows(uid);
+        const positions = await _get(client, '/v2/positions');
+        const stopStatus = {};
+        for (const r of rows.filter(x => x.leg === 'short' && x.status === 'open')) {
+            stopStatus[r.id] = r.stop_order_id ? (await _get(client, `/v2/orders/${r.stop_order_id}`).catch(() => null))?.status || 'unreadable' : 'none';
+        }
+        const f = await _funding(client, uid, rows);
+        problems = resumeProblems({ rows, positions, stopStatus, equity: f.equity, openRisk: f.openRisk,
+            gapStress: gapStressUsd({ shortsValue: f.shortsValue, hedgeValue: f.hedgeValue, spreadDebit: f.spreadDebit }) });
+    } catch (err) {
+        problems = [`could not reconcile with the broker: ${_errMsg(err)}`];
+    }
+    const ok = problems.length === 0;
+    await query(`INSERT INTO bear_resume_log (user_id, by_whom, granted, halt_reason, halted_at, problems) VALUES ($1, $2, $3, $4, $5, $6)`,
+        [uid, String(by).slice(0, 200), ok, st.halt_reason, st.halted_at, JSON.stringify(problems)]);
+    if (ok) await query(`UPDATE bear_state SET halted_at = NULL, halt_reason = NULL WHERE user_id = $1`, [uid]);
+    logger.warn(`[BearSide] Resume ${ok ? 'GRANTED' : 'REFUSED'}`, { userId: uid, by, problems });
+    return { resumed: ok, wasHalted: true, problems };
 }
 
 /** Pure: shorts in the broker account that no bear record explains (open or pending). */
@@ -1550,9 +1609,23 @@ async function summary() {
                (AVG(s5 / s0 - 1) FILTER (WHERE c5 IS NOT NULL) * 100)::float AS spy_ret5
         FROM fwd GROUP BY 1 ORDER BY 1`)).rows;
     const state = (await query(`SELECT user_id, last_bear_at, bear_since, last_regime, recovering, checked_at, liquidating_since, halted_at, halt_reason FROM bear_state`)).rows;
+    // actual unrealized P&L as the broker reports it, for the bear book's symbols/contracts only
+    let unrealizedUsd = null;
+    try {
+        for (const uid of [...new Set(open.map(p => p.user_id))]) {
+            const ps = await _get(await _client(uid), '/v2/positions');
+            const mine = new Set(open.filter(p => p.user_id === uid).flatMap(p => [p.leg === 'spread' ? null : p.symbol, p.long_contract, p.short_contract]).filter(Boolean));
+            unrealizedUsd = (unrealizedUsd || 0) + ps.filter(p => mine.has(p.symbol)).reduce((s, p) => s + (parseFloat(p.unrealized_pl) || 0), 0);
+        }
+    } catch (_) { unrealizedUsd = null; } // report without it
+    const maxDefinedLossUsd = r2(openVals.filter(p => p.leg === 'spread').reduce((s, p) => s + p.debitUsd, 0));
     return { legs, open, shadow, shadowByRsi: byRsi, byRegime, state,
+             riskLabels: { maxLossUsd: 'stop-based: loss if every stop fills at its price (+ dividends owed)',
+                           gapStressUsd: 'defined scenario, NOT worst case: shorts +30% through stops, hedges/spreads a +5% market gap — shorts can gap further',
+                           maxDefinedLossUsd: 'spreads: the full debit (the most they can lose)', unrealizedUsd: 'broker-reported unrealized P&L now' },
              risk: { deployedUsd: r2(deployed), maxLossUsd: r2(maxLoss), stressGapUsd: stress, stressGapPct: CFG.stressGapPct, shortGapStress: gapStress,
                      dividendLiabilityUsd: r2(open.reduce((s, p) => s + (Number(p.meta?.dividend?.liabilityUsd) || 0), 0)),
+                     maxDefinedLossUsd, unrealizedUsd: unrealizedUsd == null ? null : r2(unrealizedUsd),
                      gapStressUsd: gapStressUsd({ shortsValue: openVals.filter(p => p.leg === 'short').reduce((s, p) => s + p.value, 0),
                                                   hedgeValue: openVals.filter(p => p.leg === 'hedge').reduce((s, p) => s + p.value, 0),
                                                   spreadDebit: openVals.filter(p => p.leg === 'spread').reduce((s, p) => s + p.debitUsd, 0) }) },
@@ -1565,7 +1638,7 @@ module.exports = {
     CFG, regimeDecision, recoverySignal, fundingRoom, positionRisk, riskRoom, rsi14, shortQuality, stressLoss,
     brokerMismatch, legMetrics, rankShortCandidates, shortPlan, chooseSpread, spreadPlan, parseOcc,
     regimeStale, dividendExposure, shortGapStress, entryTape, squeezeFlags, liquidationLeftovers, rsiBand, regimeBucket, regimeBreakdown,
-    unknownShorts, gapStressUsd, resumeBear,
+    unknownShorts, gapStressUsd, resumeBear, resumeProblems,
     runForUser, runTick, managedOrderIds, summary, ensureTables,
     _internal: { closeHedge: (...a) => _closeHedge(...a), closeSpreadStep: (...a) => _closeSpreadStep(...a), gapFits: (...a) => _gapFits(...a),
                  manageShort: (...a) => _manageShort(...a) },

@@ -112,3 +112,61 @@ describe('kill switch + gap-stress limit', () => {
         expect(f.shortsValue).toBe(17000);                                        // only the fitting one booked
     });
 });
+
+describe('third review checks (2026-11-21)', () => {
+    test('end to end: short 100 → 40 filled, 60 cancelled → recorded 40, stop for exactly 40, matches broker', async () => {
+        const posted = [], updates = [];
+        axios.get.mockImplementation(async url => {
+            if (url.includes('/v2/orders/e100')) return { data: { status: 'canceled', qty: '100', filled_qty: '40', filled_avg_price: '25' } };
+            throw new Error('unexpected ' + url);
+        });
+        axios.post.mockImplementation(async (url, body) => { posted.push(body); return { data: { id: 'stop40' } }; });
+        query.mockImplementation(async (sql, params) => { updates.push({ sql, params }); return { rows: [] }; });
+        const r = { id: 11, leg: 'short', symbol: 'ABC', status: 'pending_open', entry_order_id: 'e100', qty: 100 };
+        await bear._internal.manageShort(client, 'u', r, 25, true, new Date());
+        const open = updates.find(u => /SET status = 'open', qty = \$2/.test(u.sql));
+        expect(open.params[1]).toBe(40);                                     // recorded qty = what filled
+        expect(posted).toHaveLength(1);
+        expect(posted[0]).toMatchObject({ symbol: 'ABC', qty: '40', side: 'buy', type: 'stop', stop_price: '27' });
+        const stopRow = updates.find(u => /SET stop_price = \$2, stop_order_id = \$3/.test(u.sql));
+        expect(stopRow.params).toEqual([11, 27, 'stop40']);
+        // the recorded position now matches the broker's −40
+        expect(bear.brokerMismatch({ leg: 'short', symbol: 'ABC', qty: open.params[1] }, { ABC: -40 })).toBeNull();
+    });
+
+    test('resume is refused while any problem remains', () => {
+        const rows = [{ id: 1, leg: 'short', symbol: 'RDDT', status: 'open', qty: 10 }, { id: 2, leg: 'spread', symbol: 'SPY', status: 'open', qty: 1, long_contract: 'L', short_contract: 'S' }];
+        const clean = { rows, positions: [{ symbol: 'RDDT', qty: '-10' }, { symbol: 'L', qty: '1', asset_class: 'us_option' }, { symbol: 'S', qty: '-1', asset_class: 'us_option' }],
+                        stopStatus: { 1: 'new' }, equity: 100000, openRisk: 2000, gapStress: 3000 };
+        expect(bear.resumeProblems(clean)).toEqual([]);
+        expect(bear.resumeProblems({ ...clean, stopStatus: { 1: 'canceled' } })[0]).toMatch(/no live buy-stop/);
+        expect(bear.resumeProblems({ ...clean, positions: [...clean.positions.slice(1), { symbol: 'RDDT', qty: '-6' }] })[0]).toMatch(/mismatch/);
+        expect(bear.resumeProblems({ ...clean, positions: [...clean.positions, { symbol: 'BX', qty: '-3' }] })[0]).toMatch(/unknown short/);
+        expect(bear.resumeProblems({ ...clean, openRisk: 6000 })[0]).toMatch(/stop-based risk/);
+        expect(bear.resumeProblems({ ...clean, gapStress: 7000 })[0]).toMatch(/gap stress/);
+        expect(bear.resumeProblems({ ...clean, equity: NaN })[0]).toMatch(/equity unreadable/);
+    });
+
+    test('resume: broker unreachable → refused, attempt logged with who; halt NOT cleared', async () => {
+        const sqls = [];
+        query.mockImplementation(async (sql, params) => {
+            sqls.push({ sql, params });
+            if (/SELECT halted_at, halt_reason FROM bear_state/.test(sql)) return { rows: [{ halted_at: new Date(), halt_reason: 'mismatch' }] };
+            return { rows: [] };
+        });
+        require('../src/services/userDatabaseService').getUserAlpacaCredentials = jest.fn(async () => { throw new Error('broker down'); });
+        const res = await bear.resumeBear('u', 'tester');
+        expect(res).toMatchObject({ resumed: false, wasHalted: true });
+        expect(res.problems[0]).toMatch(/could not reconcile/);
+        const log = sqls.find(x => /INSERT INTO bear_resume_log/.test(x.sql));
+        expect(log.params.slice(0, 3)).toEqual(['u', 'tester', false]);
+        expect(sqls.some(x => /halted_at = NULL/.test(x.sql))).toBe(false);
+    });
+
+    test('a halt survives restarts: nothing but resumeBear ever clears halted_at', () => {
+        const src = require('fs').readFileSync(require.resolve('../src/services/bearSideService'), 'utf8');
+        const clears = src.split('\n').filter(l => /halted_at\s*=\s*NULL/.test(l));
+        expect(clears).toHaveLength(1);
+        expect(clears[0]).toMatch(/UPDATE bear_state SET halted_at = NULL, halt_reason = NULL WHERE user_id = \$1`, \[uid\]/);
+    });
+});

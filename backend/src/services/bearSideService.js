@@ -1577,6 +1577,7 @@ function legMetrics(rows, { riskFreePct = num('RISK_FREE_PCT', 4) } = {}) {
                 ? { borrow0_5pct: r2(cum - shortCapYears * 0.005), borrow3pct: r2(cum - shortCapYears * 0.03) } : null,
             slippageUsd: r2(slipUsd),
             borrowFees: leg === 'short' ? 'UNAVAILABLE — not in the Alpaca API and not charged on paper (not zero)' : null,
+            untrackedCosts: leg === 'spread' ? 'options regulatory fees (ORF/OCC/TAF, cents per contract) — not tracked' : leg === 'short' ? 'borrow fees (unavailable); sell-side SEC/TAF fees — not tracked' : 'sell-side SEC/TAF fees — not tracked',
         };
     }
     return out;

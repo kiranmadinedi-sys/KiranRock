@@ -143,10 +143,16 @@ const REVIEWS = [
         question: 'Did the bear legs make money (or cut losses) while the regime was BEAR, and did the shorted names actually keep falling? → keep, tune, or drop each leg.',
         async data() {
             const s = await require('./bearSideService').summary();
-            const legLine = l => `${l.leg}: ${l.open} open, ${l.closed} closed, ${l.wins} won, ${usd(l.pnl)}`;
+            const pf = v => (v == null ? 'n/a' : v === Infinity ? '∞' : v.toFixed(2));
+            const legLine = l => `${l.leg}: ${l.open} open, ${l.closed} closed, ${l.wins} won, ${usd(l.pnl)}`
+                + (l.closed ? ` · avg win ${usd(l.avgWin)} / loss ${usd(l.avgLoss)}, profit factor ${pf(l.profitFactor)}, expectancy ${usd(l.expectancy)}/trade,`
+                    + ` return on risk ${pct(l.returnOnRiskPct)}, max drawdown ${usd(-l.maxDrawdown)}, vs same capital in T-bills ${usd(l.vsTbill)}`
+                    + (l.avgSlippagePct != null ? `, slippage ${pct(l.avgSlippagePct)}` : '') : '');
             const sh = s.shadow || {};
-            const regime = s.state?.[0] ? `Regime now ${s.state[0].last_regime}${s.state[0].last_bear_at ? `, last BEAR ${String(s.state[0].last_bear_at).slice(0, 16)}` : ', never BEAR yet'}` : 'Not run yet';
-            return [regime,
+            const st = s.state?.[0];
+            const regime = st ? `Regime now ${st.last_regime}${st.last_bear_at ? `, last BEAR ${String(st.last_bear_at).slice(0, 16)}` : ', never BEAR yet'}${st.recovering ? ' · SPY bouncing (no new entries)' : ''}` : 'Not run yet';
+            const rk = s.risk ? `Open now: capital ${usd(s.risk.deployedUsd)}, max loss ${usd(-s.risk.maxLossUsd)}, +${s.risk.stressGapPct}% gap stress ${usd(-s.risk.stressGapUsd)}` : null;
+            return [regime, ...(rk ? [rk] : []),
                     ...(s.legs.length ? s.legs.map(legLine) : ['No bear trades yet (they only open while the regime is BEAR)']),
                     sh.logged ? `Short candidates logged: ${sh.logged} over ${sh.days} day(s) · 5-day: n=${sh.n5}, avg stock move ${pct(sh.avg_ret5)} (a short gains when negative), fell ${pct(sh.pct_fell5)} of the time, SPY ${pct(sh.spy_ret5)} · 10-day: n=${sh.n10}, avg ${pct(sh.avg_ret10)}`
                               : 'No short candidates logged yet'];

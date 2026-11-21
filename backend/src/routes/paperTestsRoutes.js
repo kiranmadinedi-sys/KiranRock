@@ -83,7 +83,7 @@ router.get('/status', async (req, res) => {
                 },
             },
             satellite: { positions: sat.rows, performance: perf },
-            bear: { positions: bearRows.rows, summary: bearSum ? { legs: bearSum.legs, shadow: bearSum.shadow, config: bearSum.config } : null },
+            bear: { positions: bearRows.rows, summary: bearSum ? { legs: bearSum.legs, shadow: bearSum.shadow, risk: bearSum.risk, state: bearSum.state, config: bearSum.config } : null },
         });
     } catch (error) {
         res.status(500).json({ error: error.message });

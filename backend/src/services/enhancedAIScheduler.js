@@ -1714,6 +1714,9 @@ function startScheduler() {
         require('./optionsIncomeService').runTick().catch(err =>
             console.warn('[OptionsIncome] Tick failed:', err.message)
         );                                 // market hours: paper cash-secured puts (manage each tick, enter once/day after 11:00 ET)
+        require('./bearSideService').runTick().catch(err =>
+            console.warn('[BearSide] Tick failed:', err.message)
+        );                                 // market hours: paper bear side (inverse ETFs, shorts, put spreads) while regime is BEAR
         require('./researchArchiveService').syncRecentNews().catch(() => {}); // every tick, 24/7: all-ticker news archive
         runCryptoWatchdog();               // every tick, 24/7: alert if the crypto process went silent while positions are open
         runMorningBriefing();              // 8:00 AM ET Mon-Fri: STRONG BUY pre-market alert

@@ -216,6 +216,7 @@ async function runMarketStudy({ weeks = 8, now = new Date() } = {}) {
         gemini: await geminiNewsCheck(now).catch(err => { logger.warn('[MarketStudy] Gemini/news check failed', { error: err.message }); return null; }),
         optionsIncome: await require('./optionsIncomeService').summary().catch(() => null),
         satellite: await require('./satelliteService').performance().catch(() => null),
+        bearSide: await require('./bearSideService').summary().catch(() => null),
     };
 
     await query(

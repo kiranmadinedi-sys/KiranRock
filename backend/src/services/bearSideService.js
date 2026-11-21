@@ -1,0 +1,833 @@
+/**
+ * Bear side — PAPER ONLY test (built 2026-11-20, the user asked for it after two −2%/−3% days:
+ * "we can't predict always in one direction", so the bot should be able to make money, or at least
+ * lose less, when the market falls).
+ *
+ * Three legs, all switched on only while the bot's own market regime is BEAR (or PANIC):
+ *   1. hedge  — buy inverse index ETFs (SH = −1× S&P 500, PSQ = −1× Nasdaq-100). Plain buys: the most
+ *               that can be lost is what was paid. BEAR_HEDGE_PCT (10%) of the account, half each.
+ *   2. short  — sell short the weakest liquid stocks (price below its 50- and 200-day averages, worst
+ *               3-month return, easy to borrow, no earnings inside the hold). Each BEAR_SHORT_EACH_PCT
+ *               (2%), at most BEAR_SHORT_MAX (5). Every short gets a GTC buy-stop 8% above entry the moment
+ *               it fills (if the stop cannot be placed the short is covered at once — fail closed).
+ *               Take profit −15%, time exit 21 days, stop trails down with the price.
+ *   3. spread — bear put spreads on SPY and QQQ: buy the at-the-money put, sell one ~5% lower, 30-50 days
+ *               out, debit ≤ 45% of the width, ≤ BEAR_SPREAD_PCT (2%) of the account each. Take profit at
+ *               half the max gain, stop at half the debit, close with ≤ 7 days left.
+ *               (The options-income replay found BUYING options lost 66-100% in flat months — this tests
+ *               the debit side only when the regime says the market is already falling.)
+ *
+ * Exits: every leg closes when the regime has not been BEAR/PANIC for BEAR_EXIT_AFTER_HOURS (24h) —
+ * one calm reading never flips the book. New entries only in BEAR, 10:30-15:30 ET, once a day per leg.
+ *
+ * Funding (the 2026-11-16 rule — sold puts must be covered by real cash): the hedge and spreads only use
+ * free cash = cash − open put collateral − proceeds of open shorts − 5% of equity, unless
+ * BEAR_ALLOW_MARGIN=true. Shorts need margin, not cash (their proceeds are never counted as free cash),
+ * and everything here together stays under BEAR_GROSS_CAP_PCT (25%) of equity.
+ *
+ * Isolation: hedge ETFs and shorted symbols are registered as the 'bear' sleeve in core_holdings, so the
+ * swing bot never buys (a swing buy would silently cover a short), stops or sells them. Shorts and
+ * spreads are tracked only in bear_positions (not holdings/trades); the reconciler already ignores short
+ * and option positions, and reconcileFillHistory skips the order ids listed here.
+ * Every day in BEAR the top-20 short candidates are logged with their price (bear_short_candidates), so
+ * shorting is graded on all of them, not only the few traded.
+ *
+ * HARD GUARD: refuses any account whose Alpaca credentials are not paper. Enabled per account via
+ * BEAR_SIDE_USER_IDS. Anything for real money would go through an approval request.
+ */
+const axios = require('axios');
+const { query } = require('../config/database');
+const { logger } = require('../utils/logger');
+
+const num = (k, d) => { const v = parseFloat(process.env[k]); return Number.isFinite(v) ? v : d; };
+const CFG = {
+    hedgeEtfs: [{ symbol: 'SH', weight: 0.5 }, { symbol: 'PSQ', weight: 0.5 }],
+    hedgeStopPct: 6,             // sell a hedge ETF that has lost 6% (the market bounced)
+    shortMax: 5,
+    shortStopPct: 8,             // buy-stop this far above entry, trails down with the price
+    shortTargetPct: 15,          // cover after a 15% fall
+    shortMaxDays: 21,            // calendar days
+    shortMinPrice: 20,
+    shortUniverse: 300,          // most-traded non-fund stocks
+    shortMax5dDropPct: 15,       // skip a stock already down >15% in 5 days (snap-back risk)
+    spreadUnderlyings: ['SPY', 'QQQ'],
+    spreadMinDte: 30, spreadMaxDte: 50,
+    spreadWidthPct: 5,
+    spreadMaxDebitFrac: 0.45,
+    spreadTakeProfitFrac: 0.5,   // of the max gain (width − debit)
+    spreadStopFrac: 0.5,         // spread value ≤ half the debit
+    spreadCloseDte: 7,
+    spreadPendingMaxMin: 60,     // cancel an unfilled entry after an hour
+    cashBufferPct: 5,
+    candidatesLogged: 20,
+};
+const hedgePct = () => num('BEAR_HEDGE_PCT', 10);
+const shortEachPct = () => num('BEAR_SHORT_EACH_PCT', 2);
+const spreadPct = () => num('BEAR_SPREAD_PCT', 2);
+const grossCapPct = () => num('BEAR_GROSS_CAP_PCT', 25);
+const exitAfterHours = () => num('BEAR_EXIT_AFTER_HOURS', 24);
+const allowMargin = () => String(process.env.BEAR_ALLOW_MARGIN || '').toLowerCase() === 'true';
+const userIds = () => (process.env.BEAR_SIDE_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+
+const BEAR_REGIMES = new Set(['BEAR', 'PANIC']);
+const DATA = 'https://data.alpaca.markets';
+const TRADE = 'https://paper-api.alpaca.markets';
+const etToday = (now = new Date()) => now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+const dayDiff = (a, b) => Math.round((new Date(a) - new Date(b)) / 86400000);
+const r2 = v => Math.round(v * 100) / 100;
+const optTick = p => (p >= 3 ? Math.round(p * 20) / 20 : Math.round(p * 100) / 100);
+const sleep = ms => new Promise(res => setTimeout(res, ms));
+const OPEN_STATUSES = ['pending_open', 'open', 'pending_close'];
+
+let _ready = false;
+async function ensureTables() {
+    if (_ready) return;
+    await query(`
+        CREATE TABLE IF NOT EXISTS bear_positions (
+            id              SERIAL      PRIMARY KEY,
+            user_id         TEXT        NOT NULL,
+            leg             TEXT        NOT NULL CHECK (leg IN ('hedge', 'short', 'spread')),
+            symbol          TEXT        NOT NULL,          -- ETF / stock / spread underlying
+            long_contract   TEXT,
+            short_contract  TEXT,
+            width           NUMERIC,
+            qty             NUMERIC     NOT NULL,
+            status          TEXT        NOT NULL DEFAULT 'pending_open'
+                            CHECK (status IN ('pending_open', 'open', 'pending_close', 'closed', 'not_filled')),
+            entry_price     NUMERIC,                       -- share price, or net debit per spread
+            entry_order_id  TEXT,
+            stop_price      NUMERIC,
+            stop_order_id   TEXT,
+            exit_order_id   TEXT,
+            exit_price      NUMERIC,
+            exit_reason     TEXT,
+            pnl             NUMERIC,
+            regime          TEXT,
+            meta            JSONB       NOT NULL DEFAULT '{}',
+            opened_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            closed_at       TIMESTAMPTZ
+        )`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_bear_positions_user_status ON bear_positions (user_id, status)`);
+    await query(`
+        CREATE TABLE IF NOT EXISTS bear_short_candidates (
+            d           DATE    NOT NULL,
+            symbol      TEXT    NOT NULL,
+            rank        INT     NOT NULL,
+            price       NUMERIC NOT NULL,
+            ret63       NUMERIC,
+            ret5        NUMERIC,
+            regime      TEXT,
+            traded      BOOLEAN NOT NULL DEFAULT false,
+            PRIMARY KEY (d, symbol)
+        )`);
+    await query(`
+        CREATE TABLE IF NOT EXISTS bear_state (
+            user_id       TEXT PRIMARY KEY,
+            last_bear_at  TIMESTAMPTZ,
+            last_regime   TEXT,
+            checked_at    TIMESTAMPTZ
+        )`);
+    _ready = true;
+}
+
+async function _client(userId) {
+    const c = await require('./userDatabaseService').getUserAlpacaCredentials(userId);
+    if (c.isPaper !== true) throw new Error('bear side is PAPER ONLY — refusing a non-paper account');
+    return { headers: { 'APCA-API-KEY-ID': c.keyId, 'APCA-API-SECRET-KEY': c.secretKey } };
+}
+const _get = (client, path, params) => axios.get(`${TRADE}${path}`, { headers: client.headers, params, timeout: 15000 }).then(r => r.data);
+const _post = (client, path, body) => axios.post(`${TRADE}${path}`, body, { headers: client.headers, timeout: 15000 }).then(r => r.data);
+const _errMsg = err => err.response?.data?.message || err.message;
+
+async function _waitFill(client, orderId, ms = 20000) {
+    const until = Date.now() + ms;
+    let o = null;
+    while (Date.now() < until) {
+        o = await _get(client, `/v2/orders/${orderId}`).catch(() => o);
+        if (o && ['filled', 'canceled', 'expired', 'rejected'].includes(o.status)) return o;
+        await sleep(1000);
+    }
+    return o;
+}
+
+async function _stockPrices(client, symbols) {
+    const out = {};
+    for (let i = 0; i < symbols.length; i += 100) {
+        const r = await axios.get(`${DATA}/v2/stocks/trades/latest`, {
+            headers: client.headers, params: { symbols: symbols.slice(i, i + 100).join(','), feed: 'iex' }, timeout: 15000 });
+        for (const [sym, tr] of Object.entries(r.data?.trades || {})) if (tr?.p > 0) out[sym] = tr.p;
+    }
+    return out;
+}
+
+async function _optionQuotes(client, contracts) {
+    const r = await axios.get(`${DATA}/v1beta1/options/snapshots`, {
+        headers: client.headers, params: { symbols: contracts.join(','), feed: 'indicative' }, timeout: 15000 });
+    const out = {};
+    for (const c of contracts) {
+        const q = r.data?.snapshots?.[c]?.latestQuote;
+        if (q?.bp > 0 && q?.ap > 0) out[c] = { bid: q.bp, ask: q.ap, mid: (q.bp + q.ap) / 2 };
+    }
+    return out;
+}
+
+// ─── Regime gate (pure parts unit-tested) ────────────────────────────────────
+
+/** Pure: should the bear book be held, entered, or closed? */
+function regimeDecision({ regimeType, lastBearAt, now = new Date(), exitHours = exitAfterHours() }) {
+    const bearNow = BEAR_REGIMES.has(regimeType);
+    if (bearNow) return { bearNow, hold: true, enter: regimeType === 'BEAR' }; // no NEW entries in a PANIC (snap-back risk)
+    const since = lastBearAt ? (now.getTime() - new Date(lastBearAt).getTime()) / 3600000 : Infinity;
+    return { bearNow, hold: since < exitHours, enter: false, hoursSinceBear: since };
+}
+
+async function _regimeState(userId, now) {
+    const regime = await require('./marketRegimeService').getMarketRegime();
+    const regimeType = regime?.regimeType || regime?.regime || 'NEUTRAL';
+    const uid = String(userId);
+    if (BEAR_REGIMES.has(regimeType)) {
+        await query(`INSERT INTO bear_state (user_id, last_bear_at, last_regime, checked_at) VALUES ($1, $2, $3, $2)
+                     ON CONFLICT (user_id) DO UPDATE SET last_bear_at = $2, last_regime = $3, checked_at = $2`, [uid, now, regimeType]);
+    } else {
+        await query(`INSERT INTO bear_state (user_id, last_regime, checked_at) VALUES ($1, $2, $3)
+                     ON CONFLICT (user_id) DO UPDATE SET last_regime = $2, checked_at = $3`, [uid, regimeType, now]);
+    }
+    const st = (await query(`SELECT last_bear_at FROM bear_state WHERE user_id = $1`, [uid])).rows[0];
+    return { regimeType, ...regimeDecision({ regimeType, lastBearAt: st?.last_bear_at, now }) };
+}
+
+// ─── Money available ─────────────────────────────────────────────────────────
+
+/** Pure: free cash for the hedge/spreads, and room under the gross cap. */
+function fundingRoom({ cash, equity, putCollateral = 0, shortProceeds = 0, bearGross = 0, margin = false,
+                       bufferPct = CFG.cashBufferPct, capPct = grossCapPct() }) {
+    if (!(equity > 0)) return { freeCash: 0, capRoom: 0, spendable: 0 };
+    const freeCash = Math.max(0, (cash || 0) - putCollateral - shortProceeds - equity * bufferPct / 100);
+    const capRoom = Math.max(0, equity * capPct / 100 - bearGross);
+    return { freeCash, capRoom, spendable: margin ? capRoom : Math.min(freeCash, capRoom) };
+}
+
+async function _funding(client, userId, rows) {
+    const acct = await _get(client, '/v2/account');
+    const positions = await _get(client, '/v2/positions');
+    const equity = parseFloat(acct.equity), cash = parseFloat(acct.cash);
+    const shortProceeds = positions.filter(p => (p.asset_class || 'us_equity') === 'us_equity' && parseFloat(p.qty) < 0)
+        .reduce((s, p) => s + Math.abs(parseFloat(p.market_value) || 0), 0);
+    let putCollateral = 0;
+    try {
+        putCollateral = parseFloat((await query(`SELECT COALESCE(SUM(collateral), 0) AS c FROM options_income_trades
+                                                 WHERE user_id = $1 AND status IN ('pending_open', 'open', 'pending_close')`, [String(userId)])).rows[0].c) || 0;
+    } catch (_) { /* table missing = no puts */ }
+    const bySym = Object.fromEntries(positions.map(p => [p.symbol, p]));
+    const bearGross = rows.filter(r => OPEN_STATUSES.includes(r.status)).reduce((s, r) => {
+        if (r.leg === 'spread') return s + Number(r.entry_price || r.meta?.limit || 0) * 100 * Number(r.qty);
+        return s + Math.abs(parseFloat(bySym[r.symbol]?.market_value) || Number(r.entry_price || 0) * Number(r.qty));
+    }, 0);
+    return { equity, cash, positions, bySym, ...fundingRoom({ cash, equity, putCollateral, shortProceeds, bearGross, margin: allowMargin() }), putCollateral, shortProceeds, bearGross };
+}
+
+/** Money a cash-using leg (hedge, spread) may still spend this tick. */
+const _spendable = f => (allowMargin() ? f.capRoom : Math.min(f.freeCash, f.capRoom));
+/** Book what a leg just used: cash legs use free cash and gross room; shorts only gross room. */
+function _book(f, usd, { usesCash }) {
+    f.capRoom = Math.max(0, f.capRoom - usd);
+    if (usesCash) f.freeCash = Math.max(0, f.freeCash - usd);
+}
+
+async function _rows(userId) {
+    return (await query(`SELECT * FROM bear_positions WHERE user_id = $1 AND status = ANY($2)`, [String(userId), OPEN_STATUSES])).rows;
+}
+
+async function _syncSleeve(userId) {
+    const syms = (await query(`SELECT DISTINCT symbol FROM bear_positions WHERE user_id = $1 AND leg IN ('hedge', 'short') AND status = ANY($2)`,
+        [String(userId), OPEN_STATUSES])).rows.map(r => r.symbol);
+    await require('./coreHoldingsService').setBearSymbols(userId, syms);
+}
+
+// ─── Leg 1: inverse ETF hedge ────────────────────────────────────────────────
+
+async function _enterHedge(client, userId, f, rows, regimeType) {
+    const broker = require('./brokerService');
+    const out = [];
+    const prices = await _stockPrices(client, CFG.hedgeEtfs.map(e => e.symbol));
+    for (const etf of CFG.hedgeEtfs) {
+        if (rows.some(r => r.leg === 'hedge' && r.symbol === etf.symbol)) continue;
+        const px = prices[etf.symbol];
+        if (!(px > 0)) continue;
+        const want = Math.min(f.equity * hedgePct() / 100 * etf.weight, _spendable(f));
+        const qty = Math.floor(want / (px * 1.01));
+        if (qty < 1) { out.push({ leg: 'hedge', symbol: etf.symbol, skipped: _spendable(f) < px ? 'no free cash (sold puts reserve it; BEAR_ALLOW_MARGIN=true to use margin)' : 'too small' }); continue; }
+        // protect before ordering so the swing bot never touches it, even for one cycle
+        await require('./coreHoldingsService').setBearSymbols(userId, [...new Set([...rows.filter(r => r.leg !== 'spread').map(r => r.symbol), etf.symbol])]);
+        try {
+            const res = await broker.buyMarket(userId, etf.symbol, qty, {
+                executedBy: 'BEAR_HEDGE', reason: `Bear-side hedge (paper, regime ${regimeType})`, safetyOptions: { enforceNotionalLimit: false },
+            });
+            const filled = Number(res.filledQty) || 0;
+            await query(`INSERT INTO bear_positions (user_id, leg, symbol, qty, status, entry_price, entry_order_id, regime, closed_at)
+                         VALUES ($1, 'hedge', $2, $3, $4, $5, $6, $7, $8)`,
+                [String(userId), etf.symbol, filled || qty, filled > 0 ? 'open' : 'not_filled', Number(res.filledAvgPrice) || px, res.orderId || null, regimeType, filled > 0 ? null : new Date()]);
+            _book(f, filled * (Number(res.filledAvgPrice) || px), { usesCash: true });
+            out.push({ leg: 'hedge', symbol: etf.symbol, qty: filled, price: res.filledAvgPrice });
+        } catch (err) {
+            out.push({ leg: 'hedge', symbol: etf.symbol, error: err.message });
+        }
+    }
+    await _syncSleeve(userId);
+    return out;
+}
+
+/** A hedge ETF the broker no longer holds (its protective stop filled): close the row at the recorded sell. */
+async function _hedgeGone(userId, r, px) {
+    const sell = (await query(`SELECT price::float AS p FROM trades WHERE user_id = $1 AND UPPER(symbol) = $2 AND action = 'SELL' AND trade_date >= $3
+                               ORDER BY trade_date DESC LIMIT 1`, [String(userId), r.symbol, r.opened_at]).catch(() => ({ rows: [] }))).rows[0]?.p;
+    const exit = sell || px || Number(r.entry_price);
+    await query(`UPDATE bear_positions SET status = 'closed', closed_at = NOW(), exit_price = $2, exit_reason = $3,
+                 pnl = ($2::numeric - entry_price) * qty WHERE id = $1`, [r.id, exit, sell ? 'stop filled at broker' : 'gone at broker (exit price estimated)']);
+    return { symbol: r.symbol, leg: 'hedge', reason: 'gone at broker', exit };
+}
+
+async function _closeHedge(userId, r, reason, px, liveQty) {
+    const broker = require('./brokerService');
+    if (!(liveQty > 0)) return _hedgeGone(userId, r, px);
+    const res = await broker.sellMarket(userId, r.symbol, liveQty, { executedBy: 'BEAR_HEDGE', reason: `Bear-side hedge exit: ${reason}` });
+    const exit = Number(res.filledAvgPrice) || px;
+    await query(`UPDATE bear_positions SET status = 'closed', closed_at = NOW(), exit_price = $2, exit_reason = $3, exit_order_id = $4,
+                 pnl = ($2::numeric - entry_price) * $5::numeric WHERE id = $1`, [r.id, exit, reason, res.orderId || null, Number(res.filledQty) || liveQty]);
+    return { symbol: r.symbol, reason, exit };
+}
+
+// ─── Leg 2: short selling ────────────────────────────────────────────────────
+
+/**
+ * Pure: rank short candidates from per-symbol stats. Liquid (top-N dollar volume), $20+, below both the
+ * 50- and 200-day averages, not already down >15% in 5 days; weakest 3-month return first.
+ */
+function rankShortCandidates(stats, { exclude = new Set(), universe = CFG.shortUniverse, minPrice = CFG.shortMinPrice,
+                                       max5dDrop = CFG.shortMax5dDropPct } = {}) {
+    return stats
+        .filter(x => x.c0 >= minPrice && x.dv > 0 && x.sma50 > 0 && x.sma200 > 0 && x.c63 > 0 && x.c5 > 0)
+        .sort((a, b) => b.dv - a.dv).slice(0, universe)
+        .map(x => ({ symbol: x.symbol, price: x.c0, ret63: x.c0 / x.c63 - 1, ret5: x.c0 / x.c5 - 1, below50: x.c0 < x.sma50, below200: x.c0 < x.sma200 }))
+        .filter(x => x.below50 && x.below200 && x.ret5 * 100 > -max5dDrop && !exclude.has(x.symbol))
+        .sort((a, b) => a.ret63 - b.ret63);
+}
+
+async function _shortStats() {
+    const r = await query(`
+        WITH b AS (
+            SELECT symbol, close::float AS c, volume::float AS v,
+                   ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY timestamp DESC) AS rn
+            FROM daily_bars WHERE timestamp >= NOW() - INTERVAL '320 days'
+        )
+        SELECT symbol,
+               MAX(c) FILTER (WHERE rn = 1)  AS c0,
+               MAX(c) FILTER (WHERE rn = 6)  AS c5,
+               MAX(c) FILTER (WHERE rn = 64) AS c63,
+               AVG(c) FILTER (WHERE rn <= 50)  AS sma50,
+               CASE WHEN COUNT(*) FILTER (WHERE rn <= 200) = 200 THEN AVG(c) FILTER (WHERE rn <= 200) END AS sma200,
+               AVG(c * v) FILTER (WHERE rn <= 60) AS dv
+        FROM b
+        WHERE NOT EXISTS (SELECT 1 FROM fund_symbols f WHERE f.symbol = b.symbol)
+        GROUP BY symbol`);
+    return r.rows;
+}
+
+async function _logCandidates(cands, regimeType, today) {
+    const top = cands.slice(0, CFG.candidatesLogged);
+    for (let i = 0; i < top.length; i++) {
+        const c = top[i];
+        await query(`INSERT INTO bear_short_candidates (d, symbol, rank, price, ret63, ret5, regime) VALUES ($1,$2,$3,$4,$5,$6,$7)
+                     ON CONFLICT (d, symbol) DO NOTHING`, [today, c.symbol, i + 1, c.price, c.ret63, c.ret5, regimeType]);
+    }
+}
+
+async function _enterShorts(client, userId, f, rows, regimeType, today, now) {
+    const out = [];
+    await require('./satelliteService').refreshFundList(); // fund list (shared with the satellite) so ETFs never get shorted
+    const open = rows.filter(r => r.leg === 'short');
+    let slots = CFG.shortMax - open.length;
+    const held = new Set(f.positions.map(p => String(p.symbol).toUpperCase()));
+    const protectedSyms = await require('./coreHoldingsService').getCoreSymbols(userId);
+    const swingRows = (await query(`SELECT UPPER(symbol) AS s FROM holdings WHERE user_id = $1 AND quantity > 0`, [String(userId)])).rows.map(r => r.s);
+    const exclude = new Set([...held, ...protectedSyms, ...swingRows]);
+    const cands = rankShortCandidates(await _shortStats(), { exclude });
+    await _logCandidates(cands, regimeType, today);
+    if (slots <= 0) return out;
+    const nextEarnings = require('./optionsIncomeService').nextEarnings;
+    for (const c of cands.slice(0, 15)) {
+        if (slots <= 0) break;
+        const notional = f.equity * shortEachPct() / 100;
+        if (notional > f.capRoom) { out.push({ leg: 'short', skipped: 'gross cap reached' }); break; }
+        try {
+            const asset = await _get(client, `/v2/assets/${c.symbol}`);
+            if (!asset.tradable || !asset.shortable || !asset.easy_to_borrow) continue;
+            const earn = await nextEarnings(c.symbol, now);
+            if (earn === undefined) continue; // lookup failed — fail closed
+            if (earn && dayDiff(earn, today) <= CFG.shortMaxDays) continue;
+            const px = (await _stockPrices(client, [c.symbol]))[c.symbol] || c.price;
+            const qty = Math.floor(notional / px);
+            if (qty < 1) continue;
+            const res = await _openShort(client, userId, c.symbol, qty, regimeType, rows);
+            if (res) {
+                out.push(res);
+                if (res.qty > 0) {
+                    slots--; _book(f, res.qty * res.price, { usesCash: false });
+                    await query(`UPDATE bear_short_candidates SET traded = true WHERE d = $1 AND symbol = $2`, [today, c.symbol]);
+                }
+            }
+        } catch (err) {
+            out.push({ leg: 'short', symbol: c.symbol, error: _errMsg(err) });
+        }
+    }
+    return out;
+}
+
+async function _openShort(client, userId, symbol, qty, regimeType, rows) {
+    // protect first: a swing buy of this symbol would quietly cover the short
+    await require('./coreHoldingsService').setBearSymbols(userId, [...new Set([...rows.filter(r => r.leg !== 'spread').map(r => r.symbol), symbol])]);
+    const o = await _post(client, '/v2/orders', { symbol, qty: String(qty), side: 'sell', type: 'market', time_in_force: 'day' });
+    const ins = await query(`INSERT INTO bear_positions (user_id, leg, symbol, qty, status, entry_order_id, regime) VALUES ($1, 'short', $2, $3, 'pending_open', $4, $5) RETURNING id`,
+        [String(userId), symbol, qty, o.id, regimeType]);
+    const id = ins.rows[0].id;
+    const filled = await _waitFill(client, o.id);
+    if (!filled || filled.status !== 'filled') {
+        logger.info('[BearSide] Short order not filled yet — will reconcile next tick', { userId, symbol, status: filled?.status });
+        return { leg: 'short', symbol, qty: 0, pending: true };
+    }
+    return _afterShortFill(client, userId, { id, symbol }, filled);
+}
+
+/** A short just filled: place its protective buy-stop, or cover immediately if that fails. */
+async function _afterShortFill(client, userId, r, filled) {
+    const qty = parseFloat(filled.filled_qty), entry = parseFloat(filled.filled_avg_price);
+    const stop = r2(entry * (1 + CFG.shortStopPct / 100));
+    await query(`UPDATE bear_positions SET status = 'open', qty = $2, entry_price = $3 WHERE id = $1`, [r.id, qty, entry]);
+    try {
+        const s = await _post(client, '/v2/orders', { symbol: r.symbol, qty: String(qty), side: 'buy', type: 'stop', stop_price: String(stop), time_in_force: 'gtc' });
+        await query(`UPDATE bear_positions SET stop_price = $2, stop_order_id = $3 WHERE id = $1`, [r.id, stop, s.id]);
+        logger.info('[BearSide] Short opened with buy-stop', { userId, symbol: r.symbol, qty, entry, stop });
+        return { leg: 'short', symbol: r.symbol, qty, price: entry, stop };
+    } catch (err) {
+        logger.error('[BearSide] Could not place buy-stop on new short — covering now (fail closed)', { userId, symbol: r.symbol, error: _errMsg(err) });
+        await _coverShort(client, userId, { ...r, qty, entry_price: entry, stop_order_id: null }, 'no stop could be placed');
+        return { leg: 'short', symbol: r.symbol, qty: 0, error: 'stop failed — covered' };
+    }
+}
+
+async function _coverShort(client, userId, r, reason) {
+    if (r.stop_order_id) {
+        await axios.delete(`${TRADE}/v2/orders/${r.stop_order_id}`, { headers: client.headers, timeout: 15000 }).catch(() => {});
+        await sleep(1500);
+        const so = await _get(client, `/v2/orders/${r.stop_order_id}`).catch(() => null);
+        if (so?.status === 'filled') return _markShortClosed(r, parseFloat(so.filled_avg_price), 'stop', so.id);
+    }
+    const pos = await _get(client, `/v2/positions/${r.symbol}`).catch(err => (err.response?.status === 404 ? null : undefined));
+    if (pos === undefined) return null; // couldn't read — retry next tick
+    const liveQty = pos ? parseFloat(pos.qty) : 0;
+    if (!(liveQty < 0)) return _markShortClosed(r, Number(pos?.current_price) || Number(r.entry_price), 'gone at broker', null);
+    const o = await _post(client, '/v2/orders', { symbol: r.symbol, qty: String(Math.abs(liveQty)), side: 'buy', type: 'market', time_in_force: 'day' });
+    await query(`UPDATE bear_positions SET status = 'pending_close', exit_order_id = $2, exit_reason = $3 WHERE id = $1`, [r.id, o.id, reason]);
+    const filled = await _waitFill(client, o.id);
+    if (filled?.status === 'filled') return _markShortClosed(r, parseFloat(filled.filled_avg_price), reason, o.id);
+    return { symbol: r.symbol, pendingCover: true };
+}
+
+async function _markShortClosed(r, exit, reason, orderId) {
+    await query(`UPDATE bear_positions SET status = 'closed', closed_at = NOW(), exit_price = $2, exit_reason = $3,
+                 exit_order_id = COALESCE($4, exit_order_id), pnl = (entry_price - $2::numeric) * qty WHERE id = $1`, [r.id, exit, reason, orderId]);
+    logger.info('[BearSide] Short closed', { symbol: r.symbol, entry: Number(r.entry_price), exit, reason });
+    return { symbol: r.symbol, exit, reason };
+}
+
+/** Pure: exit reason for an open short, or null. Also the trailed stop, if it should move down. */
+function shortPlan({ entry, price, stop, openedAt, now = new Date(), hold = true }) {
+    const days = (now.getTime() - new Date(openedAt).getTime()) / 86400000;
+    const reason = !hold ? 'regime no longer bear'
+        : price <= entry * (1 - CFG.shortTargetPct / 100) ? `take profit (−${CFG.shortTargetPct}%)`
+        : days >= CFG.shortMaxDays ? `time exit (${CFG.shortMaxDays} days)` : null;
+    const trailed = r2(price * (1 + CFG.shortStopPct / 100));
+    return { reason, newStop: stop && trailed < stop * 0.99 ? trailed : null };
+}
+
+async function _manageShort(client, userId, r, price, hold, now) {
+    if (r.status === 'pending_open') {
+        const o = await _get(client, `/v2/orders/${r.entry_order_id}`).catch(() => null);
+        if (o?.status === 'filled') return _afterShortFill(client, userId, r, o);
+        if (o && ['canceled', 'expired', 'rejected'].includes(o.status)) {
+            await query(`UPDATE bear_positions SET status = 'not_filled', closed_at = NOW() WHERE id = $1`, [r.id]);
+        }
+        return null;
+    }
+    if (r.status === 'pending_close') {
+        const o = await _get(client, `/v2/orders/${r.exit_order_id}`).catch(() => null);
+        if (o?.status === 'filled') return _markShortClosed(r, parseFloat(o.filled_avg_price), r.exit_reason, o.id);
+        if (o && ['canceled', 'expired', 'rejected'].includes(o.status)) return _coverShort(client, userId, { ...r, stop_order_id: null }, r.exit_reason || 'retry cover');
+        return null;
+    }
+    // stop filled at the broker?
+    if (r.stop_order_id) {
+        const so = await _get(client, `/v2/orders/${r.stop_order_id}`).catch(() => null);
+        if (so?.status === 'filled') return _markShortClosed(r, parseFloat(so.filled_avg_price), 'stop', so.id);
+        if (so && ['canceled', 'expired', 'rejected'].includes(so.status)) {
+            // stop vanished (e.g. cancelled by something else) — put it back, or cover
+            try {
+                const s = await _post(client, '/v2/orders', { symbol: r.symbol, qty: String(r.qty), side: 'buy', type: 'stop', stop_price: String(r.stop_price), time_in_force: 'gtc' });
+                await query(`UPDATE bear_positions SET stop_order_id = $2 WHERE id = $1`, [r.id, s.id]);
+                logger.warn('[BearSide] Short buy-stop was gone — replaced', { userId, symbol: r.symbol, was: so.status });
+            } catch (err) {
+                return _coverShort(client, userId, { ...r, stop_order_id: null }, 'stop gone and could not be replaced');
+            }
+        }
+    }
+    if (!(price > 0)) return null;
+    const plan = shortPlan({ entry: Number(r.entry_price), price, stop: Number(r.stop_price), openedAt: r.opened_at, now, hold });
+    if (plan.reason) return _coverShort(client, userId, r, plan.reason);
+    if (plan.newStop && r.stop_order_id) {
+        try {
+            const s = (await axios.patch(`${TRADE}/v2/orders/${r.stop_order_id}`, { stop_price: String(plan.newStop) }, { headers: client.headers, timeout: 15000 })).data;
+            await query(`UPDATE bear_positions SET stop_price = $2, stop_order_id = $3 WHERE id = $1`, [r.id, plan.newStop, s.id]);
+            logger.info('[BearSide] Short stop trailed down', { symbol: r.symbol, from: Number(r.stop_price), to: plan.newStop });
+        } catch (err) {
+            logger.warn('[BearSide] Could not trail short stop', { symbol: r.symbol, error: _errMsg(err) });
+        }
+    }
+    return null;
+}
+
+// ─── Leg 3: bear put spreads ─────────────────────────────────────────────────
+
+const parseOcc = sym => {
+    const m = String(sym).match(/^([A-Z.]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/);
+    return m ? { underlying: m[1], expiry: `20${m[2]}-${m[3]}-${m[4]}`, type: m[5], strike: parseInt(m[6], 10) / 1000 } : null;
+};
+
+/** Pure: pick a bear put spread from a puts snapshot map, or null. */
+function chooseSpread(snapshots, price, today, { minDte = CFG.spreadMinDte, maxDte = CFG.spreadMaxDte,
+                                                  widthPct = CFG.spreadWidthPct, maxDebitFrac = CFG.spreadMaxDebitFrac } = {}) {
+    const byExp = {};
+    for (const [sym, s] of Object.entries(snapshots || {})) {
+        const p = parseOcc(sym);
+        const bid = s?.latestQuote?.bp, ask = s?.latestQuote?.ap;
+        if (!p || p.type !== 'P' || !(bid > 0 && ask > 0)) continue;
+        const dte = dayDiff(p.expiry, today);
+        if (dte < minDte || dte > maxDte) continue;
+        (byExp[p.expiry] = byExp[p.expiry] || []).push({ contract: sym, strike: p.strike, bid, ask, mid: (bid + ask) / 2, dte });
+    }
+    const exps = Object.keys(byExp).sort((a, b) => Math.abs(byExp[a][0].dte - 40) - Math.abs(byExp[b][0].dte - 40));
+    for (const exp of exps) {
+        const legs = byExp[exp];
+        const atm = legs.filter(l => l.strike <= price * 1.005).sort((a, b) => b.strike - a.strike)[0];
+        if (!atm) continue;
+        const target = atm.strike - price * widthPct / 100;
+        const low = legs.filter(l => l.strike < atm.strike).sort((a, b) => Math.abs(a.strike - target) - Math.abs(b.strike - target))[0];
+        if (!low) continue;
+        const width = atm.strike - low.strike;
+        const debit = atm.mid - low.mid;
+        const natural = atm.ask - low.bid;
+        if (!(debit > 0) || width < price * widthPct / 100 * 0.6 || debit > width * maxDebitFrac) continue;
+        return { expiry: exp, dte: atm.dte, long: atm, short: low, width, debit, natural,
+                 limit: optTick(Math.min(natural, debit + (natural - debit) * 0.25)) };
+    }
+    return null;
+}
+
+async function _enterSpreads(client, userId, f, rows, regimeType, today) {
+    const out = [];
+    const prices = await _stockPrices(client, CFG.spreadUnderlyings);
+    for (const und of CFG.spreadUnderlyings) {
+        if (rows.some(r => r.leg === 'spread' && r.symbol === und)) continue;
+        const px = prices[und];
+        if (!(px > 0)) continue;
+        const from = new Date(Date.now() + CFG.spreadMinDte * 86400000).toISOString().slice(0, 10);
+        const to = new Date(Date.now() + CFG.spreadMaxDte * 86400000).toISOString().slice(0, 10);
+        let snaps;
+        try {
+            snaps = (await axios.get(`${DATA}/v1beta1/options/snapshots/${und}`, {
+                headers: client.headers, timeout: 15000,
+                params: { feed: 'indicative', type: 'put', expiration_date_gte: from, expiration_date_lte: to,
+                          strike_price_gte: (px * 0.88).toFixed(2), strike_price_lte: (px * 1.01).toFixed(2), limit: 500 },
+            })).data?.snapshots;
+        } catch (err) { out.push({ leg: 'spread', symbol: und, error: _errMsg(err) }); continue; }
+        const pick = chooseSpread(snaps, px, today);
+        if (!pick) { out.push({ leg: 'spread', symbol: und, skipped: 'no spread met the rules' }); continue; }
+        const cost = pick.limit * 100;
+        const room = _spendable(f);
+        const qty = Math.floor(Math.min(f.equity * spreadPct() / 100, room) / cost);
+        if (qty < 1) { out.push({ leg: 'spread', symbol: und, skipped: room < cost ?'no free cash (BEAR_ALLOW_MARGIN=true to use margin)' : 'one spread costs more than the per-spread limit', cost }); continue; }
+        try {
+            const o = await _post(client, '/v2/orders', {
+                order_class: 'mleg', qty: String(qty), type: 'limit', limit_price: String(pick.limit), time_in_force: 'day',
+                legs: [
+                    { symbol: pick.long.contract, ratio_qty: '1', side: 'buy', position_intent: 'buy_to_open' },
+                    { symbol: pick.short.contract, ratio_qty: '1', side: 'sell', position_intent: 'sell_to_open' },
+                ],
+            });
+            await query(`INSERT INTO bear_positions (user_id, leg, symbol, long_contract, short_contract, width, qty, status, entry_order_id, regime, meta)
+                         VALUES ($1, 'spread', $2, $3, $4, $5, $6, 'pending_open', $7, $8, $9)`,
+                [String(userId), und, pick.long.contract, pick.short.contract, pick.width, qty, o.id, regimeType,
+                 JSON.stringify({ limit: pick.limit, debitMid: r2(pick.debit), natural: r2(pick.natural), dte: pick.dte, underlyingPx: px })]);
+            _book(f, cost * qty, { usesCash: true });
+            logger.info('[BearSide] Bear put spread order placed', { userId, und, long: pick.long.contract, short: pick.short.contract, qty, limit: pick.limit, width: pick.width });
+            out.push({ leg: 'spread', symbol: und, long: pick.long.contract, short: pick.short.contract, qty, limit: pick.limit });
+        } catch (err) {
+            out.push({ leg: 'spread', symbol: und, error: _errMsg(err) });
+        }
+    }
+    return out;
+}
+
+/** Pure: exit reason for an open spread, or null. value = what the spread is worth now (mid). */
+function spreadPlan({ debit, width, value, dte, hold = true }) {
+    if (!hold) return 'regime no longer bear';
+    if (value >= debit + (width - debit) * CFG.spreadTakeProfitFrac) return `take profit (${CFG.spreadTakeProfitFrac * 100}% of max gain)`;
+    if (value <= debit * CFG.spreadStopFrac) return `stop (value ≤ ${CFG.spreadStopFrac * 100}% of debit)`;
+    if (dte <= CFG.spreadCloseDte) return `close near expiry (${dte}d)`;
+    return null;
+}
+
+/**
+ * Closing a spread: two single-leg orders, short leg first (buy_to_close) so the account is never left
+ * holding an uncovered short put; then sell_to_close the long. Marketable limits (ask / bid).
+ * Alpaca's docs don't define the price sign of a credit mleg order, so no mleg close.
+ */
+/**
+ * Status of a working close order: 'filled' (sets the fill), 'working', or 'dead' (cancelled/expired,
+ * or stale > 10 min and now cancelled so the next tick re-places it at a fresh quote).
+ */
+async function _closeOrderState(client, orderId) {
+    const o = await _get(client, `/v2/orders/${orderId}`).catch(() => null);
+    if (!o) return { state: 'working' };
+    if (o.status === 'filled') return { state: 'filled', fill: parseFloat(o.filled_avg_price) };
+    if (['canceled', 'expired', 'rejected'].includes(o.status)) return { state: 'dead' };
+    if (Date.now() - new Date(o.created_at).getTime() > 10 * 60000) {
+        await axios.delete(`${TRADE}/v2/orders/${orderId}`, { headers: client.headers, timeout: 15000 }).catch(() => {});
+    }
+    return { state: 'working' };
+}
+
+async function _closeSpreadStep(client, userId, r, reason) {
+    const meta = r.meta || {};
+    const q = await _optionQuotes(client, [r.long_contract, r.short_contract]).catch(() => ({}));
+    if (meta.shortCloseFill == null) {
+        if (meta.shortCloseOrder) {
+            const s = await _closeOrderState(client, meta.shortCloseOrder);
+            if (s.state === 'filled') meta.shortCloseFill = s.fill;
+            else if (s.state === 'working') return null;
+            else meta.shortCloseOrder = null;
+        }
+        if (meta.shortCloseFill == null) {
+            // a short leg that is no longer held (expired worthless) needs no close
+            const pos = await _get(client, `/v2/positions/${r.short_contract}`).catch(err => (err.response?.status === 404 ? null : undefined));
+            if (pos === null) meta.shortCloseFill = 0;
+            else {
+                const ask = q[r.short_contract]?.ask;
+                if (!(ask > 0)) return null;
+                const o = await _post(client, '/v2/orders', { symbol: r.short_contract, qty: String(r.qty), side: 'buy', type: 'limit',
+                    limit_price: String(optTick(ask)), time_in_force: 'day', position_intent: 'buy_to_close' });
+                meta.shortCloseOrder = o.id;
+                const f = await _waitFill(client, o.id, 15000);
+                if (f?.status === 'filled') meta.shortCloseFill = parseFloat(f.filled_avg_price);
+            }
+        }
+        await query(`UPDATE bear_positions SET status = 'pending_close', exit_reason = COALESCE(exit_reason, $2), meta = $3 WHERE id = $1`, [r.id, reason, JSON.stringify(meta)]);
+        if (meta.shortCloseFill == null) return null;
+    }
+    if (meta.longCloseOrder && meta.longCloseFill == null) {
+        const s = await _closeOrderState(client, meta.longCloseOrder);
+        if (s.state === 'filled') meta.longCloseFill = s.fill;
+        else if (s.state === 'working') return null;
+        else meta.longCloseOrder = null;
+    }
+    if (meta.longCloseFill == null) {
+        const pos = await _get(client, `/v2/positions/${r.long_contract}`).catch(err => (err.response?.status === 404 ? null : undefined));
+        if (pos === null) meta.longCloseFill = 0;
+        else {
+            const bid = q[r.long_contract]?.bid;
+            if (!(bid > 0)) { await query(`UPDATE bear_positions SET meta = $2 WHERE id = $1`, [r.id, JSON.stringify(meta)]); return null; }
+            const o = await _post(client, '/v2/orders', { symbol: r.long_contract, qty: String(r.qty), side: 'sell', type: 'limit',
+                limit_price: String(optTick(bid)), time_in_force: 'day', position_intent: 'sell_to_close' });
+            meta.longCloseOrder = o.id;
+            const f = await _waitFill(client, o.id, 15000);
+            if (f?.status === 'filled') meta.longCloseFill = parseFloat(f.filled_avg_price);
+        }
+    }
+    await query(`UPDATE bear_positions SET meta = $2 WHERE id = $1`, [r.id, JSON.stringify(meta)]);
+    if (meta.longCloseFill == null) return null;
+    const exit = r2(meta.longCloseFill - meta.shortCloseFill);
+    await query(`UPDATE bear_positions SET status = 'closed', closed_at = NOW(), exit_price = $2, pnl = ($2::numeric - entry_price) * 100 * qty WHERE id = $1`, [r.id, exit]);
+    logger.info('[BearSide] Bear put spread closed', { userId, und: r.symbol, debit: Number(r.entry_price), exit, reason: r.exit_reason || reason });
+    return { symbol: r.symbol, leg: 'spread', exit, reason: r.exit_reason || reason };
+}
+
+async function _manageSpread(client, userId, r, hold, now) {
+    if (r.status === 'pending_open') {
+        const o = await _get(client, `/v2/orders/${r.entry_order_id}`).catch(() => null);
+        if (!o) return null;
+        if (o.status === 'filled') {
+            let debit = parseFloat(o.filled_avg_price);
+            if (!(debit > 0) && Array.isArray(o.legs)) {
+                const leg = c => parseFloat(o.legs.find(l => l.symbol === c)?.filled_avg_price) || 0;
+                debit = leg(r.long_contract) - leg(r.short_contract);
+            }
+            await query(`UPDATE bear_positions SET status = 'open', entry_price = $2 WHERE id = $1`, [r.id, r2(debit || Number(r.meta?.limit))]);
+            logger.info('[BearSide] Bear put spread filled', { userId, und: r.symbol, debit });
+            return null;
+        }
+        if (['canceled', 'expired', 'rejected'].includes(o.status)) {
+            await query(`UPDATE bear_positions SET status = 'not_filled', closed_at = NOW() WHERE id = $1`, [r.id]);
+        } else if ((now.getTime() - new Date(r.opened_at).getTime()) / 60000 > CFG.spreadPendingMaxMin) {
+            await axios.delete(`${TRADE}/v2/orders/${r.entry_order_id}`, { headers: client.headers, timeout: 15000 }).catch(() => {});
+        }
+        return null;
+    }
+    if (r.status === 'pending_close') return _closeSpreadStep(client, userId, r, r.exit_reason || 'close');
+    const q = await _optionQuotes(client, [r.long_contract, r.short_contract]).catch(() => ({}));
+    const L = q[r.long_contract], S = q[r.short_contract];
+    if (!L || !S) return null;
+    const value = L.mid - S.mid;
+    const dte = dayDiff(parseOcc(r.long_contract).expiry, etToday(now));
+    const meta = r.meta || {};
+    if (meta.minValue == null || value < meta.minValue) { meta.minValue = r2(value); }
+    if (meta.maxValue == null || value > meta.maxValue) { meta.maxValue = r2(value); }
+    await query(`UPDATE bear_positions SET meta = $2 WHERE id = $1`, [r.id, JSON.stringify(meta)]).catch(() => {});
+    const reason = spreadPlan({ debit: Number(r.entry_price), width: Number(r.width), value, dte, hold });
+    if (!reason) return null;
+    logger.info('[BearSide] Closing bear put spread', { und: r.symbol, reason, value: r2(value), debit: Number(r.entry_price), dte });
+    return _closeSpreadStep(client, userId, { ...r, meta }, reason);
+}
+
+// ─── Tick ────────────────────────────────────────────────────────────────────
+
+/** One account: manage everything open; enter once a day per leg while BEAR. */
+async function runForUser(userId, now = new Date(), { allowEntries = true } = {}) {
+    await ensureTables();
+    const client = await _client(userId);
+    const today = etToday(now);
+    const st = await _regimeState(userId, now);
+    let rows = await _rows(userId);
+    const actions = [];
+
+    // manage
+    const stockSyms = [...new Set(rows.filter(r => r.leg !== 'spread').map(r => r.symbol))];
+    const prices = stockSyms.length ? await _stockPrices(client, stockSyms).catch(() => ({})) : {};
+    // one positions read per tick; null = unreadable → hedges are left alone this tick (never "gone")
+    const posQty = rows.some(r => r.leg === 'hedge')
+        ? await _get(client, '/v2/positions').then(ps => Object.fromEntries(ps.map(p => [p.symbol, parseFloat(p.qty)]))).catch(() => null)
+        : {};
+    for (const r of rows) {
+        try {
+            let res = null;
+            if (r.leg === 'hedge' && r.status === 'open' && posQty) {
+                const px = prices[r.symbol];
+                const liveQty = posQty[r.symbol] || 0;
+                const reason = !st.hold ? 'regime no longer bear'
+                    : px > 0 && px <= Number(r.entry_price) * (1 - CFG.hedgeStopPct / 100) ? `stop (−${CFG.hedgeStopPct}%)` : null;
+                if (!(liveQty > 0)) res = await _hedgeGone(userId, r, px);
+                else if (reason) res = await _closeHedge(userId, r, reason, px, liveQty);
+            } else if (r.leg === 'short') {
+                res = await _manageShort(client, userId, r, prices[r.symbol], st.hold, now);
+            } else if (r.leg === 'spread') {
+                res = await _manageSpread(client, userId, r, st.hold, now);
+            }
+            if (res) actions.push(res);
+        } catch (err) {
+            logger.warn('[BearSide] Managing position failed — others continue', { userId, id: r.id, leg: r.leg, symbol: r.symbol, error: _errMsg(err) });
+        }
+    }
+    await _syncSleeve(userId).catch(err => logger.warn('[BearSide] Sleeve sync failed', { userId, error: err.message }));
+
+    // enter
+    if (allowEntries && st.enter) {
+        rows = await _rows(userId);
+        const f = await _funding(client, userId, rows);
+        const tryLeg = async (leg, fn) => {
+            const key = `${userId}:${leg}:${today}`;
+            if (_enteredOn.has(key)) return;
+            _enteredOn.add(key);
+            try {
+                const res = await fn();
+                if (res.length) { actions.push(...res); logger.info(`[BearSide] ${leg} entries`, { userId, regime: st.regimeType, results: res, freeCash: Math.round(f.freeCash), capRoom: Math.round(f.capRoom) }); }
+            } catch (err) { logger.warn(`[BearSide] ${leg} entries failed`, { userId, error: _errMsg(err) }); }
+        };
+        await tryLeg('hedge', () => _enterHedge(client, userId, f, rows, st.regimeType));
+        await tryLeg('short', () => _enterShorts(client, userId, f, rows, st.regimeType, today, now));
+        await tryLeg('spread', () => _enterSpreads(client, userId, f, rows, st.regimeType, today));
+    }
+    return { regime: st.regimeType, hold: st.hold, enter: st.enter, actions };
+}
+
+/** Scheduler tick (every 5 min, market hours). Entries 10:30-15:30 ET. */
+const _enteredOn = new Set();
+async function runTick(now = new Date()) {
+    const ids = userIds();
+    if (!ids.length) return;
+    const { isMarketOpen } = require('../utils/marketCalendar');
+    if (!isMarketOpen(now)) return;
+    const et = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hour12: false }).formatToParts(now);
+    const etMin = parseInt(et.find(p => p.type === 'hour').value, 10) * 60 + parseInt(et.find(p => p.type === 'minute').value, 10);
+    const allowEntries = etMin >= 10 * 60 + 30 && etMin < 15 * 60 + 30;
+    for (const id of ids) {
+        try {
+            const r = await runForUser(id, now, { allowEntries });
+            if (r.actions.length) logger.info('[BearSide] Tick', { userId: id, regime: r.regime, actions: r.actions });
+        } catch (err) {
+            logger.warn('[BearSide] Tick failed (non-blocking)', { userId: id, error: err.message });
+        }
+    }
+}
+
+/** Order ids of shorts (entry, stop, cover) — reconcileFillHistory skips these; they are not in `trades`. */
+async function managedOrderIds(userId) {
+    try {
+        const r = await query(`SELECT entry_order_id, stop_order_id, exit_order_id FROM bear_positions
+                               WHERE user_id = $1 AND leg = 'short' AND opened_at > NOW() - INTERVAL '60 days'`, [String(userId)]);
+        return new Set(r.rows.flatMap(x => [x.entry_order_id, x.stop_order_id, x.exit_order_id]).filter(Boolean));
+    } catch (_) {
+        return new Set(); // table not created yet
+    }
+}
+
+/**
+ * Results for the paper-tests page / Saturday report: per leg P&L, open positions, and the shadow test —
+ * every logged short candidate's 5- and 10-trading-day return (a short gains when it is negative) vs SPY.
+ */
+async function summary() {
+    await ensureTables();
+    const legs = (await query(`
+        SELECT leg,
+               COUNT(*) FILTER (WHERE status IN ('open', 'pending_open', 'pending_close'))::int AS open,
+               COUNT(*) FILTER (WHERE status = 'closed')::int AS closed,
+               COUNT(*) FILTER (WHERE status = 'closed' AND pnl > 0)::int AS wins,
+               COALESCE(SUM(pnl) FILTER (WHERE status = 'closed'), 0)::float AS pnl
+        FROM bear_positions GROUP BY leg ORDER BY leg`)).rows;
+    const open = (await query(`SELECT user_id, leg, symbol, long_contract, short_contract, qty::float, entry_price::float, stop_price::float, status, opened_at, regime
+                               FROM bear_positions WHERE status IN ('open', 'pending_open', 'pending_close') ORDER BY opened_at`)).rows;
+    const shadow = (await query(`
+        WITH c AS (SELECT d, symbol, price::float AS p FROM bear_short_candidates),
+        fwd AS (
+            SELECT c.d, c.symbol, c.p,
+                   (SELECT close::float FROM daily_bars b WHERE b.symbol = c.symbol AND (b.timestamp AT TIME ZONE 'UTC')::date > c.d
+                    ORDER BY b.timestamp OFFSET 4 LIMIT 1) AS c5,
+                   (SELECT close::float FROM daily_bars b WHERE b.symbol = c.symbol AND (b.timestamp AT TIME ZONE 'UTC')::date > c.d
+                    ORDER BY b.timestamp OFFSET 9 LIMIT 1) AS c10,
+                   (SELECT close::float FROM daily_bars b WHERE b.symbol = 'SPY' AND (b.timestamp AT TIME ZONE 'UTC')::date <= c.d
+                    ORDER BY b.timestamp DESC LIMIT 1) AS s0,
+                   (SELECT close::float FROM daily_bars b WHERE b.symbol = 'SPY' AND (b.timestamp AT TIME ZONE 'UTC')::date > c.d
+                    ORDER BY b.timestamp OFFSET 4 LIMIT 1) AS s5
+            FROM c)
+        SELECT COUNT(*)::int AS logged, COUNT(DISTINCT d)::int AS days,
+               COUNT(c5)::int AS n5, (AVG(c5 / p - 1) * 100)::float AS avg_ret5,
+               (AVG(CASE WHEN c5 < p THEN 1.0 ELSE 0 END) FILTER (WHERE c5 IS NOT NULL) * 100)::float AS pct_fell5,
+               COUNT(c10)::int AS n10, (AVG(c10 / p - 1) * 100)::float AS avg_ret10,
+               (AVG(s5 / s0 - 1) FILTER (WHERE c5 IS NOT NULL) * 100)::float AS spy_ret5
+        FROM fwd`)).rows[0];
+    const state = (await query(`SELECT user_id, last_bear_at, last_regime, checked_at FROM bear_state`)).rows;
+    return { legs, open, shadow, state, config: { hedgePct: hedgePct(), shortEachPct: shortEachPct(), shortMax: CFG.shortMax, spreadPct: spreadPct(),
+             grossCapPct: grossCapPct(), exitAfterHours: exitAfterHours(), allowMargin: allowMargin() } };
+}
+
+module.exports = {
+    CFG, regimeDecision, fundingRoom, rankShortCandidates, shortPlan, chooseSpread, spreadPlan, parseOcc,
+    runForUser, runTick, managedOrderIds, summary, ensureTables,
+};

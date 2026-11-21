@@ -59,9 +59,11 @@ const maxCollateralTotal = () => parseFloat(process.env.OPTIONS_INCOME_MAX_COLLA
 const cashBufferPct = () => parseFloat(process.env.OPTIONS_CASH_BUFFER_PCT || '5');
 
 /** Cash still free to back a new put: cash − collateral already reserved − buffer. Pure (unit-tested). */
-function cashSecuredRoom({ cash, equity, reserved, bufferPct = cashBufferPct() }) {
+// shortProceeds (2026-11-20): selling a stock short adds its price to cash, but that cash is owed back —
+// it must never secure a put (paper bear side).
+function cashSecuredRoom({ cash, equity, reserved, shortProceeds = 0, bufferPct = cashBufferPct() }) {
     if (!(cash >= 0) || !(equity > 0)) return 0;
-    return Math.max(0, cash - (reserved || 0) - equity * bufferPct / 100);
+    return Math.max(0, cash - (reserved || 0) - (shortProceeds || 0) - equity * bufferPct / 100);
 }
 const userIds = () => (process.env.OPTIONS_INCOME_USER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 
@@ -253,7 +255,10 @@ async function runEntries(userId, now = new Date()) {
     let room;
     try {
         const acct = (await axios.get(`${client.trade}/v2/account`, { headers: client.headers, timeout: 15000 })).data;
-        room = cashSecuredRoom({ cash: parseFloat(acct.cash), equity: parseFloat(acct.equity), reserved: collateral });
+        const positions = (await axios.get(`${client.trade}/v2/positions`, { headers: client.headers, timeout: 15000 })).data;
+        const shortProceeds = positions.filter(p => (p.asset_class || 'us_equity') === 'us_equity' && parseFloat(p.qty) < 0)
+            .reduce((s, p) => s + Math.abs(parseFloat(p.market_value) || 0), 0);
+        room = cashSecuredRoom({ cash: parseFloat(acct.cash), equity: parseFloat(acct.equity), reserved: collateral, shortProceeds });
     } catch (err) { return { opened: [], reason: `could not read account cash: ${err.message}` }; }
     if (room <= 0) {
         logger.info('[OptionsIncome] No new puts — not enough free cash to fully secure one', { userId, reservedCollateral: collateral, bufferPct: cashBufferPct() });

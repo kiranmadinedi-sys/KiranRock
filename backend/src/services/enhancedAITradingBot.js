@@ -3390,7 +3390,12 @@ async function executeAutonomousTrading(userId) {
                     _regimeDowngradeUntil.set(userId, Date.now() + 2 * 3600000); // 2h extra-tighten window
                     try {
                         const openOrders  = await brokerService.getOpenOrders(userId).catch(() => []);
-                        const pendingBuys = (openOrders || []).filter(o => o.side === 'buy');
+                        // Entry buys only. A buy STOP is a short position's protection (paper bear side,
+                        // 2026-11-20) — cancelling it on a downgrade would leave the short unprotected at the
+                        // worst moment. Option orders belong to the options tests, not the swing bot.
+                        const pendingBuys = (openOrders || []).filter(o => o.side === 'buy'
+                            && !['stop', 'stop_limit', 'trailing_stop'].includes(o.type)
+                            && (o.asset_class || 'us_equity') === 'us_equity');
                         for (const o of pendingBuys) {
                             try {
                                 await brokerService.cancelOrder(userId, o.id);

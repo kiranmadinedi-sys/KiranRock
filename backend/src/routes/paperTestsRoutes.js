@@ -1,5 +1,5 @@
 /**
- * Paper Tests — read-only status for the options-income and momentum-satellite paper tests
+ * Paper Tests — read-only status for the options-income, momentum-satellite and bear-side paper tests
  * (2026-10-19). Each user only sees their own rows.
  */
 const express = require('express');
@@ -59,6 +59,13 @@ router.get('/status', async (req, res) => {
             o.plan = oi.exitPlan(o, { mark: markByContract[o.contract] ?? null, stockPrice: stockPx[o.underlying] ?? null });
         }
         const oiSum = await oi.summary().catch(() => null);
+        // 2026-11-20: paper bear side (inverse ETFs, shorts, bear put spreads) — this user's rows + test results.
+        const bearRows = await query(
+            `SELECT leg, symbol, long_contract, short_contract, width::float, qty::float, status, entry_price::float, stop_price::float,
+                    exit_price::float, exit_reason, pnl::float, regime, opened_at, closed_at
+             FROM bear_positions WHERE user_id = $1 ORDER BY opened_at DESC LIMIT 100`, [uid]).catch(() => ({ rows: [] }));
+        const bearSum = bearRows.rows.length || process.env.BEAR_SIDE_USER_IDS
+            ? await require('../services/bearSideService').summary().catch(() => null) : null;
         res.json({
             options: {
                 trades: opts.rows,
@@ -76,6 +83,7 @@ router.get('/status', async (req, res) => {
                 },
             },
             satellite: { positions: sat.rows, performance: perf },
+            bear: { positions: bearRows.rows, summary: bearSum ? { legs: bearSum.legs, shadow: bearSum.shadow, config: bearSum.config } : null },
         });
     } catch (error) {
         res.status(500).json({ error: error.message });

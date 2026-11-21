@@ -150,6 +150,8 @@ async function reconcileFillHistory(userId, { trigger = 'SCHEDULED', lookbackHou
         logger.warn('[Reconcile:FillHistory] Could not load Blitz-managed symbols (proceeding unfiltered)', { userId, err: err.message });
         return new Set();
     });
+    // Paper bear-side shorts (2026-11-20) are tracked in bear_positions, not `trades` — skip their orders.
+    const bearOrderIds = await require('./bearSideService').managedOrderIds(userId);
 
     let fills;
     try {
@@ -194,6 +196,7 @@ async function reconcileFillHistory(userId, { trigger = 'SCHEDULED', lookbackHou
             // by symbol, not order id — intraday_trades has no broker_order_id column on
             // its exit side, only intraday_positions' entry side does.
             .filter(o => !blitzSymbols.has(o.symbol.toUpperCase()))
+            .filter(o => !bearOrderIds.has(o.id))
             .map(o => ({
                 symbol: o.symbol, side: o.side,
                 qty: o.filled_qty, price: o.filled_avg_price,

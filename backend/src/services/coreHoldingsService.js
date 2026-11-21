@@ -109,6 +109,27 @@ async function setSatelliteSymbols(userId, symbols) {
 }
 
 /**
+ * Bear sleeve (2026-11-20): inverse-ETF hedges and shorted stocks managed by bearSideService (paper).
+ * Protected like core — a swing buy of a shorted symbol would silently cover the short. Never overrides
+ * a core/satellite/options row (such symbols are excluded from shorting anyway).
+ */
+async function setBearSymbols(userId, symbols) {
+    await ensureTable();
+    const uid = String(userId);
+    const list = [...new Set(symbols.map(x => String(x).toUpperCase()))];
+    for (const sym of list) {
+        await query(
+            `INSERT INTO core_holdings (user_id, symbol, target_pct, active, note, sleeve) VALUES ($1, $2, 0, true, 'bear side (paper)', 'bear')
+             ON CONFLICT (user_id, symbol) DO UPDATE SET active = true, sleeve = 'bear', target_pct = 0, note = 'bear side (paper)'
+             WHERE core_holdings.sleeve = 'bear' OR NOT core_holdings.active`,
+            [uid, sym]
+        );
+    }
+    await query(`UPDATE core_holdings SET active = false WHERE user_id = $1 AND sleeve = 'bear' AND NOT (symbol = ANY($2))`, [uid, list]);
+    _cache.delete(uid);
+}
+
+/**
  * Options sleeve (2026-10-26): an underlying with an open short put — and any shares delivered by
  * assignment — is protected from the swing bot like core (no swing buys, stops or exits on it).
  * Never overrides an existing core/satellite row.
@@ -351,7 +372,7 @@ async function _addonStatus(userId, symbols) {
  * position type we don't classify). Pure — unit-tested.
  */
 function accountBreakdown({ positions, coreSymbols, equity, cash, sweepSymbol = 'SGOV', sweepQty = 0 }) {
-    let core = 0, sweep = 0, swing = 0, swingCount = 0, options = 0, optionsCount = 0, collateral = 0;
+    let core = 0, sweep = 0, swing = 0, swingCount = 0, options = 0, optionsCount = 0, collateral = 0, shorts = 0, shortCount = 0;
     for (const p of positions) {
         const sym = String(p.symbol).toUpperCase(), qty = parseFloat(p.qty) || 0, mv = parseFloat(p.marketValue) || 0;
         // Option contracts (OCC symbols) — sold puts show a negative value: what it would cost to buy them back.
@@ -361,6 +382,8 @@ function accountBreakdown({ positions, coreSymbols, equity, cash, sweepSymbol = 
             if (occ[1] === 'P' && qty < 0) collateral += Number(occ[2]) / 1000 * 100 * Math.abs(qty); // cash held back for a sold put
             continue;
         }
+        // Shorted stock (paper bear side, 2026-11-20): negative value = the cost to buy it back.
+        if (qty < 0) { shorts += mv; shortCount++; continue; }
         if (!(qty > 0)) continue;
         if (coreSymbols.has(sym)) {
             const sw = sym === sweepSymbol && sweepQty > 0 ? Math.min(mv, mv / qty * sweepQty) : 0;
@@ -370,12 +393,14 @@ function accountBreakdown({ positions, coreSymbols, equity, cash, sweepSymbol = 
         } else { swing += mv; swingCount++; }
     }
     const pct = v => equity ? +(v / equity * 100).toFixed(1) : null;
-    const other = equity - core - sweep - swing - options - (cash || 0);
+    const other = equity - core - sweep - swing - options - shorts - (cash || 0);
     return {
         core: { usd: +core.toFixed(2), pct: pct(core) }, sweep: { usd: +sweep.toFixed(2), pct: pct(sweep) },
         swing: { usd: +swing.toFixed(2), pct: pct(swing), count: swingCount }, cash: { usd: +(cash || 0).toFixed(2), pct: pct(cash || 0) },
         options: { usd: +options.toFixed(2), pct: pct(options), count: optionsCount, collateralUsd: +collateral.toFixed(2) },
-        freeCashUsd: +Math.max(0, (cash || 0) - collateral).toFixed(2), // cash not tied up as put collateral
+        shorts: { usd: +shorts.toFixed(2), pct: pct(shorts), count: shortCount },
+        // cash not tied up as put collateral or owed back on shorts (short-sale proceeds are not free cash)
+        freeCashUsd: +Math.max(0, (cash || 0) - collateral + shorts).toFixed(2),
         other: { usd: +other.toFixed(2), pct: pct(other) },
     };
 }
@@ -427,6 +452,6 @@ async function getStatus(userId) {
 }
 
 module.exports = {
-    ensureTable, getCoreRows, getCoreSymbols, setSatelliteSymbols, setOptionsProtected, getSettings, setEnabled, saveConfig, getStatus,
+    ensureTable, getCoreRows, getCoreSymbols, setSatelliteSymbols, setBearSymbols, setOptionsProtected, getSettings, setEnabled, saveConfig, getStatus,
     rebalanceCore, runDailyRebalance, coreSummary, accountBreakdown, _clearCache,
 };

@@ -139,6 +139,20 @@ const REVIEWS = [
         },
     },
     {
+        key: 'bear', title: 'Bear side (paper: inverse ETFs, shorts, bear put spreads)',
+        question: 'Did the bear legs make money (or cut losses) while the regime was BEAR, and did the shorted names actually keep falling? → keep, tune, or drop each leg.',
+        async data() {
+            const s = await require('./bearSideService').summary();
+            const legLine = l => `${l.leg}: ${l.open} open, ${l.closed} closed, ${l.wins} won, ${usd(l.pnl)}`;
+            const sh = s.shadow || {};
+            const regime = s.state?.[0] ? `Regime now ${s.state[0].last_regime}${s.state[0].last_bear_at ? `, last BEAR ${String(s.state[0].last_bear_at).slice(0, 16)}` : ', never BEAR yet'}` : 'Not run yet';
+            return [regime,
+                    ...(s.legs.length ? s.legs.map(legLine) : ['No bear trades yet (they only open while the regime is BEAR)']),
+                    sh.logged ? `Short candidates logged: ${sh.logged} over ${sh.days} day(s) · 5-day: n=${sh.n5}, avg stock move ${pct(sh.avg_ret5)} (a short gains when negative), fell ${pct(sh.pct_fell5)} of the time, SPY ${pct(sh.spy_ret5)} · 10-day: n=${sh.n10}, avg ${pct(sh.avg_ret10)}`
+                              : 'No short candidates logged yet'];
+        },
+    },
+    {
         key: 'exit', title: "Exit profile ('wide' on paper vs standard on live)",
         question: 'Has the wider exit held up on real trades? → propose it for live, or not.',
         async data(now) {

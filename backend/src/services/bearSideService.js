@@ -1267,6 +1267,32 @@ async function _verifyLiquidation(client, userId, st, stillOpen, now) {
     await _alert(userId, 'liquidation-done', `Bear book fully closed (${st.why}) — ${closed.length} position(s), confirmed flat at the broker.`, now);
 }
 
+// ─── Short dividend settlement (reporting accuracy) ──────────────────────────
+/**
+ * Pure: dividends a closed short owed. A short open at the close before an ex-date owes it: opened on a day
+ * before ex_date and still open on ex_date (closed on or after it). Dates are ET calendar days.
+ */
+function shortDividendsOwed(divs, { openedDay, closedDay, qty }) {
+    const owed = (divs || []).filter(d => d?.ex_date && d.rate > 0 && d.ex_date > openedDay && d.ex_date <= closedDay);
+    return { usd: r2(owed.reduce((s, d) => s + Number(d.rate) * qty, 0)), exDates: owed.map(d => d.ex_date) };
+}
+
+/** Closed shorts not yet settled: subtract dividends owed from pnl (keeps the pre-dividend figure in meta). */
+async function _settleShortDividends(client, userId) {
+    const rows = (await query(`SELECT id, symbol, qty::float, pnl::float, opened_at, closed_at FROM bear_positions
+                               WHERE user_id = $1 AND leg = 'short' AND status = 'closed' AND pnl IS NOT NULL AND NOT (meta ? 'dividendPaidUsd')`,
+        [String(userId)])).rows;
+    for (const r of rows) {
+        const openedDay = etToday(new Date(r.opened_at)), closedDay = etToday(new Date(r.closed_at));
+        const divs = openedDay < closedDay ? await _dividends(client, r.symbol, closedDay) : [];
+        const owed = shortDividendsOwed(divs, { openedDay, closedDay, qty: r.qty });
+        await query(`UPDATE bear_positions SET pnl = pnl - $2::numeric,
+                     meta = meta || jsonb_build_object('dividendPaidUsd', $2::numeric, 'dividendExDates', $3::jsonb, 'pnlBeforeDividends', $4::numeric)
+                     WHERE id = $1 AND NOT (meta ? 'dividendPaidUsd')`, [r.id, owed.usd, JSON.stringify(owed.exDates), r.pnl]);
+        if (owed.usd > 0) logger.info('[BearSide] Short dividend owed deducted from P&L', { userId, symbol: r.symbol, owed: owed.usd, exDates: owed.exDates });
+    }
+}
+
 // ─── Kill switch ─────────────────────────────────────────────────────────────
 /**
  * Latching halt of NEW entries when something can't be trusted: a broker-vs-record mismatch, an unknown
@@ -1413,6 +1439,8 @@ async function runForUser(userId, now = new Date(), { allowEntries = true } = {}
         }
     }
     await _syncSleeve(userId).catch(err => logger.warn('[BearSide] Sleeve sync failed', { userId, error: err.message }));
+    // dividends owed on shorts held through an ex-date come off their P&L (paper doesn't charge them)
+    await _settleShortDividends(client, userId).catch(err => logger.warn('[BearSide] Dividend settlement failed (retries next tick)', { userId, error: _errMsg(err) }));
     // regime context at exit, for the per-regime report (BEAR / PANIC / recovery)
     await query(`UPDATE bear_positions SET meta = meta || jsonb_build_object('exitRegime', $2::text, 'exitVix', $3::numeric)
                  WHERE user_id = $1 AND status = 'closed' AND closed_at >= $4 AND NOT (meta ? 'exitRegime')`,
@@ -1519,7 +1547,9 @@ function legMetrics(rows, { riskFreePct = num('RISK_FREE_PCT', 4) } = {}) {
         const gapLoss = closed.filter(r => leg === 'short' && r.exit_reason === 'stop' && Number(r.stop_price) > 0 && Number(r.exit_price) > Number(r.stop_price))
             .reduce((s, r) => s + (Number(r.exit_price) - Number(r.stop_price)) * Number(r.qty), 0);
         const capital = r => leg === 'spread' ? Number(r.entry_price) * 100 * Number(r.qty) : Number(r.entry_price) * Number(r.qty);
-        const tbill = closed.reduce((s, r) => s + capital(r) * Math.max(1, (new Date(r.closed_at) - new Date(r.opened_at)) / 86400000) / 365 * riskFreePct / 100, 0);
+        const capYears = closed.reduce((s, r) => s + capital(r) * Math.max(1, (new Date(r.closed_at) - new Date(r.opened_at)) / 86400000) / 365, 0);
+        const tbill = capYears * riskFreePct / 100;
+        const divPaid = closed.reduce((s, r) => s + (Number(r.meta?.dividendPaidUsd) || 0), 0);
         const slips = all.map(r => Number(r.meta?.slippagePct)).filter(Number.isFinite);
         out[leg] = {
             open: all.filter(r => OPEN_STATUSES.includes(r.status)).length, closed: closed.length, wins: wins.length,
@@ -1531,6 +1561,10 @@ function legMetrics(rows, { riskFreePct = num('RISK_FREE_PCT', 4) } = {}) {
             avgSlippagePct: slips.length ? r2(slips.reduce((s, v) => s + v, 0) / slips.length) : null,
             winRatePct: closed.length ? r2(wins.length / closed.length * 100) : null,
             longestUnderwaterDays: r2(underwaterDays), gapLossUsd: r2(gapLoss),
+            // costs already inside pnl: dividends owed (shorts); slippage is in the fill prices. $0 commissions.
+            dividendsPaidUsd: r2(divPaid),
+            // annualised return on the capital actually tied up, same basis as the T-bill line
+            returnOnCapitalAnnualPct: capYears > 0 ? r2(cum / capYears * 100) : null, tbillAnnualPct: riskFreePct,
         };
     }
     return out;
@@ -1638,7 +1672,7 @@ module.exports = {
     CFG, regimeDecision, recoverySignal, fundingRoom, positionRisk, riskRoom, rsi14, shortQuality, stressLoss,
     brokerMismatch, legMetrics, rankShortCandidates, shortPlan, chooseSpread, spreadPlan, parseOcc,
     regimeStale, dividendExposure, shortGapStress, entryTape, squeezeFlags, liquidationLeftovers, rsiBand, regimeBucket, regimeBreakdown,
-    unknownShorts, gapStressUsd, resumeBear, resumeProblems,
+    unknownShorts, gapStressUsd, resumeBear, resumeProblems, shortDividendsOwed,
     runForUser, runTick, managedOrderIds, summary, ensureTables,
     _internal: { closeHedge: (...a) => _closeHedge(...a), closeSpreadStep: (...a) => _closeSpreadStep(...a), gapFits: (...a) => _gapFits(...a),
                  manageShort: (...a) => _manageShort(...a) },

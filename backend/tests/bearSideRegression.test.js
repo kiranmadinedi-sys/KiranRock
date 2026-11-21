@@ -170,3 +170,21 @@ describe('third review checks (2026-11-21)', () => {
         expect(clears[0]).toMatch(/UPDATE bear_state SET halted_at = NULL, halt_reason = NULL WHERE user_id = \$1`, \[uid\]/);
     });
 });
+
+describe('costs in reported P&L (2026-11-21)', () => {
+    test('a short owes dividends whose ex-date falls after the open day and on/before the close day', () => {
+        const divs = [{ ex_date: '2026-11-25', rate: 0.5 }, { ex_date: '2026-11-24', rate: 0.3 }, { ex_date: '2026-12-10', rate: 0.4 }];
+        // opened 11-24 (ex 11-24 already passed at the open → not owed), closed 11-25 (short at 11-24 close → owed)
+        expect(bear.shortDividendsOwed(divs, { openedDay: '2026-11-24', closedDay: '2026-11-25', qty: 100 })).toEqual({ usd: 50, exDates: ['2026-11-25'] });
+        expect(bear.shortDividendsOwed(divs, { openedDay: '2026-11-26', closedDay: '2026-12-01', qty: 100 }).usd).toBe(0);
+    });
+    test('leg metrics: dividends paid and annualised return on capital beside the T-bill rate', () => {
+        const rows = [{ leg: 'short', status: 'closed', pnl: 100, qty: 100, entry_price: 50, risk_usd: 400,
+                        opened_at: new Date('2026-11-01'), closed_at: new Date('2026-11-11'), meta: { dividendPaidUsd: 20 } }];
+        const m = bear.legMetrics(rows, { riskFreePct: 4 }).short;
+        expect(m.dividendsPaidUsd).toBe(20);
+        expect(m.returnOnCapitalAnnualPct).toBe(r2(100 / (5000 * 10 / 365) * 100));
+        expect(m.tbillAnnualPct).toBe(4);
+    });
+    const r2 = v => Math.round(v * 100) / 100;
+});

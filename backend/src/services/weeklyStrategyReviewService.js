@@ -157,7 +157,8 @@ const REVIEWS = [
                 + (g.length && g[0].allShortsUsd ? ` · one short gapping ${g.map(x => `+${x.gapPct}% ${usd(-x.largestShortUsd)}`).join(' / ')} (all shorts at once: ${g.map(x => usd(-x.allShortsUsd)).join(' / ')})` : '')
                 + (s.risk.dividendLiabilityUsd ? ` · dividends owed on shorts ${usd(-s.risk.dividendLiabilityUsd)}` : '') : null;
             const legExtra = l => (l.closed ? ` · win rate ${pct(l.winRatePct)}, longest time below a previous high ${l.longestUnderwaterDays}d`
-                + (l.leg === 'short' ? `, gap-through-stop losses ${usd(-l.gapLossUsd)}` : '') : '');
+                + (l.leg === 'short' ? `, gap-through-stop losses ${usd(-l.gapLossUsd)}, dividends owed (already in P&L) ${usd(-l.dividendsPaidUsd)}` : '')
+                + (l.returnOnCapitalAnnualPct != null ? ` · return on capital ${pct(l.returnOnCapitalAnnualPct)}/yr vs T-bills ${pct(l.tbillAnnualPct)}/yr (same capital, same days)` : '') : '');
             const regimeLines = (s.byRegime || []).map(b => `${b.bucket}: ${b.trades} trades, win ${pct(b.winRatePct)}, ${usd(b.pnl)}, profit factor ${pf(b.profitFactor)}, expectancy ${usd(b.expectancy)}`);
             const rsiLines = (s.shadowByRsi || []).filter(b => b.n5).map(b => `RSI ${b.band}${['<25', '25-30'].includes(b.band) ? ' (rejected, shadow)' : ''}: n=${b.n5}, 5-day ${pct(b.avg_ret5)}, fell ${pct(b.pct_fell5)}, 10-day ${pct(b.avg_ret10)}`);
             return [regime, ...(halted ? [halted] : []), ...(rk ? [rk] : []),

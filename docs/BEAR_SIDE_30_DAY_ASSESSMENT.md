@@ -4,6 +4,8 @@ Written 2026-11-21, **before any bear-side trade exists**. Revised the same day 
 (two passes by a reviewer with no project context who read only this file: 21 gaps, then 7 more; all are addressed here).
 The rules are fixed in advance so the result is judged against them, not against how the numbers look.
 
+**Approved by the owner on 2026-11-21, before Day 1.**
+
 **Change rule:** from Day 1 (2026-11-24) this document does not change, with two exceptions:
 - entries in the logs of section 10;
 - corrections of obvious typos, each listed in section 10 with its date.

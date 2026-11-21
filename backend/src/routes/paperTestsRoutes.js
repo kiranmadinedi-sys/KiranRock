@@ -9,6 +9,19 @@ const { protect } = require('../middleware/authMiddleware');
 
 router.use(protect);
 
+/**
+ * Bear-side kill switch: clear a halt after reviewing the alert (2026-11-21). Only the account's own halt;
+ * the bot never clears it by itself.
+ */
+router.post('/bear/resume', async (req, res) => {
+    try {
+        const r = await require('../services/bearSideService').resumeBear(String(req.userId), 'api');
+        res.json({ success: true, ...r });
+    } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 router.get('/status', async (req, res) => {
     try {
         const uid = String(req.userId);

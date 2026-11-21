@@ -152,14 +152,15 @@ const REVIEWS = [
             const st = s.state?.[0];
             const regime = st ? `Regime now ${st.last_regime}${st.last_bear_at ? `, last BEAR ${String(st.last_bear_at).slice(0, 16)}` : ', never BEAR yet'}${st.recovering ? ' · SPY bouncing (no new entries)' : ''}` : 'Not run yet';
             const g = s.risk?.shortGapStress || [];
-            const rk = s.risk ? `Open now: capital ${usd(s.risk.deployedUsd)}, max loss ${usd(-s.risk.maxLossUsd)}, +${s.risk.stressGapPct}% market gap stress ${usd(-s.risk.stressGapUsd)}`
+            const halted = st?.halted_at ? `🚨 Entries HALTED since ${String(st.halted_at).slice(0, 16)}: ${st.halt_reason}` : null;
+            const rk = s.risk ? `Open now: capital ${usd(s.risk.deployedUsd)}, stop-based max loss ${usd(-s.risk.maxLossUsd)} (cap ${s.config.maxRiskPct}%), gap stress ${usd(-s.risk.gapStressUsd)} (shorts +30%, market +5%; cap ${s.config.maxGapRiskPct}%), +${s.risk.stressGapPct}% market gap stress ${usd(-s.risk.stressGapUsd)}`
                 + (g.length && g[0].allShortsUsd ? ` · one short gapping ${g.map(x => `+${x.gapPct}% ${usd(-x.largestShortUsd)}`).join(' / ')} (all shorts at once: ${g.map(x => usd(-x.allShortsUsd)).join(' / ')})` : '')
                 + (s.risk.dividendLiabilityUsd ? ` · dividends owed on shorts ${usd(-s.risk.dividendLiabilityUsd)}` : '') : null;
             const legExtra = l => (l.closed ? ` · win rate ${pct(l.winRatePct)}, longest time below a previous high ${l.longestUnderwaterDays}d`
                 + (l.leg === 'short' ? `, gap-through-stop losses ${usd(-l.gapLossUsd)}` : '') : '');
             const regimeLines = (s.byRegime || []).map(b => `${b.bucket}: ${b.trades} trades, win ${pct(b.winRatePct)}, ${usd(b.pnl)}, profit factor ${pf(b.profitFactor)}, expectancy ${usd(b.expectancy)}`);
             const rsiLines = (s.shadowByRsi || []).filter(b => b.n5).map(b => `RSI ${b.band}${['<25', '25-30'].includes(b.band) ? ' (rejected, shadow)' : ''}: n=${b.n5}, 5-day ${pct(b.avg_ret5)}, fell ${pct(b.pct_fell5)}, 10-day ${pct(b.avg_ret10)}`);
-            return [regime, ...(rk ? [rk] : []),
+            return [regime, ...(halted ? [halted] : []), ...(rk ? [rk] : []),
                     ...(s.legs.length ? s.legs.map(l => legLine(l) + legExtra(l)) : ['No bear trades yet (they only open while the regime is BEAR)']),
                     ...regimeLines,
                     sh.logged ? `Short candidates logged: ${sh.logged} over ${sh.days} day(s) · 5-day: n=${sh.n5}, avg stock move ${pct(sh.avg_ret5)} (a short gains when negative), fell ${pct(sh.pct_fell5)} of the time, SPY ${pct(sh.spy_ret5)} · 10-day: n=${sh.n10}, avg ${pct(sh.avg_ret10)}`

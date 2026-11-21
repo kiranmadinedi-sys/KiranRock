@@ -37,6 +37,7 @@ const CFG = {
     otmPct: 5,
     gradeEtMin: 15 * 60 + 50, // grade at/after 15:50 ET
     horizons: { close: 0, d1: 1, d3: 3 },
+    broadDayMinSignals: 5,    // ≥ 5 of the 25 firing the same day = a market-wide reversal, not a stock setup
 };
 const DATA = 'https://data.alpaca.markets';
 const r2 = v => (v == null || !Number.isFinite(v) ? null : Math.round(v * 100) / 100);
@@ -225,10 +226,20 @@ async function summary() {
             for (const x of rs) (byDay[r.d] = byDay[r.d] || []).push(x.askToBidPct);
         }
         const dayAvgs = Object.values(byDay).map(a => a.reduce((s, v) => s + v, 0) / a.length);
+        // broad (market-wide reversal: ≥ 5 of the 25 fired that day) vs isolated (1-4 stocks) — is this a
+        // stock setup, or just buying puts into general market weakness?
+        const nOnDay = {}; for (const r of rows) nOnDay[r.d] = (nOnDay[r.d] || 0) + 1;
+        const split = broad => {
+            const v = Object.entries(byDay).filter(([d]) => (nOnDay[d] >= CFG.broadDayMinSignals) === broad)
+                .map(([, a]) => a.reduce((s, x) => s + x, 0) / a.length);
+            return { days: v.length, avgAskToBidPct: v.length ? r2(v.reduce((s, x) => s + x, 0) / v.length) : null,
+                     daysWonPct: v.length ? r2(v.filter(x => x > 0).length / v.length * 100) : null };
+        };
         out.byHorizon[h] = { graded: stock.length, avgStockMovePct: stock.length ? r2(stock.reduce((s, v) => s + v, 0) / stock.length) : null,
                              puts: Object.fromEntries(Object.entries(kinds).map(([k, a]) => [k, agg(a)])),
                              nearAtmByDay: { days: dayAvgs.length, avgAskToBidPct: dayAvgs.length ? r2(dayAvgs.reduce((s, v) => s + v, 0) / dayAvgs.length) : null,
-                                             daysWonPct: dayAvgs.length ? r2(dayAvgs.filter(v => v > 0).length / dayAvgs.length * 100) : null } };
+                                             daysWonPct: dayAvgs.length ? r2(dayAvgs.filter(v => v > 0).length / dayAvgs.length * 100) : null },
+                             nearAtmBroadDays: split(true), nearAtmIsolatedDays: split(false) };
     }
     return out;
 }

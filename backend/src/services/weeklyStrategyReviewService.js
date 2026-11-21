@@ -182,7 +182,7 @@ const REVIEWS = [
             for (const [h, x] of Object.entries(s.byHorizon)) {
                 if (!x.graded) continue;
                 const puts = Object.entries(x.puts).map(([k, a]) => `${k} n=${a.n} avg ${pct(a.avgAskToBidPct)} (mid ${pct(a.avgMidPct)}), won ${pct(a.wonPct)}`).join(' · ');
-                lines.push(`${h}: stock ${pct(x.avgStockMovePct)} · near ATM by day: ${x.nearAtmByDay.days} days, avg ${pct(x.nearAtmByDay.avgAskToBidPct)}, days won ${pct(x.nearAtmByDay.daysWonPct)} · ${puts}`);
+                lines.push(`${h}: stock ${pct(x.avgStockMovePct)} · near ATM by day: ${x.nearAtmByDay.days} days, avg ${pct(x.nearAtmByDay.avgAskToBidPct)}, days won ${pct(x.nearAtmByDay.daysWonPct)} (broad-market days: ${x.nearAtmBroadDays.days}, avg ${pct(x.nearAtmBroadDays.avgAskToBidPct)}; isolated: ${x.nearAtmIsolatedDays.days}, avg ${pct(x.nearAtmIsolatedDays.avgAskToBidPct)}) · ${puts}`);
             }
             return lines;
         },

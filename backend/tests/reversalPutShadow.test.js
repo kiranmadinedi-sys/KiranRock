@@ -40,3 +40,18 @@ describe('reversal put shadow log (no orders)', () => {
         expect(src).not.toMatch(/\/v2\/orders|axios\.post|buyMarket|sellMarket/);
     });
 });
+
+describe('summary splits broad-market days from isolated reversals', () => {
+    test('a day with 5+ signals is "broad"; fewer is "isolated"; each day counted once', async () => {
+        const { query } = require('../src/config/database');
+        const leg = c => ({ kind: 'near_atm', contract: c, ask: 2, mid: 1.9 });
+        const g = (c, bid) => ({ close: { price: 1, legs: { [c]: { bid, ask: bid + 0.1, mid: bid + 0.05 } } } });
+        const broad = ['A', 'B', 'C', 'D', 'E'].map(s => ({ d: '2026-11-19', symbol: s, signal: { price: 1 }, contracts: [leg(s)], grades: g(s, 3) })); // +50% each
+        const iso = [{ d: '2026-11-24', symbol: 'Z', signal: { price: 1 }, contracts: [leg('Z')], grades: g('Z', 1) }];                       // −50%
+        query.mockImplementation(async () => ({ rows: [...broad, ...iso] }));
+        const s = await rv.summary();
+        expect(s.byHorizon.close.nearAtmByDay).toMatchObject({ days: 2, avgAskToBidPct: 0, daysWonPct: 50 });
+        expect(s.byHorizon.close.nearAtmBroadDays).toMatchObject({ days: 1, avgAskToBidPct: 50 });
+        expect(s.byHorizon.close.nearAtmIsolatedDays).toMatchObject({ days: 1, avgAskToBidPct: -50 });
+    });
+});

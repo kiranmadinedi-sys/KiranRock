@@ -1,1180 +1,569 @@
-# KiranRock AI Trading Platform — Complete Technical Document
+# KiranRock — Technical Document
 
-> Generated: May 18, 2026 | Last updated: May 18, 2026  
-> Version: Production (paper-trading mode)
-
----
-
-## Table of Contents
-
-1. [System Overview](#1-system-overview)
-2. [Architecture Diagram](#2-architecture-diagram)
-3. [Process Map — How a Trade Happens](#3-process-map--how-a-trade-happens)
-4. [Component Breakdown](#4-component-breakdown)
-   - 4.1 Frontend (Next.js)
-   - 4.2 Backend API (Express)
-   - 4.3 Worker Process
-   - 4.4 PANTHEON Agent Pipeline (IST Pre-Market)
-   - 4.5 Database Schema (PostgreSQL)
-   - 4.6 Redis State Layer
-5. [AI & Scoring Pipeline](#5-ai--scoring-pipeline)
-6. [Trading Bot Logic — Step by Step](#6-trading-bot-logic--step-by-step)
-7. [Options Bot](#7-options-bot)
-8. [External Communications](#8-external-communications)
-   - 8.1 Active & Working (15 services live)
-   - 8.2 Optional — Keys Not Yet Added (3 services)
-   - 8.3 Deployment Considerations
-9. [Security & Risk Controls](#9-security--risk-controls)
-10. [Scheduler & Timing Reference](#10-scheduler--timing-reference)
-11. [Environment Variable Reference](#11-environment-variable-reference)
-12. [Start / Stop Procedure](#12-start--stop-procedure)
+> **Last updated:** 2026-11-22 (full rewrite; the previous version dated from May–June 2026 and is in git history).
+> **Sources:** written from the code and database as they stand on this date. Where a number comes from a past study rather than the code, the date of that study is given.
+> **Related:** `PANTHEON_INTERNALS.md` (scoring factor tables, Sept 2026), `docs/BEAR_SIDE_30_DAY_ASSESSMENT.md` (bear-side test plan).
 
 ---
 
-## 1. System Overview
+## Contents
 
-KiranRock is a **self-hosted, multi-user AI-powered stock trading platform** running on Windows (local) or AWS (cloud). It supports:
-
-- Autonomous AI stock trading (equity buys/sells)
-- Autonomous options trading (calls, puts, spreads, protective puts)
-- Manual trading via web UI
-- Real-time news monitoring & sentiment analysis
-- Backtesting against real historical PostgreSQL trade data
-- Weekly/daily Telegram reports
-- Multi-user accounts with per-user risk configurations
-
-**Current mode**: Paper trading via Alpaca Paper API (real orders to Alpaca sandbox, no real money at risk).
-
-**Stack at a glance**:
-
-| Layer | Technology |
-|-------|-----------|
-| Frontend | Next.js 14, React 18, TypeScript, Tailwind CSS, Chart.js, Lightweight Charts |
-| Backend API | Node.js 20, Express 4, JWT auth, Helmet, Rate limiting |
-| Worker | Node.js process (schedulers, bots, Telegram) |
-| Database | PostgreSQL (`kiranrock_trading`) via `pg` pool (max 20 connections) |
-| Cache | In-memory (`cacheService`) + Redis (`redis@4.7.1`) for multi-process |
-| AI (cloud) | Anthropic Claude (`claude-haiku-4-5-20251001`), Google Gemini, Hugging Face |
-| AI (local) | Ollama (optional, zero-cost fallback) |
-| Market Data | Yahoo Finance (default, free), Alpaca (real-time), Polygon.io (optional) |
-| Broker | Alpaca API (paper) — simulated fallback via PostgreSQL |
-| Notifications | Telegram Bot, Gmail SMTP |
+1. [What KiranRock is today](#1-what-kiranrock-is-today)
+2. [Accounts and the money rules](#2-accounts-and-the-money-rules)
+3. [Architecture](#3-architecture)
+4. [A trading day, start to finish](#4-a-trading-day-start-to-finish)
+5. [Swing trading — the main strategy](#5-swing-trading--the-main-strategy)
+6. [Risk controls and safety nets](#6-risk-controls-and-safety-nets)
+7. [Other strategies](#7-other-strategies)
+8. [AI models and market data](#8-ai-models-and-market-data)
+9. [Research and the learning loop](#9-research-and-the-learning-loop)
+10. [Reports, Telegram and the web portal](#10-reports-telegram-and-the-web-portal)
+11. [Operations](#11-operations)
+12. [Configuration (environment variables)](#12-configuration-environment-variables)
+13. [What we have learned so far](#13-what-we-have-learned-so-far)
+14. [Known limitations and open items](#14-known-limitations-and-open-items)
+15. [Change history since June 2026](#15-change-history-since-june-2026)
 
 ---
 
-## 2. Architecture Diagram
+## 1. What KiranRock is today
 
-```mermaid
-graph TD
-    subgraph UI["👤 User Interfaces"]
-        Browser["Browser\nNext.js 14 — port 3000"]
-        TG_User["Telegram\n@KiranTradePro_bot"]
-    end
+KiranRock is a self-hosted platform that trades US stocks automatically through Alpaca. It runs on one Windows PC. It started as a single AI swing-trading bot; it is now a set of separate strategies ("sleeves") with a research system that tests ideas before they are allowed near real money.
 
-    subgraph API["⚙️ Backend API — port 3001 (Express)"]
-        Auth["Auth & User\n/api/auth /api/profile"]
-        Trade["Trading\n/api/trading /api/ai-trading"]
-        Market["Market Data\n/api/stocks /api/options"]
-        AIRoutes["AI & Analysis\n/api/ai /api/signals /api/weekly"]
-        Portfolio["Portfolio\n/api/portfolio /api/performance"]
-        News["News & Alerts\n/api/news /api/alerts"]
-    end
+| Strategy | What it does | Where it runs | Status |
+|---|---|---|---|
+| **Swing** | Buys stocks the nightly scan scores highly, holds days to weeks, protected by stops | Live (kmadined, anilboddu1) + paper (`user`) | Main strategy. Must beat SPY on the same capital by 2026-12-19 or its money moves to core |
+| **Core holdings** | Long-term positions (index ETFs + a few quality names) so idle cash earns the market return | Live (kmadined) + paper | Running |
+| **Satellite (momentum)** | 10 strongest 12-1 month momentum stocks, monthly, 10% of the account | Paper only | Test |
+| **Options income** | Sells cash-secured puts on quality $15–100 stocks | Paper only (kmadined has Level 3 approval, not trading options yet) | Test |
+| **Bear side** | When the bot's regime is BEAR: SH/PSQ hedge, short sales, SPY/QQQ bear put spreads | Paper only | Frozen, 30-day assessment from 2026-11-24 |
+| **Crypto** | 15 coin pairs, 24/7, own process | Paper only | Running, losing (see §7.6) |
+| **Blitz (intraday)** | Fixed liquid list, momentum entries, flat by close | Paper only (opt-in) | Opt-in |
+| **Extended hours** | Pre/after-market entries | Off for every account since 2026-10-17 | Disabled |
+| **Reversal-put log** | Records what puts on mega-caps would have done after an up-open-then-sell-off on weak market days | No orders at all | Shadow log |
 
-    subgraph Worker["🤖 Worker Process (separate PID)"]
-        AIScheduler["Enhanced AI Scheduler\nevery 5 min — market hours"]
-        ISTPipeline["IST Pipeline Scheduler\n1-min poll — 8 pre-market stages"]
-        OptionsBot["Autonomous Options Bot"]
-        NewsMonitor["News Monitor\nevery 5 min — 24/7"]
-        TGScheduler["Telegram Report Scheduler\n7AM/4:15PM ET daily"]
-        SignalSnap["Stock Signal Snapshot\n24/7 capture"]
-    end
+**Two rules shape everything:**
 
-    subgraph DB["🗄️ PostgreSQL — kiranrock_trading"]
-        Tables["users · trades · holdings\nrisk_configs · order_audit_log\ndaily_bars · alerts · weekly_preds"]
-    end
-
-    subgraph Redis["⚡ Redis — localhost:6379"]
-        RedisKeys["pantheon:HALT_ALL\npantheon:POSITIONS_OPEN\npantheon:AGENT_HEALTH\npantheon:PIPELINE_LOCK"]
-    end
-
-    subgraph External["🌐 External Services"]
-        Alpaca["Alpaca Markets\nBroker + Data"]
-        Claude["Anthropic Claude\nORACLE verdicts"]
-        Gemini["Google Gemini\nPULSE sentiment"]
-        HF["Hugging Face\nFinBERT / DistilBERT"]
-        Ollama["Ollama local\nllama3.2:3b fallback"]
-        XAPI["X / Twitter\nSocial sentiment"]
-        NewsAPI["NewsAPI + Finnhub\n+ Alpha Vantage"]
-        FRED["FRED API\nMacro regime"]
-        TGBot["Telegram Bot API\nAlerts + Reports"]
-        Gmail["Gmail SMTP\nOTP + Email alerts"]
-    end
-
-    Browser -->|JWT REST| API
-    TG_User -->|reports & alerts| TGBot
-    API <-->|read/write| DB
-    API <-->|state coordination| Redis
-    Worker <-->|read/write| DB
-    Worker <-->|HALT_ALL / health| Redis
-    Worker -->|trade orders| Alpaca
-    Worker -->|verdicts| Claude
-    Worker -->|sentiment| Gemini
-    Worker -->|NLP ensemble| HF
-    Worker -->|LLM fallback| Ollama
-    Worker -->|social data| XAPI
-    Worker -->|news feed| NewsAPI
-    Worker -->|macro data| FRED
-    Worker -->|push alerts| TGBot
-    API -->|OTP email| Gmail
-    Alpaca -->|quotes + fills| Worker
-```
-
-### ASCII Reference (text-only environments)
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        USER INTERFACES                               │
-│                                                                     │
-│  Browser (port 3000)          Telegram (@KiranTradePro_bot)         │
-│  Next.js 14 Frontend          Reports / Alerts                      │
-└────────────────┬────────────────────────────────────────────────────┘
-                 │ HTTP REST  (JWT Bearer token)
-                 ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                     BACKEND API  (port 3001)                        │
-│                      Node.js / Express                              │
-│                                                                     │
-│  ┌────────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────────┐  │
-│  │ Auth &     │  │ Trading  │  │ Market   │  │  AI & Analysis  │  │
-│  │ User Mgmt  │  │ Routes   │  │ Data     │  │  Routes         │  │
-│  │ /api/auth  │  │ /api/    │  │ /api/    │  │  /api/ai        │  │
-│  │ /api/prof  │  │ trading  │  │ stocks   │  │  /api/weekly    │  │
-│  └────────────┘  └──────────┘  │ /api/    │  │  /api/backtest  │  │
-│                                │ options  │  │  /api/signals   │  │
-│  ┌────────────┐  ┌──────────┐  └──────────┘  └─────────────────┘  │
-│  │ Portfolio  │  │ News &   │                                       │
-│  │ /api/port  │  │ Alerts   │  34 route modules total              │
-│  │ /api/perf  │  │ /api/news│                                       │
-│  └────────────┘  └──────────┘                                       │
-└────────────────┬────────────────────────────────────────────────────┘
-                 │
-        ┌────────┴────────┐
-        ▼                 ▼
-┌───────────────┐  ┌──────────────────────────────────────────────────┐
-│  PostgreSQL   │  │              WORKER PROCESS                      │
-│  Database     │  │              Node.js separate PID                │
-│               │  │                                                  │
-│  users        │  │  ┌─────────────────────────────────────────────┐ │
-│  trades       │  │  │  Enhanced AI Trading Scheduler (every 5 min)│ │
-│  holdings     │  │  │  IST Pipeline Scheduler (1-min poll)        │ │
-│  accounts     │  │  │  Options Scanner Scheduler                  │ │
-│  alerts       │  │  │  Autonomous Options Bot Scheduler           │ │
-│  news_alerts  │  │  │  News Monitoring Service (every 5 min)      │ │
-│  risk_configs │  │  │  Stock Signal Snapshot Scheduler            │ │
-│  order_audit  │  │  │  Stock Signal Telegram Scheduler            │ │
-│  weekly_preds │  │  │  Telegram Report Scheduler                  │ │
-│  daily_bars   │  │  └─────────────────────────────────────────────┘ │
-│  ohlcv_cache  │  └──────────────────────────────────────────────────┘
-│  ...38 tables │
-└───────────────┘
-
-┌─────────────────────────────────────────────────────────────────────┐
-│                   REDIS STATE LAYER  (localhost:6379)               │
-│   pantheon:HALT_ALL │ pantheon:POSITIONS_OPEN:{uid}                 │
-│   pantheon:REGIME:{market} │ pantheon:AGENT_HEALTH:{agent}          │
-│   pantheon:DATA_STALE:{pipeline} │ pantheon:IST_STAGE:{uid}         │
-│   pantheon:PIPELINE_LOCK:{uid}:{stage}                              │
-└─────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────┐
-│                      EXTERNAL SERVICES                              │
-│                                                                     │
-│  Market Data        AI / LLM           Social / Alt Data           │
-│  ┌─────────────┐   ┌────────────────┐  ┌──────────────────────┐   │
-│  │Yahoo Finance│   │Anthropic Claude│  │ Reddit (WSB/stocks)  │   │
-│  │Alpaca API   │   │Google Gemini   │  │ X/Twitter API        │   │
-│  │Polygon.io   │   │Hugging Face    │  │ NewsAPI              │   │
-│  │FRED (macro) │   │  FinBERT       │  │ Alpha Vantage        │   │
-│  │Alpha Vantage│   │  DistilBERT    │  │ Finnhub              │   │
-│  └─────────────┘   │Ollama (local)  │  └──────────────────────┘   │
-│                    └────────────────┘                               │
-│  Notifications                                                      │
-│  ┌─────────────────────────────────────────────────┐               │
-│  │ Telegram Bot API │ Gmail SMTP (OTP + alerts)    │               │
-│  └─────────────────────────────────────────────────┘               │
-└─────────────────────────────────────────────────────────────────────┘
-```
+1. **Paper first, live by approval.** The platform may change paper accounts by itself. Anything that changes how a live account trades waits for the owner's explicit approval (§2.2).
+2. **Broker numbers are the truth.** Twice the bot's own records drifted from the broker (swing 11-16, crypto 11-22). Decisions use broker fills; the weekly broker scoreboard (§10.1) reconciles each account to its real equity.
 
 ---
 
-## 3. Process Map — How a Trade Happens
+## 2. Accounts and the money rules
 
-### Trade Entry Flow
+### 2.1 Accounts with automatic trading on
 
-```mermaid
-flowchart TD
-    A(["⏱️ Scheduler tick\nevery 5 min"]) --> B{Global\nkill switch?}
-    B -->|DB or Redis HALT| SKIP1(["⏭️ Skip cycle"])
-    B -->|clear| C{Market\nopen?}
-    C -->|closed| SKIP2(["⏭️ Skip — not market hours"])
-    C -->|9:30–4:00 ET| D["Load AI-enabled users"]
-    D --> E["Run market screener\n~20 symbols"]
-    E --> F["For each candidate:"]
-    F --> G{Bleeding\nsymbol?}
-    G -->|≥60% loss rate 30d| SKIP3(["⏭️ Skip symbol"])
-    G -->|clear| H{Earnings\nwithin 3d?}
-    H -->|yes| SKIP4(["⏭️ Skip symbol"])
-    H -->|no| I["Calculate technical score\nTrend + Pattern + CANSLIM\n+ Volume + R:R + News"]
-    I --> J{Pre-score
-≥ 55?}
-    J -->|no| SKIP5(["⏭️ Score too low"])
-    J -->|yes| K["ORACLE — Claude verdict\nBull vs Bear debate"]
-    K --> L{Claude\nverdict}
-    L -->|TRADE| M["+10 to score"]
-    L -->|WATCHLIST| N["+0"]
-    L -->|SKIP| O["-15 to score"]
-    M & N & O --> P{Final score
-≥ 70?}
-    P -->|no| SKIP6(["⏭️ Below threshold"])
-    P -->|yes| Q["Kelly position sizing"]
-    Q --> R{Risk checks\npass?}
-    R -->|fail| SKIP7(["⏭️ Position/sector limit"])
-    R -->|pass| S["Execute via brokerService\nAlpaca paper API"]
-    S --> T["Log order_audit_log\nCREATED → SUBMITTED"]
-    T --> U["Update Redis\nsetOpenPositions"]
-    U --> V["Send Telegram alert"]
-    V --> W(["✅ Trade placed"])
-```
+| Account | Type | Min buy score | Max positions | Sizing | Exit profile | Notes |
+|---|---|---|---|---|---|---|
+| **kmadined** | LIVE | 85 | 10 (6 equal slots) | equal, 6 slots | standard | `news_momentum` setups blocked. Scan rotation on. Daily loss limit −$300 |
+| **anilboddu1** | LIVE | 65 | 1 | conviction | standard | Owner decides everything here — the platform states facts only, no recommendations. Daily loss limit −$1,000 |
+| **user** | PAPER | 75 | 6 | equal | wide | Test bed for every new strategy. Excluded from live accounts' learning data |
 
-### Stop Loss / Exit Flow
+Values come from `risk_configs` and `strategy_settings` (2026-11-22). Parvataneni and the other registered users have automatic trading off.
 
-```mermaid
-flowchart TD
-    A(["⏱️ Every 5 min cycle"]) --> B["Check all open holdings"]
-    B --> C{Stop loss hit?\ncurrent ≤ entry × 0.97}
-    C -->|yes| SELL1["🔴 Sell ALL — hard stop"]
-    C -->|no| D{Trailing stop hit?\ncurrent ≤ peak × 0.97}
-    D -->|yes| SELL2["🔴 Sell ALL — trailing"]
-    D -->|no| E{Take profit?\ncurrent ≥ entry × 1.15}
-    E -->|yes| SELL3["🟢 Sell — target hit"]
-    E -->|no| F(["✅ Hold position"])
-    SELL1 & SELL2 & SELL3 --> G["Log CLOSED in order_audit_log"]
-    G --> H["Send Telegram exit alert"]
-```
+### 2.2 Approvals for live changes
 
-### Raw ASCII reference
+`approvalService` stores a request (one per user + kind + key while pending), announces it on Telegram, shows a popup on the website until decided, and repeats it every trading morning. Approving runs the change; rejecting closes it. Requests expire after 14 days. Approval kinds include `sizing_method`, `blocked_setups`, `scan_rotation`.
 
-```
-Every 5 minutes (market hours only):
-
-SCHEDULER TICK
-     │
-     ▼
-[1] GLOBAL KILL SWITCH CHECK
-     └─ DB: global_trading_control table
-     └─ Redis: pantheon:HALT_ALL
-     └─ If either is set → skip cycle entirely
-     │
-     ▼
-[2] MARKET HOURS CHECK
-     └─ isMarketOpen() → 9:30 AM – 4:00 PM ET, Mon–Fri, no holidays
-     └─ Closed → skip
-     │
-     ▼
-[3] LOAD ACTIVE USERS
-     └─ SELECT users WHERE ai_trading_enabled = true
-     │
-     ▼  (for each user)
-[4] USER CONTROLS CHECK
-     └─ Daily loss limit, circuit breakers, per-user kill switch
-     │
-     ▼
-[5] MARKET SCREENER
-     └─ Scan stock universe (~20 symbols)
-     └─ Filters: price > $10, volume surge, RSI not overbought
-     │
-     ▼
-[6] BLEEDING SYMBOLS GATE
-     └─ getBleedingSymbols(userId): symbols with ≥60% loss rate in 30 days
-     └─ Skip any symbol in bleeding list
-     │
-     ▼
-[7] TECHNICAL SCORING (per symbol, 0–100)
-     ├─ Trend Template (Minervini SEPA): SMA conditions        0–25
-     ├─ Pattern Detection (VCP, Cup&Handle, Darvas)            0–20
-     ├─ CANSLIM Fundamentals (EPS, Revenue, Catalyst)          0–20
-     ├─ Wyckoff Volume Analysis                                0–15
-     ├─ Jones Risk/Reward (R:R ratio)                          0–15
-     ├─ News Sentiment (weighted)                              ±8
-     ├─ Gemini PULSE (Google Gemini news analysis)             ±10
-     ├─ SONAR (Reddit/X alt data)                              ±5
-     ├─ FRED Macro regime (Fed rate, yield curve)              ±5
-     ├─ EVOLVE ML (historical win-rate table for feature combo)±8
-     └─ Market Regime (VIX-based modifier)                     modifier
-     │
-     ▼
-[8] ORACLE GATE (Claude AI verdict)
-     └─ Only runs if pre-score ≥ 55 AND ANTHROPIC_API_KEY set
-     └─ Claude runs BULL vs BEAR debate → 8-step scoring → JSON verdict
-     └─ TRADE  → +10 to score
-     └─ SKIP   → -15 to score
-     └─ WATCHLIST → 0
-     │
-     ▼
-[9] THRESHOLD CHECK
-     └─ Final score ≥ 70 (minBuyScore) → proceed to buy
-     └─ < 70 → skip
-     │
-     ▼
-[10] POSITION SIZING (Kelly)
-     └─ SCALE: Kelly Criterion with max 15% cap
-     └─ Checks: daily trade limit, max open positions, max sector allocation
-     │
-     ▼
-[11] BROKER EXECUTION
-     └─ BROKER=alpaca → Alpaca API order
-     └─ BROKER=simulated → INSERT into trades table
-     └─ order_audit_log: CREATED → VALIDATED → SUBMITTED → PENDING_FILL
-     │
-     ▼
-[12] REDIS STATE UPDATE
-     └─ setOpenPositions(userId, symbols)
-     └─ pingAgentHealth('ARROW')
-     │
-     ▼
-[13] ALERTS
-     └─ Telegram alert sent to user's registered chat_id
-     └─ Email alert (if configured)
-
-STOP LOSS / TRAILING STOP (on every cycle for open positions):
-     └─ stopLoss: -3% from entry → auto-sell
-     └─ trailingStop: -3% from peak → auto-sell
-     └─ takeProfit: +15% → partial/full exit
-```
+- Always confirm the `approval_requests` row, not a chat message: a popup only appears when logged in as that account.
+- `promotionService` (Saturdays 11:30 ET) judges logged test methods against control on the same days. A pass is promoted to paper automatically. Live promotion still needs approval.
 
 ---
 
-## 4. Component Breakdown
+## 3. Architecture
 
-### 4.1 Frontend (Next.js 14)
+### 3.1 Processes
 
-**Port**: 3000  
-**Location**: `frontend/`
+All processes run on one Windows 11 PC (31 GB RAM). PM2 manages three of them; `start.ps1` starts everything.
 
-| Page / Route | Description |
-|-------------|-------------|
-| `/` | Main dashboard — market overview, portfolio summary |
-| `/dashboard` | Portfolio value chart, P&L, holdings table |
-| `/ai-trading` | AI bot controls — enable/disable, risk config, current signals |
-| `/options-bot` | Autonomous options bot settings and active positions |
-| `/portfolio` | Full holdings with unrealized P&L |
-| `/performance` | Win rate, sector breakdown, AI vs manual comparison |
-| `/backtest` | Run historical backtest against real trade data |
-| `/weekly` | Weekly predictions, buy lists, performance recap |
-| `/recommendations` | AI stock recommendations for manual trading |
-| `/alerts` | News alerts, price alerts management |
-| `/news` | Aggregated news from all configured sources |
-| `/scalping` | Options scalping scanner |
-| `/swing-trading` | Swing trade setups |
-| `/scenarios` | What-if scenario modeling |
-| `/profile` | User profile, Telegram linking, risk settings |
-| `/login` | JWT authentication + OTP flow |
+| Process | Entry | Role |
+|---|---|---|
+| `kiranrock-backend` | `backend/src/app.js` (port 3001, 512 MB heap) | Express REST API for the portal |
+| `kiranrock-worker` | `backend/src/worker.js` (512 MB heap) | Every scheduler and trading bot. Takes a **leadership lock** at start; a second copy exits on its own |
+| `kiranrock-crypto` | `backend/src/cryptoWorker.js` (256 MB heap) | 24/7 crypto bot, isolated from the equity schedulers |
+| Frontend | `frontend/` Next.js (port 3000) | Web portal, published at getmytbot.com via a Cloudflare tunnel |
 
-**Key frontend libraries**:
-- `lightweight-charts` — TradingView-style candlestick charts
-- `chart.js` / `react-chartjs-2` — Portfolio performance charts
-- `framer-motion` — Animated page transitions
-- `socket.io-client` — Real-time updates from backend
-- `tailwindcss` — UI styling
+**Supporting software on the same PC:**
+- **PostgreSQL:** database `kiranrock_trading`, 125 tables, about 2.2 GB.
+- **Ollama:** the local AI models, listening on 127.0.0.1 only since 2026-11-02.
+- **cloudflared:** the tunnel that publishes the portal.
+- **Kronos:** a research model that runs in WSL.
 
-### 4.2 Backend API (Express)
-
-**Port**: 3001  
-**Location**: `backend/src/app.js`  
-**Process**: `node src/app.js` (started separately from worker)
-
-**Security middleware stack** (in order):
-1. `helmet` — HTTP security headers (CSP disabled for Next.js compatibility)
-2. `compression` — gzip all responses
-3. `cors` — Allows localhost, LAN IPs, and `CORS_ORIGINS` env list
-4. `express-rate-limit` — 100 req/15 min per IP on API routes
-5. JWT `protect` middleware — validates Bearer token on all `/api/*` routes
-6. `requestTracing` — adds request ID to every log line
-
-**Route modules** (34 total):
-
-| Route Prefix | Module | Main Operations |
-|-------------|--------|----------------|
-| `/api/auth` | authRoutes | login, register, OTP verify |
-| `/api/stocks` | stockRoutes | quotes, OHLCV bars, search |
-| `/api/portfolio` | portfolioRoutes | holdings, P&L, history |
-| `/api/trading` | tradingRoutes | manual buy/sell, account balance |
-| `/api/ai-trading` | aiTradingRoutes | bot enable/disable, status |
-| `/api/enhanced-ai-trading` | enhancedAITradingRoutes | per-user risk config, force scan |
-| `/api/options` | optionsRoutes | options chain, Greeks |
-| `/api/options-bot` | optionsBotRoutes | bot config, active positions |
-| `/api/signals` | signalRoutes | AI signal feed |
-| `/api/enhanced-signals` | enhancedSignalRoutes | PANTHEON multi-agent signals |
-| `/api/weekly` | weeklyRoutes | weekly predictions, recap |
-| `/api/performance` | performanceRoutes | trade stats, win rates |
-| `/api/backtest` | backtestRoutes | historical simulation |
-| `/api/news` | newsRoutes | latest news |
-| `/api/news-aggregation` | newsAggregationRoutes | multi-source aggregated feed |
-| `/api/news-alerts` | newsAlertsRoutes | saved news alerts |
-| `/api/alerts` | alertRoutes | price/news alert CRUD |
-| `/api/watchlist` | watchlistRoutes | per-user watchlist |
-| `/api/recommendations` | recommendationRoutes | AI stock picks |
-| `/api/ai` | aiRoutes | multi-model AI predictions |
-| `/api/indicators` | indicatorRoutes | RSI, MACD, Bollinger, etc. |
-| `/api/fundamentals` | fundamentalsRoutes | EPS, revenue, margins |
-| `/api/report` | reportRoutes | download CSV / weekly report |
-| `/api/earnings` | earningsRoutes | upcoming earnings calendar |
-| `/api/pattern` | patternRoutes | chart pattern detection |
-| `/api/volume` | volumeRoutes | volume profile analysis |
-| `/api/money-flow` | moneyFlowRoutes | on-balance volume, MFI |
-| `/api/profile` | profileRoutes | user preferences, Telegram link |
-| `/api/scalping` | scalpingRoutes | options scalping scan |
-| `/api/swing-trading` | swingTradingRoutes | swing trade setups |
-| `/api/screener` | screenerRoutes | stock screener |
-| `/api/scenario` | scenarioRoutes | scenario modeling |
-| `/api/stock-feed` | stockFeedRoutes | real-time stock feed |
-| `/api/system` | systemRoutes | health, worker status, kill switch |
-
-**Health endpoint**: `GET /health` — returns DB status, AI provider status, worker heartbeat
-
-### 4.3 Worker Process
-
-**Location**: `backend/src/worker.js`  
-**Process**: `node src/worker.js` (started separately from API)
-
-The worker is a **single-leader** process — it uses a `worker_coordination` table in PostgreSQL to elect a leader. If a second worker starts (e.g., on a second EC2 instance), it exits immediately, so only one instance runs all schedulers at a time.
-
-**Services started by worker**:
+### 3.2 Diagram
 
 ```
-1. Enhanced AI Scheduler     — every 5 min during market hours
-2. IST Pipeline Scheduler    — 1-min poll, 8-stage pre-market sequence
-3. Options Scanner Scheduler — periodic options chain scanning
-4. Autonomous Options Bot    — options trade execution
-5. News Monitoring Service   — every 5 min, monitors 20 symbols
-6. Stock Signal Snapshot     — 24/7 signal capture
-7. Stock Signal Telegram     — 24/7 signal delivery to Telegram
-8. Telegram Report Scheduler — scheduled reports (Mon–Fri 7AM, 4:15PM; Sun 8AM, 9AM)
+                ┌──────────────────────────────┐        ┌──────────────────────┐
+  Browser ─────▶│ Frontend (Next.js, :3000)    │──JWT──▶│ Backend API (:3001)  │
+  getmytbot.com │ via Cloudflare tunnel         │        │ Express, 44 routers  │
+                └──────────────────────────────┘        └─────────┬────────────┘
+                                                                  │
+  Telegram ◀── alerts / reports ──┐                               ▼
+                                  │                  ┌──────────────────────────┐
+┌─────────────────────────────────┴──────────────┐   │ PostgreSQL               │
+│ Worker (leader-elected, all schedulers)        │◀─▶│ kiranrock_trading        │
+│  • Swing bot (5-min cycle)  • Nightly scan     │   │ 125 tables, ~2.2 GB      │
+│  • Core / Satellite / Options income / Bear    │   │ nightly pg_dump →        │
+│  • Reconciliation, stop checks, health         │   │ PC + OneDrive            │
+│  • Research: lab, studies, shadow logs         │   └──────────────────────────┘
+│  • Reports (Telegram + /reports archive)       │
+└───────┬───────────────────┬────────────────────┘   ┌──────────────────────────┐
+        │                   │                        │ Crypto worker (24/7)     │
+        ▼                   ▼                        └───────────┬──────────────┘
+ ┌─────────────┐   ┌──────────────────────┐                      │
+ │ Ollama      │   │ Alpaca (broker+data) │◀─────────────────────┘
+ │ qwen 27B/7B │   │ Polygon · Finnhub    │
+ │ 127.0.0.1   │   │ Gemini · FRED · Yahoo│
+ └─────────────┘   └──────────────────────┘
 ```
 
-### 4.4 PANTHEON Agent Pipeline (IST Pre-Market)
+### 3.3 Worker start-up
 
-Every morning, before the US market opens, a strict 8-stage sequence runs in IST
+In order:
 
-```mermaid
-sequenceDiagram
-    participant Redis
-    participant ATLAS
-    participant COMPASS
-    participant HERMES
-    participant PULSE
-    participant ORACLE
-    participant SHIELD
-    participant SCALE
-    participant ARROW
+1. Acquire leadership.
+2. Start the enhanced AI scheduler (the 5-minute tick that drives most jobs).
+3. Start the IST pipeline, the options scanner, and the options bot.
+4. Start the news monitor and news rescan.
+5. Start the stock-signal snapshots and the asset-universe refresh.
+6. Start EOD ingestion and the Telegram link listener.
+7. Start the market monitor and the intraday (Blitz) scheduler.
+8. Start the system health monitor and the resource monitor.
+9. Start the missed-opportunity, shadow-trade, and forward-tracking schedulers.
+10. Load the Telegram report schedules.
 
-    Note over ATLAS,ARROW: IST 06:30 → 09:30 | ET 01:00 → 04:00 AM
+### 3.4 Shared infrastructure
 
-    ATLAS->>Redis: acquirePipelineLock
-    ATLAS->>ATLAS: Fetch daily_bars OHLCV
-    ATLAS->>Redis: clearDataStale / setDataStale
-    ATLAS->>Redis: pingAgentHealth(ATLAS)
-
-    COMPASS->>COMPASS: Refresh sector ETF ranks
-    COMPASS->>Redis: pingAgentHealth(COMPASS)
-
-    HERMES->>HERMES: flushPendingAlerts(all users)
-    HERMES->>Redis: pingAgentHealth(HERMES)
-
-    PULSE->>PULSE: Pre-fetch news sentiment
-    PULSE->>Redis: setOracleWatchlist
-    PULSE->>Redis: pingAgentHealth(PULSE)
-
-    ORACLE->>ORACLE: Claude pre-market verdicts
-    ORACLE->>Redis: pingAgentHealth(ORACLE)
-
-    SHIELD->>SHIELD: Drawdown & VIX pre-check
-    SHIELD->>Redis: setRegime / pingAgentHealth
-
-    SCALE->>SCALE: Kelly position sizing pre-calc
-    SCALE->>Redis: pingAgentHealth(SCALE)
-
-    ARROW->>ARROW: Cancel stale partial fills
-    ARROW->>Redis: setOpenPositions / pingAgentHealth
-```
- (India Standard Time, UTC+5:30). Each stage has a 15-minute active window. A Redis lock (`PIPELINE_LOCK`) prevents double-runs across multiple EC2 instances.
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│             IST PRE-MARKET PIPELINE (daily)                  │
-├─────────┬──────────┬─────────────────────────────────────────┤
-│ IST     │ ET       │ Stage & Action                          │
-├─────────┼──────────┼─────────────────────────────────────────┤
-│ 06:30   │ 01:00 AM │ ATLAS   — Refresh daily_bars OHLCV data │
-│ 06:45   │ 01:15 AM │ COMPASS — Update sector rotation ranks  │
-│ 07:00   │ 01:30 AM │ HERMES  — Flush pending user alerts     │
-│ 07:15   │ 01:45 AM │ PULSE   — Pre-fetch news sentiment      │
-│ 07:45   │ 02:15 AM │ ORACLE  — Claude pre-market verdicts    │
-│ 08:15   │ 02:45 AM │ SHIELD  — Drawdown & risk pre-check     │
-│ 08:30   │ 03:00 AM │ SCALE   — Kelly position size pre-calc  │
-│ 09:15   │ 03:45 AM │ ARROW   — Cancel stale partial fills    │
-└─────────┴──────────┴─────────────────────────────────────────┘
-```
-
-Each stage writes its health heartbeat to Redis (`AGENT_HEALTH:{stage}`).  
-ATLAS failure sets `DATA_STALE:atlas` — trading bot reads this and proceeds with caution.
-
-### 4.5 Database Schema (PostgreSQL)
-
-**Database**: `kiranrock_trading`  
-**Connection pool**: max 20 connections, 30s idle timeout
-
-**Core tables**:
-
-| Table | Purpose |
-|-------|---------|
-| `users` | Accounts: id, username, email, password_hash, telegram_chat_id |
-| `risk_configs` | Per-user risk params: minBuyScore=70, stopLoss=-3%, trailing=3% |
-| `global_trading_control` | System-wide kill switch |
-| `user_trading_controls` | Per-user kill switches, circuit breakers |
-| `trades` | All executed trades: symbol, action, qty, price, ai_score, sector |
-| `holdings` | Current open positions per user |
-| `trading_accounts` | Balance, buying power, cash reserved |
-| `order_audit_log` | Full order state machine (CREATED→JOURNALED) |
-| `alerts` | User-defined price alerts |
-| `news_alerts` | Automated news alerts from monitoring service |
-| `news_monitor_runs` | Metadata for each news monitoring cycle |
-| `daily_bars` | OHLCV market data store (populated by ATLAS) |
-| `ohlcv_cache` | Local OHLCV cache for EVOLVE ML training |
-| `weekly_predictions` | AI weekly buy list snapshots |
-| `weekly_prediction_snapshots` | Archived weekly predictions |
-| `portfolio_history` | Daily portfolio value snapshots |
-| `stock_signal_snapshots` | Captured AI signals |
-| `scheduler_logs` | Scheduler run logs |
-| `worker_coordination` | Single-leader election for worker process |
-| `trade_intelligence` | AI scoring metadata per trade |
-
-**order_audit_log state machine**:
-
-```mermaid
-stateDiagram-v2
-    [*] --> CREATED
-    CREATED --> VALIDATED
-    VALIDATED --> SUBMITTED
-    SUBMITTED --> PENDING_FILL
-    SUBMITTED --> REJECTED
-    PENDING_FILL --> PARTIALLY_FILLED
-    PENDING_FILL --> FILLED
-    PARTIALLY_FILLED --> FILLED
-    PARTIALLY_FILLED --> CANCELED : ARROW EOD cleanup
-    FILLED --> OPEN_WITH_STOP
-    OPEN_WITH_STOP --> STOPPED : stop leg hit
-    OPEN_WITH_STOP --> CLOSED : target hit
-    OPEN_WITH_STOP --> CLOSED_MANUAL : manual exit
-    STOPPED --> JOURNALED
-    CLOSED --> JOURNALED
-    CLOSED_MANUAL --> JOURNALED
-    JOURNALED --> [*]
-    REJECTED --> [*]
-    CANCELED --> [*]
-```
-
-```
-CREATED ──► VALIDATED ──► SUBMITTED ──► PENDING_FILL ──► PARTIALLY_FILLED
-                                                                │
-                                                                ▼
-                                                             FILLED ──► OPEN_WITH_STOP
-                                                                              │
-                                                    ┌─────────────────────────┤
-                                                    ▼         ▼              ▼
-                                                 STOPPED   CLOSED    CLOSED_MANUAL
-                                                    │         │              │
-                                                    └────┬────┘──────────────┘
-                                                         ▼
-                                                      JOURNALED
-
-Terminal states (no further transitions):
-  REJECTED — order rejected by broker
-  CANCELED — canceled manually or by ARROW EOD cleanup
-```
-
-### 4.6 Redis State Layer
-
-**URL**: `redis://localhost:6379` (or `REDIS_URL` env var)  
-**File**: `backend/src/services/redisStateService.js`
-
-All keys use prefix `pantheon:`. **All operations fail-open gracefully** — if Redis is unavailable, trading continues normally with no-op defaults.
-
-| Redis Key | TTL | Purpose |
-|-----------|-----|---------|
-| `pantheon:HALT_ALL` | Permanent | Emergency stop for all bots across all processes |
-| `pantheon:POSITIONS_OPEN:{userId}` | 10 min | JSON array of open symbol names per user |
-| `pantheon:ORACLE_WATCHLIST` | 1 hour | Symbols queued for ORACLE Claude analysis |
-| `pantheon:REGIME:{market}` | 15 min | Market regime: bullish/neutral/bearish |
-| `pantheon:DATA_STALE:atlas` | 5 min | Set when ATLAS market data fetch fails |
-| `pantheon:AGENT_HEALTH:{agent}` | 5 min | Last heartbeat timestamp per pipeline stage |
-| `pantheon:PIPELINE_LOCK:{uid}:{stage}` | 30 min | Mutex preventing multi-EC2 double-run |
-| `pantheon:IST_STAGE:{uid}` | 1 hour | Current pipeline stage for a user session |
+- **One Alpaca rate limiter** across all schedulers (`dataProvider`), plus a 60-second quote cache.
+- **Circuit breakers** on Yahoo and Gemini, so one failing caller can't starve the others.
+- **Shared market calendar** (`utils/marketCalendar.js`): holidays and half days. This is the only "is the market open" implementation.
+- **Report archive** (`report_archive`). Every Telegram message is stored, so the portal's /reports page shows everything Telegram shows.
 
 ---
 
-## 5. AI & Scoring Pipeline
+## 4. A trading day, start to finish
 
-The bot uses a **multi-layer AI ensemble** to score every stock opportunity. Each component contributes to a final 0–100 score.
+Times are US Eastern. The PC itself runs on Central time.
 
-```mermaid
-flowchart LR
-    subgraph Technical["📊 Technical (0–95 max)"]
-        T1["Trend Template\nSEPA — 0–25"]
-        T2["Pattern Detection\nVCP/Cup/Darvas — 0–20"]
-        T3["CANSLIM Fund.\n0–20"]
-        T4["Wyckoff Volume\n0–15"]
-        T5["Jones R:R\n0–15"]
-    end
+| Time (ET) | Job |
+|---|---|
+| 16:15 (prev. day) | **Nightly scan** starts. Scores the whole universe (about 2,750 stocks) into `daily_universe_analysis` using the large local model. Finishes around 02:00–03:00 |
+| 18:30 (prev. day) | EOD bar ingestion (Polygon grouped daily bars, split detection) |
+| 07:00 | Nightly database backup. Waits up to 2 hours if a scan is still running |
+| 07:00 | Daily AI briefing on Telegram (Mon–Fri). The weekly buy list goes out Sunday 08:00 |
+| 08:00 | STRONG BUY pre-market alert, and the daily score-edge check |
+| 08:30 | Pre-market gap check on last night's setups |
+| 09:00 | Morning reconciliation: database positions vs Alpaca |
+| 09:25 | Portfolio digest on Telegram |
+| 09:30–16:00 | **Main cycle every 5 minutes**, per account: manage open positions, then look for entries (§5) |
+| 09:31 | Stop verification: every position must have an active stop |
+| 15:44 | Cancel leftover partial-fill orders |
+| 16:15 | Daily bot summary (Telegram) and the next nightly scan |
+| 16:25 | Market review capture and forward-return backfill |
+| 17:00 | Insider sweep (last 10 days). Missed-opportunity monitor |
+| 18:30 | Daily mistake review. 19:00 news labelling. 19:30 lab tips |
 
-    subgraph Signals["🔌 External Signals (±36 max)"]
-        S1["News Sentiment\n±8"]
-        S2["PULSE — Gemini\n±10"]
-        S3["SONAR — X/Reddit\n±5"]
-        S4["FRED Macro\n±5"]
-        S5["EVOLVE ML\n±8"]
-    end
+**Weekly jobs:**
 
-    subgraph Regime["📈 Market Regime"]
-        R1["VIX modifier\n×0.8 – ×1.1"]
-    end
+| Day | Time (ET) | Job |
+|---|---|---|
+| Friday | 15:45 | Parameter health check plus a 30-day backtest snapshot |
+| Friday | 16:10 | $/day scoreboard |
+| Friday | 16:20 | Accountability: app costs vs live gains |
+| Saturday | 08:00 | Weekend prep report |
+| Saturday | 10:00 | Score-component validation |
+| Saturday | 11:00 | Market study plus one strategy-review item (rotating) |
+| Saturday | 11:30 | Promotion check |
+| Saturday | 12:00 | Research agent and insider sweep |
+| Saturday | 13:00 | Research Lab |
+| Saturday | 13:30 | Portfolio Lab |
+| Saturday | 14:00 | Broker scoreboard |
+| Sunday | 08:00 | AI weekly buy list |
+| Sunday | 09:00 | Weekly performance recap |
+| Sunday | 20:00 | Global market scout |
 
-    subgraph Oracle["🤖 ORACLE — Claude"]
-        O1["Pre-score ≥ 55\ntriggers Claude"]
-        O2{"Verdict"}
-        O3["+10 TRADE"]
-        O4["0 WATCHLIST"]
-        O5["-15 SKIP"]
-        O1 --> O2
-        O2 -->|score ≥70| O3
-        O2 -->|50–69| O4
-        O2 -->|<50| O5
-    end
-
-    Technical --> Score["Combined\nScore 0–100"]
-    Signals --> Score
-    Regime --> Score
-    Score --> O1
-    O3 & O4 & O5 --> Final{"Final ≥ 70?"}
-    Final -->|yes| BUY["✅ Execute Buy"]
-    Final -->|no| SKIP["⏭️ Skip"]
-```
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│              PANTHEON SCORING PIPELINE                      │
-│                                                             │
-│  Component                     Score Range   Source        │
-│  ─────────────────────────────────────────────────────────  │
-│  1. Trend Template (SEPA)       0–25          Technical     │
-│  2. Pattern Detection           0–20          Technical     │
-│  3. CANSLIM Fundamentals        0–20          Technical     │
-│  4. Wyckoff Volume              0–15          Technical     │
-│  5. Jones R/R                   0–15          Technical     │
-│  ─────────────────────────────────────────────────────────  │
-│  6. News Sentiment (basic)       ±8           Free APIs     │
-│  7. PULSE (Gemini news)          ±10          Gemini API    │
-│  8. SONAR (Reddit/X alt data)    ±5           Reddit/X API  │
-│  9. FRED Macro                   ±5           FRED API      │
-│  10. EVOLVE ML (win-rate table)  ±8           DB/OHLCV      │
-│  ─────────────────────────────────────────────────────────  │
-│  11. Market Regime Modifier     ×0.8–×1.1    VIX           │
-│  ─────────────────────────────────────────────────────────  │
-│  12. ORACLE Claude verdict      +10/0/−15    Anthropic API  │
-│       (TRADE / WATCHLIST / SKIP)                            │
-│  ─────────────────────────────────────────────────────────  │
-│  FINAL THRESHOLD: ≥ 70 → execute buy                        │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**ORACLE (Claude) 8-Step Scoring**:
-
-The ORACLE agent runs a bull-vs-bear internal debate (PANTHEON SYSTEM_PROMPT) then scores each stock across these dimensions:
-
-```
-Step 1: WEINSTEIN GATE  — Stage 3 or 4 = instant SKIP
-Step 2: TREND TEMPLATE  — 5 MA conditions × 5pt = max 25
-Step 3: PATTERN         — VCP=10, Cup&Handle=9, Darvas=8
-Step 4: CANSLIM         — EPS, Revenue, Margins, Catalyst
-Step 5: WYCKOFF VOLUME  — Volume distribution up/down breakout
-Step 6: JONES R/R       — ≥3:1 R/R = max score
-Step 7: GEMINI BONUS    — Bullish +5, Bearish -10
-Step 8: SMART MONEY     — Institutional +8, Insider buy +5
-
-VERDICT: ≥70 → TRADE (+10) | 50–69 → WATCHLIST (0) | <50 → SKIP (-15)
-```
-
-**JSON parse safety**: If Claude returns malformed JSON, `tryParse()` strips markdown fences and retries with `strictMode=true` ("Respond with ONLY raw JSON, no markdown").
-
-**Fallback chain**: Anthropic API → Ollama local LLM (if `OLLAMA_BASE_URL` set) → code score only
+The crypto bot runs every 5 minutes, 24/7.
 
 ---
 
-## 6. Trading Bot Logic — Step by Step
+## 5. Swing trading — the main strategy
 
-### Entry Logic
+Code: `enhancedAITradingBot.js` (`scanMarketForOpportunities`, `executeAutonomousTrading`, `manageExistingPositions`), `precomputedUniverseService.js`, `brokerService.js`.
 
-```
-Every 5 minutes:
-  For each AI-enabled user:
-    1. Load risk_config from DB (or DEFAULT: minBuyScore=70, stopLoss=-3%, trailing=3%)
-    2. Check daily trade count (default max 10/day)
-    3. Run market screener → top candidates
-    4. For each candidate:
-       a. Check bleeding symbols gate (≥60% loss rate last 30d → skip)
-       b. Calculate earnings proximity (skip if earnings within 3 days)
-       c. Build full technical score
-       d. If score ≥ 55 AND ANTHROPIC_API_KEY set → call ORACLE
-       e. If final score ≥ minBuyScore(70) → size position
-       f. Check: max open positions, max sector allocation, available cash
-       g. Execute buy via brokerService
-       h. Log to order_audit_log (CREATED → SUBMITTED)
-       i. Send Telegram alert
-```
+### 5.1 Universe and nightly scoring
 
-### Exit Logic (checked on every cycle)
+- **Universe:** HERMES (`marketScreenerService`) plus the nightly Alpaca asset sync. Quality floors are set in `.env`: market cap ≥ $2B and average volume ≥ 250k for the screener pool. The nightly scan covers about 2,750 symbols.
+- **Nightly score:** `analyzeStockWithAI` runs about 25 factors (trend template, momentum, volume, RSI/StochRSI/Williams, MACD/Bollinger, relative strength, 52-week high, earnings window, VIX, PULSE news sentiment and risk flags, chart patterns, Wyckoff, CANSLIM, sector rotation, smart money, short squeeze, learned adjustments, regime/weekly alignment, ATLAS). ORACLE gives the final verdict. Factor weights are listed in `PANTHEON_INTERNALS.md` §4.
+- **Changes since September:**
+  - PROPHET is off in the scan (no skill found, 2026-11-10).
+  - Volume is paced against a normal day at the same hour (2026-11-09).
+  - ADX(14) is used for trend strength.
+  - Every skip now records a reason in `exclusion_reason`.
+- **Result:** one row per symbol per night: score, recommendation, pattern, prescreen pass/fail.
 
-```
-For each open holding:
-  - STOP LOSS:      current_price ≤ entry × (1 + stopLoss)  = entry × 0.97 → SELL ALL
-  - TRAILING STOP:  current_price ≤ peak_price × (1 - trailing) = peak × 0.97 → SELL ALL
-  - TAKE PROFIT:    current_price ≥ entry × (1 + takeProfit) = +15% → SELL (partial or full)
-  - EOD CLEANUP:    15:44–15:59 ET → cancel any SUBMITTED/PARTIALLY_FILLED orders > 30 min old
-```
+### 5.2 Choosing candidates in the live cycle
 
-### Risk Configuration (per-user, from DB `risk_configs`)
+1. Load last night's scored list (fast path).
+2. Keep at most **40 candidates** for the live re-check. Ties at the same score are broken by `md5(symbol‖date)`: fair, stable within a day, rotating across days.
+3. **Jump guard:** drop stocks that rose more than 5% on scan day (`MAX_SCAN_DAY_JUMP_PCT`). Buying after a jump lagged in 4 of 4 months tested.
+4. **Scan rotation** (per account, `strategy_settings.scan_rotation`): rotate through the list so every candidate gets checked during the day. The top N always stay in the list (`scan_rotation_keep_top`).
+5. **Live re-score** with the fast local model. Limits: at most `ORACLE_MAX_PER_CYCLE` (8) ORACLE calls per cycle, a 90-second ORACLE cutoff, and a 120-second whole-scan cutoff. Each cutoff runs from the start of the cycle.
+6. Drop anything below the account's minimum buy score.
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `minBuyScore` | 70 | Minimum AI score to execute buy |
-| `stopLoss` | -3% | Hard stop loss from entry |
-| `trailingStopPercent` | 3% | Trailing stop from peak |
-| `takeProfitPercent` | 15% | Auto take-profit target |
-| `maxOpenPositions` | 10 | Max concurrent holdings |
-| `maxPortfolioRisk` | 0.20 | Max 20% of portfolio in any one position |
-| `maxSectorAllocation` | 0.30 | Max 30% per sector |
-| `dailyLossLimit` | 5% | Halt if portfolio drops 5% in a day |
-| `maxVix` | 35 | Halt trading above this VIX level |
-| `maxDailyTrades` | 10 | Max trades per day per user |
+### 5.3 Gates
 
----
+A candidate must pass every gate. Each rejection is written to `trade_rejection_log` with a reason code. Rejected candidates scoring 85 or more are tracked forward as shadow trades (§9).
 
-## 7. Options Bot
+**Cycle-level gates.** These stop or limit all new entries for the cycle:
 
-**Service**: `backend/src/services/autonomousOptionsBot.js`  
-**Scheduler**: `backend/src/services/optionsBotScheduler.js`
+| Gate | Rule |
+|---|---|
+| Calendar | FOMC, CPI/NFP, OPEX and post-holiday windows; no new entries 9:30–10:00 and late in the day |
+| SPY gate | No new longs when SPY is below its 20-day average |
+| Edge gate | At least one STRONG BUY must exist; plain BUY signals alone don't open positions |
+| Regime cap | New positions per cycle: BEAR 1, NEUTRAL/CHOPPY 2, BULL by breadth |
+| Volume gate | In CHOPPY/NEUTRAL/BEAR, an entry needs ≥ 1.5× normal volume for the hour |
+| Heat budget | Total dollars at risk to all stops is capped. A trade is shrunk to fit, and blocked once the budget is used |
+| Loss limits / drawdown | See §6 |
 
-### Strategies
+**Per-candidate gates:**
 
-| Strategy | Capital Allocation | Timeframe | Target Return |
-|----------|-------------------|-----------|---------------|
-| Delta-Neutral Scalping | 30% | Intraday | 20% |
-| Directional Swing | 40% | 2–5 days | 35% |
-| Credit Spreads | 20% | 7–30 days | 15% |
-| Protective Puts | 10% | Portfolio hedge | Risk reduction |
+| Reason code | Rule |
+|---|---|
+| `bleeding_symbol` | The symbol has lost repeatedly for this account recently |
+| `earnings_guard`, `earnings_setup_low_score` | Earnings too close (Finnhub calendar) |
+| `existing_broker_position`, `open_order_pending`, `duplicate_inflight`, `dup_symbol_session` | Never double-buy |
+| `stop_cooldown` | Recently stopped out. Re-entry is allowed after 2 or more days, once price has traded 5% above the stop price |
+| `risk_reward` | Reward/risk below 2.5 |
+| `gap_gate`, `gap_elevated_low_score`, `gap_moderate_low_score`, `gap_abnormal` | Don't chase overnight gaps |
+| `extension_guard` | Price more than 10% above its 20-day average |
+| `sector_count_cap`, `sector_dollar_cap`, `industry_cap`, `unknown_sector` | Concentration limits. Sector count is effectively 1 per sector; the industry cap (2) has never bound in practice |
+| `correlation` | Too correlated (60-day returns) with current holdings |
+| `regime_setup_mismatch`, `setup_blocked` | Setup not allowed in this regime, or blocked for this account (kmadined: `news_momentum`) |
+| `rs_filter_below_mas`, `volume_gate`, `min_notional`, `rate_limit` | Misc. Some accounts have a $100 minimum order |
 
-### Options Entry Criteria
+### 5.4 Sizing
 
-```
-Greeks:
-  Gamma ≥ 0.05        (fast delta movement for scalping)
-  Delta 0.40–0.70     (ITM enough for reliable tracking)
-  Vega ≥ 0.10         (volatility sensitivity)
-  Theta ≥ -0.50       (cap time decay)
+- **Equal** (kmadined, `user`): sleeve ÷ slots, adjusted by regime, losing streak, slippage, VIX and the macro dampener. Risk caps use the whole account.
+- **Conviction** (anilboddu1): Kelly fraction from the account's own win and loss history × confidence × multipliers, floored and capped by `risk_configs`.
+- **Always:** the heat budget, `max_position_size`, a cross-cycle position-slot reservation (two cycles can't both fill the last slot), and a cash guard against over-deployment (added after the 2026-06-16 over-deployment).
 
-Liquidity:
-  Volume ≥ 500/day
-  Open Interest ≥ 1,000
-  Bid/Ask spread ≤ 15%
+### 5.5 Orders
 
-Expiry:
-  7–45 days to expiration (gamma sweet spot)
+- Limit orders only. Standard entries are **bracket orders** (stop and target attached).
+  - A bracket's stop leg shows status `held` and does **not** appear in `/v2/orders?status=open`. Check with `status=all&nested=true`.
+- Fractional sizes get two separate GTC orders.
+- **Partial fills** record the real filled quantity, not the requested one (fixed 2026-09-17/18).
+- **Duplicate prevention:** `UNIQUE(user_id, broker_order_id)` on trades, plus idempotency keys in `order_audit_log`.
 
-IV: 20%–150% (avoid penny and meme extremes)
-Price: $0.50–$15.00 per contract
-```
+### 5.6 Managing open positions (every cycle)
 
-### Account Limits
+- **StopRepair:** every holding must have a live protective stop. A missing one is restored, and an alert is sent.
+- **Trailing stop, standard profile.** It tightens as the gain grows:
 
-- Minimum account balance to trade options: $10,000
-- Max account at risk: 10%
-- Max per-position risk: 2%
-- Max concurrent options positions: 5
+| Gain | Trail |
+|---|---|
+| under 2% | 5.5% |
+| 2% or more | 5.0%, and the stop floor moves to the entry price |
+| 5% or more | 4.0% |
+| 10% or more | 3.0% |
+| 15% or more | 2.5% |
+| 20% or more | 2.0% |
 
----
-
-## 8. External Communications
-
-> Last audited: May 18, 2026
-
-### External Communications Map
-
-```mermaid
-graph LR
-    subgraph Platform["KiranRock Platform"]
-        API["Backend API\nport 3001"]
-        Worker["Worker\nSchedulers & Bots"]
-    end
-
-    subgraph Broker["💰 Broker & Market Data"]
-        Alpaca["Alpaca Markets\nPaper Trading + Real-time Data"]
-    end
-
-    subgraph AI["🤖 AI / LLM"]
-        Claude["Anthropic Claude\nclaude-sonnet-4-6 ✅"]
-        Gemini["Google Gemini\ngemini-2.0-flash-lite ✅"]
-        HF["Hugging Face\nFinBERT + DistilBERT ✅"]
-        Ollama["Ollama local\nllama3.2:3b ✅"]
-    end
-
-    subgraph News["📰 News & Social"]
-        XAPI["X / Twitter API ✅"]
-        NewsAPI2["NewsAPI.org ✅"]
-        AV["Alpha Vantage ✅"]
-        FH["Finnhub ✅"]
-        Reddit["Reddit API ❌"]
-    end
-
-    subgraph Macro["📈 Macro"]
-        FRED2["FRED API ✅"]
-    end
-
-    subgraph Notify["🔔 Notifications"]
-        TGBot["Telegram Bot API ✅"]
-        GmailSMTP["Gmail SMTP ✅"]
-    end
-
-    subgraph Storage["🗄️ Storage"]
-        PG["PostgreSQL ✅"]
-        RD["Redis ✅"]
-    end
-
-    Worker -->|orders & quotes| Alpaca
-    Alpaca -->|fills & data| Worker
-    Worker -->|ORACLE verdicts| Claude
-    Worker -->|PULSE sentiment| Gemini
-    Worker -->|NLP ensemble| HF
-    Worker -->|LLM fallback| Ollama
-    Worker -->|social sentiment| XAPI
-    Worker -->|news feed| NewsAPI2
-    Worker -->|news + data| AV
-    Worker -->|earnings news| FH
-    Worker -->|macro regime| FRED2
-    Worker -->|trade alerts| TGBot
-    API -->|OTP + alerts| GmailSMTP
-    API & Worker <-->|data| PG
-    API & Worker <-->|state keys| RD
-```
-
-### 8.1 Active & Working (15 services live)
-
-| Service | Protocol | What It Does | Status |
-|---------|----------|-------------|--------|
-| **PostgreSQL** | TCP 5432 | Primary data store — all trades, users, history | ✅ Connected |
-| **Alpaca Markets API** | HTTPS | Paper trading broker — order placement, account balance (`ALPACA_PAPER=true`) | ✅ Key set |
-| **Alpaca Market Data** | HTTPS | Real-time quotes & OHLCV bars (`DATA_PROVIDER=alpaca`) | ✅ Key set |
-| **Telegram Bot** | HTTPS | Trade alerts + scheduled reports (@KiranTradePro_bot) | ✅ Token set |
-| **Redis** | TCP 6379 | PANTHEON multi-process state coordination | ✅ localhost auto |
-| **Anthropic Claude** | HTTPS | ORACLE trade verdicts — `claude-sonnet-4-6` | ✅ Key set |
-| **Google Gemini** | HTTPS | PULSE news sentiment — `gemini-2.0-flash-lite` | ✅ Key set |
-| **Hugging Face** | HTTPS | FinBERT + DistilBERT financial NLP ensemble | ✅ Key set |
-| **Ollama (local)** | HTTP 11434 | Free local LLM (`llama3.2:3b`) — Claude fallback | ✅ Installed & model downloaded |
-| **X / Twitter API** | HTTPS | Real-time tweet sentiment for stocks | ✅ Bearer token set |
-| **NewsAPI.org** | HTTPS | Aggregated market news articles | ✅ Key set |
-| **Alpha Vantage** | HTTPS | Supplementary market data + news sentiment | ✅ Key set |
-| **Finnhub** | HTTPS | Company news + earnings calendar | ✅ Key set |
-| **Gmail SMTP** | SMTP 587 | OTP verification emails + trade alert emails | ✅ tradeagent0007@gmail.com |
-| **FRED API** | HTTPS | SHIELD macro regime: Fed funds rate, yield curve, unemployment | ✅ Key set |
-
-**AI fallback chain (ORACLE)**: Claude `claude-sonnet-4-6` → Ollama `llama3.2:3b` (local) → code score only
-
-### 8.2 Optional — Keys Not Yet Added
-
-| Service | What It Adds | How to Get | Score Impact |
-|---------|-------------|-----------|----------|
-| **Reddit API** | SONAR: WSB/stocks/investing mention volume & sentiment | [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) — free script app | ±5 per trade |
-| **Polygon.io** | Real-time options Greeks + faster quotes (replaces Yahoo delay) | [polygon.io](https://polygon.io) — Starter $29/mo | Real-time data |
-
-### 8.3 Deployment Considerations
-
-| Feature | Current Status | What's Needed |
-|---------|---------------|---------------|
-| **Real money trading** | LOCKED (`ALPACA_PAPER=true`) | Only after 6 months paper + Sharpe > 1.5 + drawdown < 15% |
-| **Production deployment** | Dev mode (`NODE_ENV=development`) | SSL/reverse proxy, update `CORS_ORIGINS`, `NODE_ENV=production` |
-| **India market** | Deferred | India broker API, INR support, NSE/BSE feeds |
-| **Multi-EC2 Redis** | localhost only | Point `REDIS_URL` to shared AWS ElastiCache |
-| **External access** | Available at `http://99.47.183.33:3000` | Port forwarding already in place |
+  The trail is never tighter than 1.5 × ATR.
+- **Trailing stop, wide profile (paper):** a flat 7% trail with no break-even floor, also never tighter than 1.5 × ATR. In the 3-year replay this held the most per day.
+- **Other exits:**
+  - partial profit-taking;
+  - time exits (slow mover, maximum hold, pre-earnings);
+  - tightening on a regime downgrade;
+  - distress mode, which cuts losers early on a bad day.
+- **Regime shift:** a downgrade cancels only pending **entry** buys, never protective stop orders. This matters for the bear side's buy-stops.
 
 ---
 
-## 9. Security & Risk Controls
+## 6. Risk controls and safety nets
 
-### Authentication
-- JWT Bearer tokens, 64-byte random secret (`JWT_SECRET` env var)
-- Tokens verified on every API route via `protect` middleware
-- Users looked up from PostgreSQL on each request (no JWT payload trust beyond ID)
-- OTP via email for account verification
-
-### Rate Limiting
-- API routes: 100 requests per 15 minutes per IP
-- Telegram send: exponential backoff (3 retries, max 10s wait)
-- Yahoo Finance: built-in retry + 15-min cache on all calls
-- Hugging Face: auto-cooldown after 3 consecutive 429s (10-min cooldown)
-
-### Trading Circuit Breakers (DB-enforced)
-
-| Breaker | Trigger | Action |
-|---------|---------|--------|
-| `CIRCUIT_HALT_STREAK` | 5 consecutive losses | Halt all trading |
-| `CIRCUIT_REDUCE_STREAK` | 3 consecutive losses | Reduce position sizes |
-| `MAX_DRAWDOWN_PCT` | Portfolio drops 15% from peak | Halt all trading |
-| `DATA_MAX_AGE_MS` | Market data older than 2 min | Halt trading, set DATA_STALE |
-| `MAX_VIX` | VIX ≥ 35 | Halt trading |
-| `DAILY_LOSS_LIMIT` | Portfolio drops 5% in one day | Halt user's trading |
-
-### Kill Switches (layered)
-
-```
-Level 1: Redis HALT_ALL          — instant, cross-process, survives restart
-Level 2: global_trading_control  — DB-level, affects all users
-Level 3: user_trading_controls   — per-user kill switch
-Level 4: risk_config limits      — per-user automated via circuit breakers
-```
-
-### Data Security
-- Passwords hashed with `bcrypt` (rounds=10)
-- `.env` file never committed (`.gitignore` enforced)
-- Helmet sets security headers on all responses
-- SQL queries use parameterized statements (`$1`, `$2`...) throughout — no string interpolation
-- `order_audit_log` is append-only — no UPDATE or DELETE ever issued
+| Control | What it does |
+|---|---|
+| **Daily / weekly loss limits** | Count stop fills too. If the data is missing they fail closed, i.e. new buys stop. Exits keep running during a halt. Per-account `daily_loss_limit` plus `.env` limits |
+| **Max drawdown halt** | Blocks live buys past the drawdown limit. A bad equity read can no longer become the "peak" (fixed 2026-10-29) |
+| **Loss-streak breaker** | 3 losses in a row halve the position size; 5 stop new buys |
+| **SENTINEL** | Scans 30 days for duplicate orders, order storms, stop failures, reconciliation errors and stuck orders, and blocks live trading if any trip. Check the audit trail before trusting a "blocked" |
+| **Kill switches** | Global (`global_trading_control`), per account (`emergency_stop_enabled`), and the bear side's latching halt (§7.4) |
+| **Reconciliation** | Database vs broker on every restart, at 9:00, and on a schedule. Finds phantom (DB only), drift (quantity mismatch) and shadow (broker only) positions; shadows also backfill the missing trade row. Fill-history reconciliation only detects and alerts |
+| **Stop verification** | 9:31 every trading day, plus every cycle via StopRepair |
+| **Preflight** | `start.ps1` runs `scripts/preflight.js`. If it fails, the running app is **not** stopped |
+| **Market calendar** | Holidays and half days from a single shared module |
+| **Privacy** | User-facing Telegram summaries contain only that user's trades (fixed after a leak). Passwords are no longer logged (2026-11-04) |
 
 ---
 
-## 10. Scheduler & Timing Reference
+## 7. Other strategies
 
-All times are approximate — 1-minute polling loop resolves actual execution.
+### 7.1 Core holdings (`coreHoldingsService`)
 
-| Schedule | Time (IST) | Time (ET) | Job |
-|----------|-----------|-----------|-----|
-| IST ATLAS | 06:30 daily | 01:00 AM | Market data refresh |
-| IST COMPASS | 06:45 daily | 01:15 AM | Sector rotation ranks |
-| IST HERMES | 07:00 daily | 01:30 AM | Flush alerts |
-| IST PULSE | 07:15 daily | 01:45 AM | News pre-fetch |
-| IST ORACLE | 07:45 daily | 02:15 AM | Claude pre-market |
-| IST SHIELD | 08:15 daily | 02:45 AM | Risk pre-check |
-| IST SCALE | 08:30 daily | 03:00 AM | Kelly sizing pre-calc |
-| IST ARROW | 09:15 daily | 03:45 AM | Cancel stale orders |
-| AI Trading Bot | Every 5 min | 9:30 AM–4:00 PM ET | Scan + trade |
-| EOD Cleanup | 15:44–15:59 ET daily | — | Cancel partial fills |
-| News Monitor | Every 5 min | 24/7 | Monitor top 20 symbols |
-| Telegram predictions | 7:00 AM ET | Mon–Fri | Daily predictions |
-| Telegram AI summary | 4:15 PM ET | Mon–Fri | Bot performance recap |
-| Telegram weekly buy | 8:00 AM ET | Sunday | Weekly buy list |
-| Telegram weekly recap | 9:00 AM ET | Sunday | Weekly performance |
-| Stock snapshots | Every hour | 24/7 | Signal capture |
+- **Purpose:** long-term positions that put otherwise idle cash to work, held for months and separate from the swing bot. The swing bot can't see or sell them.
+- **Holdings:**
+  - kmadined: 8 core symbols.
+  - Paper: SPY, V, SGOV, AMD, META, NVDA.
+- **Schedule:** a daily rebalance tick.
+- **Alerts and reports:**
+  - single-stock drawdown alerts;
+  - breakdown alerts;
+  - a weekly "Core vs SPY" comparison;
+  - a core watchlist and guidance (Gemini-assisted).
 
----
+### 7.2 Satellite — momentum (`satelliteService`, paper)
 
-## 11. Environment Variable Reference
+- **Rule:** each month, take the 300 most-traded non-fund stocks ($20 or more, with a full year of history). Hold the 10 with the best 12-month return, skipping the latest month. Equal weight, `SATELLITE_PCT` = 10% of the account.
+- **Why it's only a test:** the backtest's edge came from a few "rocket" stocks. Without each month's single best stock, it roughly matched SPY.
 
-Full list of variables (from `.env.example`):
+### 7.3 Options income (`optionsIncomeService`, paper)
 
-### Required (platform will not start correctly without these)
+- **Strategy:** sell cash-secured puts on quality $15–100 stocks, using Alpaca's free indicative quotes and delta.
+- **Sizing:** total collateral is capped by `OPTIONS_INCOME_MAX_COLLATERAL` ($30k). Assigned shares sit in the `options` sleeve (the wheel). It runs every scheduler tick.
+- **History:** position management never ran until a date-parse bug was fixed on 2026-10-26 (909826b).
+- **Roadmap:** CSP fixes, then 20 trades, then bull put spreads (defined risk).
+- **Current risk:** in the November selloff, 5 open short puts are down about $600. This is why the next step is defined-risk spreads.
+- **Data limits:** Alpaca's historical option bars start in February 2024, with no historical bid/ask or Greeks. The OPRA feed isn't signed, so historical bars return 403.
 
-| Variable | Example | Purpose |
-|----------|---------|---------|
-| `PORT` | `3001` | Backend API port |
-| `DB_HOST` | `localhost` | PostgreSQL host |
-| `DB_PORT` | `5432` | PostgreSQL port |
-| `DB_NAME` | `kiranrock_trading` | Database name |
-| `DB_USER` | `postgres` | DB username |
-| `DB_PASSWORD` | `your_password` | DB password |
-| `JWT_SECRET` | `64-char-hex-string` | JWT signing key |
+### 7.4 Bear side (`bearSideService`, paper, frozen)
 
-### Market Data & Broker
+Paper only, with margin allowed (`BEAR_ALLOW_MARGIN`). It activates only for `BEAR_SIDE_USER_IDS`.
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `DATA_PROVIDER` | `yahoo` | `yahoo` \| `alpaca` \| `polygon` |
-| `ALPACA_KEY_ID` | — | Alpaca API key |
-| `ALPACA_SECRET_KEY` | — | Alpaca API secret |
-| `ALPACA_PAPER` | `true` | `true`=paper, `false`=REAL MONEY |
-| `BROKER` | `simulated` | `simulated` \| `alpaca` |
-| `POLYGON_API_KEY` | — | Polygon.io key (if using Polygon) |
-| `BOT_ENABLED` | `true` | Master bot on/off switch |
-| `MAX_BOT_INVESTMENT_USD` | `5000` | Max total bot investment |
+- **Regime gate:**
+  - New entries need the bot's own regime to be BEAR, confirmed over 2 sessions.
+  - Entries are allowed 10:30–15:30 ET, once per day per leg.
+  - PANIC means hold only.
+  - Any BULL reading (`/^BULL/`) closes the book. 24 hours without BEAR also exits.
+  - A stale regime reading (missing SPY price, missing timestamp, or older than 30 minutes) means hold, with no entries.
+- **Legs:**
+  - **Hedge:** SH + PSQ, 10% of the account.
+  - **Shorts:** up to 5, 2% each, easy-to-borrow only. Entry checks:
+    - RSI 30 or more;
+    - at least 10 points weaker than SPY;
+    - over $50M traded per day;
+    - not up 8% or more today, and not up 4% or more on entry day;
+    - no short-sale restriction;
+    - at most 2 per sector;
+    - no special dividend or one over 1% due during the hold.
+  - **Short exits:** a GTC buy-stop at +8%, take-profit at −15%, maximum 21 days. If the stop can't be placed, the position is covered immediately.
+  - **Bear put spreads:** SPY/QQQ, at-the-money / −5%, 30–50 days to expiry, debit no more than 45% of width. They close short leg first.
+- **Budgets:**
+  - stop-based risk: 1% per position and 5% in total;
+  - gap stress (shorts +30%, market +5%): no more than 6% (`BEAR_MAX_GAP_RISK_PCT`);
+  - gross cap: 25%.
+- **Kill switch:** a latching halt of *new entries* on any position mismatch, unknown broker short, missing stop, or risk over cap. It never liquidates.
+  - **Resume:** `POST /api/paper-tests/bear/resume`. It re-reconciles first, refuses (409) on any problem, and logs every attempt in `bear_resume_log`.
+  - **Current state:** a TEST HALT was set on 2026-11-21 to prove it survives a restart. It is to be cleared by the Monday 11-23 validation.
+- **Monitoring:** hourly borrow re-checks, a daily dividend re-check, squeeze alerts (the stop is never widened), and a confirm-flat check after liquidation.
+- **Reporting:** P&L is reported as gross, adjusted, and economic (borrow assumed at 0.5% and 3%; borrow fees shown as "UNAVAILABLE", not zero). Dividends owed on shorts are deducted.
+- **Freeze:** no rule changes from c6e9926 until the assessment ends. Day 1 is 2026-11-24, Day 10 is 12-08, Day 25 is 12-30, Day 30 is 2027-01-07. The plan and formulas are in `docs/BEAR_SIDE_30_DAY_ASSESSMENT.md`, and the doc wins over the report.
 
-### AI / LLM
+### 7.5 Reversal-put shadow log (`reversalPutShadowService`, no orders)
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `ANTHROPIC_API_KEY` | — | Claude API (ORACLE verdicts) |
-| `CLAUDE_MODEL` | `claude-haiku-4-5-20251001` | Claude model name |
-| `GEMINI_API_KEY` | — | Google Gemini (PULSE sentiment) |
-| `GEMINI_MODEL` | `gemini-2.0-flash-lite` | Gemini model |
-| `HUGGINGFACE_API_KEY` | — | FinBERT / DistilBERT |
-| `OLLAMA_BASE_URL` | — | Local Ollama (e.g. `http://localhost:11434`) |
-| `OLLAMA_MODEL` | `llama3.2:3b` | Ollama model |
+- **Signal**, on 25 mega-caps:
+  - SPY at −0.5% or worse on the day;
+  - the stock opened +0.5% or higher, or traded +1.5% or higher, vs the prior close;
+  - it is now at least 3% below its high and below the prior close.
+- **What it records:**
+  - 4 puts per signal: near-term (5 or more days to expiry) and monthly (21–45 days), each at-the-money and about 5% out of the money;
+  - grades at the close, day 1 and day 3, priced ask→bid (realistic) and mid→mid.
+- **How it's judged:** by day, not by signal, since one market day can fire 15 of the 25 names. Days with 5 or more signals count as "broad", fewer as "isolated".
+- **Where results appear:** the weekly review item `reversal_puts`.
+- **Code safety:** the code contains no order calls, and a test enforces that.
 
-### News & Social Data
+### 7.6 Crypto (`cryptoTradingBot`, own process, paper)
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `NEWSAPI_KEY` | — | NewsAPI.org |
-| `ALPHA_VANTAGE_KEY` | — | Alpha Vantage data |
-| `FINNHUB_KEY` | — | Finnhub news |
-| `X_BEARER_TOKEN` | — | X/Twitter API v2 |
-| `REDDIT_CLIENT_ID` | — | Reddit OAuth client |
-| `REDDIT_SECRET` | — | Reddit OAuth secret |
-| `FRED_API_KEY` | — | FRED macro data |
+- **Rules:**
+  - 15 pairs; 5-minute cycle, 24/7.
+  - A broker-side stop sits on every position. A software backstop is confirmed against a fresh live trade before exiting (bad-tick protection).
+  - Take-profit; a stop-loss cooldown.
+  - Daily trade and loss limits; a per-account allocation.
+- **Records fix (2026-11-22, 222cdf5):** when the broker's stop had already sold, the "position already closed" path could borrow an older trade's sell price, and fees (0.25% each way) were ignored. Both are fixed, and all past rows were recomputed from broker orders, with the old values kept in `metadata.original`.
+- **Results (broker truth):** −$392 since 2026-08-30, of which $177 is fees. November: 0 winning trades out of 23. Not ready for live.
 
-### Notifications
+### 7.7 Blitz and extended hours
 
-| Variable | Purpose |
-|----------|---------|
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token |
-| `TELEGRAM_CHAT_ID` | Default Telegram chat ID |
-| `EMAIL_SERVICE` | `gmail` \| `outlook` |
-| `EMAIL_USER` | Sender email address |
-| `EMAIL_PASSWORD` | Gmail App Password |
-
-### Circuit Breakers
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `CIRCUIT_HALT_STREAK` | `5` | Consecutive losses → halt |
-| `CIRCUIT_REDUCE_STREAK` | `3` | Consecutive losses → reduce size |
-| `MAX_DRAWDOWN_PCT` | `15` | Portfolio drawdown % → halt |
-| `DATA_MAX_AGE_MS` | `120000` | Market data staleness threshold |
-
-### Redis
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `REDIS_URL` | `redis://localhost:6379` | Redis connection URL |
+- **Blitz** (`intradayTradingBot`): a small fixed list of liquid symbols, a momentum/volume score, a resting broker stop, and a software take-profit. It flattens before the close. Opt-in.
+- **Extended hours** (`extendedHoursTradingService`): an opt-in parallel path with a regime guard. Turned off for paper on 2026-10-17 after 146 trades with 30% winners (−$905).
 
 ---
 
-## 12. Start / Stop Procedure
+## 8. AI models and market data
 
-### Starting All Services
+### 8.1 AI
 
-```powershell
-# From C:\MyProject\KiranRock
-.\start.ps1
-```
+| Use | Model | Notes |
+|---|---|---|
+| ORACLE, nightly scan | Local `qwen3.8:27b` (Ollama) | CPU-only. Context capped at 16K. The model is RAM-heavy (it can hold about 20 of 31 GB) |
+| ORACLE, live cycles | Local `qwen2.5:7b-instruct` (`OLLAMA_MODEL_LIVE`) | About 4× faster. Live calls jump ahead of the batch scan in a priority queue |
+| ORACLE shadow | Gemini Flash-Lite | Answers the same live checks and is logged side by side (`oracle_shadow`). Trading still uses the local verdict; switching needs an approval |
+| PULSE (news sentiment + fraud/legal flags) | Gemini, local fallback | Law-firm ad headlines filtered (2026-11-04) |
+| Research agent, news labelling, mistake review, core guidance | Gemini (`GEMINI_MODEL` = gemini-3.5-flash-lite) | Budget-capped (news labelling ≤ $1/day) |
+| Daily/weekly briefings | Local model | |
 
-This script:
-1. Stops any existing KiranRock processes (by PID tracking)
-2. Starts **Backend API** (`node src/app.js`) on port 3001
-3. Waits 10 seconds for DB to connect
-4. Starts **Worker** (`node src/worker.js`) — all schedulers + bots
-5. Runs one-time **stock signal delivery** pass
-6. Starts **Frontend** (`next build` then `next start`) on port 3000
+- **Anthropic:** the Claude path in `oracleService` is only a fallback if Ollama is disabled. Ollama is primary whenever it is running.
+- **PROPHET** (earnings direction) showed no skill and is off in the scan.
 
-### Stopping
+### 8.2 Market and reference data
 
-Re-run `.\start.ps1` — it automatically stops existing processes first, or close the named terminal windows.
+| Source | Used for |
+|---|---|
+| **Alpaca** | Broker; quotes, bars (IEX feed); option chains (indicative); corporate actions (dividends); account activities |
+| **Polygon** | EOD grouped bars, ETF typing, SONAR fallback |
+| **Finnhub** | Fundamentals and market cap (CANSLIM, short interest), earnings calendar, insider transactions, news |
+| **Yahoo** | Fallback only. Heavily rate-limited (HTTP 429) and behind a circuit breaker |
+| **FRED** | Macro data. VIX fallback (lags by a day) |
+| **ATLAS proxies** | Global and regime inputs from Alpaca ETFs (Yahoo removed, 2026-11-05) |
+| **NewsAPI, Alpha Vantage, Reddit, X** | News and alternative data (optional) |
 
-### Manual Commands
-
-```powershell
-# Backend only
-cd backend ; node src/app.js
-
-# Worker only
-cd backend ; node src/worker.js
-
-# Frontend only
-cd frontend ; npm run build ; npm start
-
-# Run stock signals once
-cd backend ; npm run run:stock-signals
-
-# Run database migrations
-cd backend ; npm run migrate
-
-# Check backend health
-Invoke-WebRequest http://localhost:3001/health | Select-Object -Expand Content
-```
-
-### Process Architecture
-
-```
-start.ps1
-├── Terminal: KiranRock backend    → node src/app.js      (port 3001)
-├── Terminal: KiranRock worker     → node src/worker.js   (schedulers)
-├── Terminal: KiranRock delivery   → npm run:stock-signals (one-shot)
-└── Terminal: KiranRock frontend   → next start           (port 3000)
-```
-
-Each runs in its own named PowerShell terminal, tracked by PID in `.startup-status/`.
+**Data warehouse tables:**
+- `history_bars`: 3 years of daily bars, ~4,400 symbols, 3.3M rows. Used by every backtest.
+- `daily_bars`: EOD warehouse.
+- `daily_universe_analysis`: nightly scores since 2026-05-28.
+- Research archive: all-ticker news (about 1M rows) and insider filings.
 
 ---
 
-## Relationship Map (Venn-style)
+## 9. Research and the learning loop
 
-```
-╔══════════════════════════════════════════════════════════════════╗
-║                    KiranRock Platform                           ║
-║                                                                 ║
-║  ┌─────────────────────┐   ┌─────────────────────────────────┐ ║
-║  │   USER-FACING       │   │       AUTOMATED                 │ ║
-║  │   (Manual)          │   │       (AI Bots)                 │ ║
-║  │                     │   │                                 │ ║
-║  │  Next.js UI         │   │  AI Trading Bot                 │ ║
-║  │  Dashboard          │   │  Options Bot                    │ ║
-║  │  Charts             │   │  IST Pipeline                   │ ║
-║  │  Manual Trading     │◄─►│  News Monitor                   │ ║
-║  │  Backtest           │   │  Telegram Reports               │ ║
-║  │  Weekly Preds       │   │  Signal Snapshots               │ ║
-║  │  Profile & Alerts   │   │                                 │ ║
-║  └──────────┬──────────┘   └──────────────┬──────────────────┘ ║
-║             │                             │                     ║
-║             └──────────┬──────────────────┘                     ║
-║                        ▼                                        ║
-║           ┌─────────────────────────────┐                       ║
-║           │     SHARED CORE             │                       ║
-║           │  Express API  (port 3001)   │                       ║
-║           │  PostgreSQL   (port 5432)   │                       ║
-║           │  Redis        (port 6379)   │                       ║
-║           │  JWT Auth                   │                       ║
-║           │  brokerService (Alpaca)     │                       ║
-║           │  dataProvider  (Yahoo/Alpaca│                       ║
-║           └─────────────────────────────┘                       ║
-║                        ▼                                        ║
-║           ┌─────────────────────────────┐                       ║
-║           │    AI SCORING LAYERS        │                       ║
-║           │                             │                       ║
-║           │  ┌──────────┐ ┌──────────┐  │                       ║
-║           │  │Technical │ │External  │  │                       ║
-║           │  │Indicators│ │AI APIs   │  │                       ║
-║           │  │RSI,MACD  │ │Claude    │  │                       ║
-║           │  │Patterns  │ │Gemini    │  │                       ║
-║           │  │Volume    │ │HuggFace  │  │                       ║
-║           │  │CANSLIM   │ │FRED Macro│  │                       ║
-║           │  └──────────┘ └──────────┘  │                       ║
-║           │                             │                       ║
-║           │  ┌──────────┐ ┌──────────┐  │                       ║
-║           │  │Local ML  │ │Social/Alt│  │                       ║
-║           │  │EVOLVE    │ │Reddit    │  │                       ║
-║           │  │Ollama    │ │X/Twitter │  │                       ║
-║           │  │(optional)│ │NewsAPI   │  │                       ║
-║           │  └──────────┘ └──────────┘  │                       ║
-║           └─────────────────────────────┘                       ║
-╚══════════════════════════════════════════════════════════════════╝
-```
+The aim is to keep what works and cut what doesn't, with every test judged by fixed rules set before the result is seen. Nothing here trades. Results reach paper through promotion, and live only through approval.
+
+| System | What it answers | When |
+|---|---|---|
+| **Prediction check** (`predictionCheckService`) | Does the nightly score still predict 5-day returns? Measures rank correlation (ic), score-80+ group vs that night's average (spread80), and top 20 vs average. Alerts if 10 nights in a row turn negative | Weekdays 08:00 |
+| **Score validation** | Which scoring components predicted returns recently | Sat 10:00 |
+| **Market study** (`weeklyMarketStudyService`) | Exits and picking methods tested on *every* candidate scoring 80+, not just the ones bought | Sat 11:00 |
+| **Strategy review** (`weeklyStrategyReviewService`) | One rotating question per week: core, selection, size, options, satellite, bear, reversal_puts, exit, crypto, swing_vs_spy… | Sat 11:00 (in the market study message) |
+| **Research agent** | Gemini proposes new ideas from the week plus the lab's full memory. It only proposes | Sat 12:00 |
+| **Research Lab** (`researchLabService`) | Tests queued ideas on `history_bars` with costs, a split into two halves, and a false-discovery correction. Every result is kept for good | Sat 13:00 |
+| **Portfolio Lab** | Tests *how* to trade the nightly picks: slots, minimum score, sector cap, stop/trail/target, hold time, reserve | Sat 13:30 |
+| **Promotion** | Test methods vs control on the same days, then automatic promotion to paper | Sat 11:30 |
+| **Selection experiment** | Logs each test method's picks next to control every day | Daily |
+| **Shadow trades** | Rejected candidates scoring 85+ tracked forward: best and worst move, 5/10/20-day returns, regime at rejection | Daily, Friday summary |
+| **Missed opportunities** | STRONG BUY for days, moved 8%+, never bought anywhere | Daily 17:00 ET |
+| **Mistake review** | Labels each day's losses and missed winners; repeated patterns feed the agent | Weekdays 18:30 |
+| **Learning layers** | SAGE (score adjustments with a 30-day probation), LocalBrain (win rate by sector × pattern × regime), EVOLVE (price-bucket model). Per account; paper excluded from live | Nightly |
 
 ---
 
-*Document reflects codebase state as of May 18, 2026. All 6 PANTHEON spec files are deployed and syntax-verified. Server is running.*
+## 10. Reports, Telegram and the web portal
+
+### 10.1 Key reports
+
+All of these go to Telegram and are also kept on **/reports**:
+- **Broker scoreboard** (Sat 14:00 ET, `brokerScoreboardService`):
+  - realized P&L per strategy (swing, core, satellite, options, bear, crypto) over 7 days, 30 days, and all time, plus open P&L;
+  - built from broker fills, fees and dividends only;
+  - checked against real equity (paper within $4, kmadined to the dollar, on 2026-11-22).
+- **Saturday market study and strategy review**, **Research Lab**, **Portfolio Lab**, **Promotion check**.
+- **Accountability** (Fri): what the app cost to run (Gemini, data) vs what the live accounts gained.
+- **Weekly performance recap** (Sun), **weekend prep** (Sat), **daily summary** (16:15 weekdays), **pre-market alerts**.
+- **Macro briefing**: a cloud routine posts it to a protected backend endpoint (`MACRO_BRIEFING_INGEST_SECRET`). It feeds a position-size dampener.
+
+### 10.2 Portal pages (`frontend/app`)
+
+| Area | Pages |
+|---|---|
+| Trading | dashboard, portfolio, performance, ai-trading, swing-trading, intraday, scalping, crypto-trading, core-holdings, options-bot, options-chain |
+| Research and markets | signals, recommendations, weekly, universe, most-active, news, backtest, scenarios, analytics |
+| Oversight | **reports**, **lab** (admin), **paper-tests** (bear side, experiments), **live-readiness**, alerts |
+| Account | profile, login, admin, enquiry |
+
+### 10.3 API
+
+44 routers under `/api/*` (`backend/src/app.js`). The main groups are auth/profile, trading/ai-trading, portfolio/performance, signals/recommendations/weekly, options/options-bot, crypto-trading, core-holdings, approvals, paper-tests, reports, lab, and system.
+
+Health: `GET /health`, `/api/system/health-dashboard`, `/api/system/live-readiness`.
+
+---
+
+## 11. Operations
+
+### 11.1 Start and restart
+
+- **Always** run `start.ps1` as Administrator. It elevates itself, runs preflight, stops old processes in three passes, starts PM2 processes plus the frontend, and runs a startup signal pass.
+- **Never run `pm2` from a non-admin shell.** That spawns a stray PM2 daemon (EPERM issues).
+- **A restart during the nightly scan loses the rest of the scan.** Restart after it finishes (around 02:00–03:00 ET).
+- After a restart:
+  - confirm only one worker holds leadership;
+  - confirm `/health` is OK;
+  - confirm the Telegram "System Restarted" message arrived.
+
+### 11.2 Machine
+
+| Item | Detail |
+|---|---|
+| Power | Sleep set to Never on AC power (an outage happened when the PC slept on 2026-09-14). Use Ethernet; WiFi dropped before |
+| Windows Update | Active hours 9 AM–3 AM. Planned restarts at 5 AM |
+| Boot | A scheduled task auto-starts the app. cloudflared is delayed-auto with a restart policy. **Ollama and Kronos need a user sign-in** after a reboot. Check the 16K context setting |
+| Resources | `systemResourceService`: RAM, CPU, disk, event-loop lag and DB round-trip every minute; history in `system_resource_samples`; admin alerts on persistent breaches. DB timeouts have tracked RAM pressure from the LLM |
+| Backups | `pg_dump` every day at 07:00 ET, verified with `pg_restore --list`. 7 daily + 4 weekly copies on the PC; 4 + 4 in OneDrive (KiranRock-Backups). Telegram on failure |
+
+### 11.3 Tests
+
+- `cd backend; npx jest`: 742 tests in 113 suites on 2026-11-22. Run from `backend/`; running from the repo root picks up unrelated suites.
+- Jest doesn't load the worker entry point, so after edits also run `node --check src/worker.js`.
+
+---
+
+## 12. Configuration (environment variables)
+
+These are names only; the values live in `backend/.env` and are never committed.
+
+| Group | Variables |
+|---|---|
+| Server | `PORT`, `HOST`, `NODE_ENV`, `CORS_ORIGINS`, `FRONTEND_BASE_URL`, `JWT_SECRET` |
+| Database | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` |
+| Broker and data | `BROKER` (alpaca), `DATA_PROVIDER` (alpaca), `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY`, `ALPACA_PAPER`, `ALPACA_BASE_URL` (shared fallback; accounts normally use their own stored keys), `POLYGON_API_KEY`, `FINNHUB_KEY`/`FINNHUB_API_KEY`, `ALPHA_VANTAGE_KEY`, `NEWSAPI_KEY`, `FRED_API_KEY`, `X_*`, `REDDIT_*`, `HUGGINGFACE_API_KEY` |
+| AI | `OLLAMA_BASE_URL`, `OLLAMA_MODEL` (batch), `OLLAMA_MODEL_LIVE`, `OLLAMA_TIMEOUT_MS`, `ORACLE_MAX_PER_CYCLE`, `LIVE_ORACLE_CUTOFF_MS`, `LIVE_SCAN_CUTOFF_MS`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `ANTHROPIC_API_KEY`/`CLAUDE_MODEL` (fallback only) |
+| Universe | `HERMES_MIN_MARKET_CAP`, `HERMES_MIN_AVG_VOLUME`, `HERMES_MAX_STOCKS`, `COMPASS_LOOKBACK_DAYS`, `COMPASS_CACHE_TTL_MS` |
+| Risk | `BOT_ENABLED`, `MAX_BOT_INVESTMENT_USD`, `DAILY_LOSS_LIMIT_USD`, `WEEKLY_LOSS_LIMIT_USD`, `MIN_SHARPE_FOR_LIVE`, `ACTIVATION_GATES_ENFORCE` (false) |
+| Strategy opt-ins (account lists) | `SELECTION_EXPERIMENT_USER_IDS`, `OPTIONS_INCOME_USER_IDS`, `OPTIONS_INCOME_MAX_COLLATERAL`, `SATELLITE_USER_IDS`, `SATELLITE_PCT`, `SCAN_ROTATION_USER_IDS`, `BEAR_SIDE_USER_IDS`, `BEAR_ALLOW_MARGIN`, optional `BEAR_MAX_GAP_RISK_PCT`, `REVERSAL_SHADOW_USER_ID`, `BROKER_SCOREBOARD_USER_IDS`, `CRYPTO_FEE_RATE` |
+| Notifications | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (admin), `EMAIL_*`, `TWILIO_*`, `NOTIFY_WHATSAPP` |
+| Internal | `BOT_USERNAME`/`BOT_PASSWORD` (report jobs call the API), `MACRO_BRIEFING_INGEST_SECRET` |
+
+---
+
+## 13. What we have learned so far
+
+These findings come from our own data and drive current decisions. Each has a date and can be re-run.
+
+| Finding | Evidence |
+|---|---|
+| **The edge is the 80+ score group, not the ranking** | Rank within 80+ predicted nothing (10-17, 59 days). A learned ranker lost in 5 of 5 setups. Group vs night average: Sep +0.51%, Oct +0.49%, Nov +1.59% (5-day); the top 20 adds nothing (11-22) |
+| **Dollars lag per-trade returns** | kmadined: +1.01% per trade equal-weighted, but only +0.27% dollar-weighted; bigger positions did worse (10-31). Hence equal sizing |
+| **Idle cash was the biggest drag** | 26% capital use (08-15). Hence core holdings |
+| **No timing edge in dip buying or valuation filters** | Quality-dip study (10-26); P/S, P/B and margin filters (11-12) |
+| **Trailing stops beat fixed targets** | Market study and the 3-year replay (10-17 onward) |
+| **news_momentum entries lose** | Negative in every review since October; blocked on kmadined |
+| **Clustering hasn't cost us** | Correlation study (11-21): average pairwise correlation 0.13; worst days were market-wide |
+| **Crypto has no edge right now** | −$392 broker P&L; 0 winning trades out of 23 in November (11-22) |
+| **Component edges flip month to month** | Don't switch components on one week's validation result |
+
+---
+
+## 14. Known limitations and open items
+
+- **VIX data:** CBOE returns 403 and Yahoo returns 429, so the FRED fallback is a day behind.
+- **Swing vs SPY:** decision on 2026-12-19. If swing hasn't beaten SPY on the same capital, its money moves to core.
+- **Bear-side assessment:** Day 1 is 2026-11-24. The TEST HALT is cleared only after Monday's validation.
+- **Naked short puts on paper** lose in selloffs. Bull put spreads are the next step.
+- **Weekly AI buy list:** the timeout was raised from 5 to 15 minutes on 2026-11-22 after two failures.
+- **Records vs broker:** use the broker scoreboard. The bot's own tables have drifted before.
+- **Single machine:** everything (trading, local AI, database) shares one PC's RAM. Restarts during the scan, reboots, and network drops are the main operational risks.
+- **Old documents:** `PLATFORM_GUIDE.md`, `KiranRock_Trading_System_Documentation.md`, `FUNCTIONAL_OVERVIEW.md` and the other root-level guides are from June and out of date. This document and `PANTHEON_INTERNALS.md` are current.
+
+---
+
+## 15. Change history since June 2026
+
+| When | Change |
+|---|---|
+| Jun–Jul | Live pilot; over-deployment guard (06-16); stop-protection incident fixed (07-21); seven profit-drain bugs fixed (07-04) |
+| Aug | Profitability push (min score 88→75 on kmadined, later 85); Blitz duplicate-sell race fixed; crypto process added (08-28) |
+| Sep | Market calendar unified; shadow trades; candidate tie-break; per-account learning; fill and partial-fill fixes; duplicate-trade unique index |
+| Oct | Approvals and promotion; core holdings; satellite; options income; 3-year history; market study; jump guard; equal sizing; scan rotation; database backup; drawdown false-halt fix; cycle-relative live scan budget |
+| Nov 1–12 | ORACLE shadow; research lab and agent; portfolio lab; prediction check; resource monitor; loss-limit safeguards; VolumeGate pacing; PROPHET off in scan; Ollama locked to localhost; CANSLIM via Finnhub; ATLAS via Alpaca ETFs |
+| Nov 14–21 | Lab grading with costs; swing P&L records gap; **bear side** (paper) with kill switch, gap stress and 30-day plan; correlation study; reversal-put shadow log |
+| Nov 22 | Crypto records match the broker (222cdf5); broker scoreboard and buy-list timeout (416ae96); this document rewritten |

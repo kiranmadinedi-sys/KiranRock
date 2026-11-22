@@ -1706,6 +1706,7 @@ function startScheduler() {
         runWeeklyAccountability();         // Friday 16:20 ET: what the app cost to run vs what live accounts gained
         runDailyPredictionCheck();         // Weekdays 08:00 ET: does the nightly score still predict 5-day returns?
         runWeeklyPortfolioLab();           // Saturday 13:30 ET: slots / sizing / exits replayed on real nightly scores
+        runWeeklyBrokerScoreboard();       // Saturday 14:00 ET: P&L per strategy from the broker's fills only (read-only)
         runDailyInsiderSweep();            // Weekdays 17:00 ET: last 10 days of insider filings (feeds the 'insider' test arm)
         runPromotionAndReminders();        // Sat 11:30 ET promotion check; weekdays 9:00 ET approval reminders
         require('./satelliteService').runTick().catch(err =>
@@ -1968,6 +1969,23 @@ function runWeeklyPortfolioLab() {
     _portfolioLabRanDate = etDate;
     require('./portfolioLabService').runWeekly().catch(err =>
         console.error('[PortfolioLab] Weekly run error:', err.message));
+}
+
+// Saturday 14:00 ET — broker scoreboard (2026-11-22): P&L per strategy from Alpaca fills only,
+// with a check against real equity. Read-only. Admin Telegram + /reports.
+let _brokerScoreboardRanDate = null;
+function runWeeklyBrokerScoreboard() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', hour12: false,
+        year: 'numeric', month: '2-digit', day: '2-digit'
+    }).formatToParts(new Date());
+    const get = t => parts.find(p => p.type === t).value;
+    const etDate = `${get('year')}-${get('month')}-${get('day')}`;
+    if (get('weekday') !== 'Sat' || parseInt(get('hour'), 10) !== 14) return;
+    if (_brokerScoreboardRanDate === etDate) return;
+    _brokerScoreboardRanDate = etDate;
+    require('./brokerScoreboardService').runWeekly().catch(err =>
+        console.error('[BrokerScoreboard] Weekly run error:', err.message));
 }
 
 // Weekdays 17:00 ET — refresh the last 10 days of insider filings so tomorrow's 'insider'

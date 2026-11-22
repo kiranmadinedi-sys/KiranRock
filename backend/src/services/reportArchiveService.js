@@ -24,6 +24,7 @@ const KINDS = {
     research_lab: 'Research lab',
     portfolio_lab: 'Portfolio lab',
     prediction_check: 'Score edge check',
+    broker_scoreboard: 'Broker scoreboard (P&L per strategy from broker fills)',
     news_rescan: 'News rescan alert',
     telegram: 'All Telegram messages',
 };

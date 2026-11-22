@@ -45,7 +45,9 @@ async function login() {
 async function fetchPredictions(token, limit = 20) {
     const res = await axios.get(
         `${BASE_URL}/api/weekly/predictions?limit=${limit}&universe=TOP_200`,
-        { headers: { Authorization: `Bearer ${token}` }, timeout: 300000 }
+        // 15 min (was 5): a cold run analyses 200 stocks and took ~7 min on 2026-11-15 and
+        // 11-22, so the report gave up just before the answer arrived, two Sundays running.
+        { headers: { Authorization: `Bearer ${token}` }, timeout: 15 * 60 * 1000 }
     );
     return {
         picks:         (res.data?.topPicks || []).slice(0, limit),

@@ -280,28 +280,37 @@ async function sellCrypto(userId, symbol, { exitReason, scoreAtEntry }) {
         // stale_skip closures were off by $0.11-$0.11/unit (~$8-$26 of recorded
         // P&L) purely from using a stale cached price as a stand-in for a real
         // number that was one API call away the whole time.
+        //
+        // 2026-11-22: the lookup must only accept sells filled AFTER this position opened.
+        // It used to take "the newest filled sell among the last 5 closed orders", which
+        // sometimes was a sell from an OLDER trade — SOL bought 11-06 @ 89.78 really
+        // stopped out @ 87.93 (−$10) but was recorded at the 09-19 sell @ 112.59 (+$126.75).
+        // Labels are now plain: broker-stop-filled / <reason>-broker-fill / <reason>-estimated.
         let exitPrice = parseFloat(position.current_price || position.average_price) || 0;
         let exitTime = null;
+        let soldQty = null;
+        let label = `${exitReason}-estimated`;
         try {
             const { base, headers } = await _getAuth(userId);
-            const closedOrders = await axios.get(`${base}/orders`, {
-                headers, params: { status: 'closed', symbols: symbol, direction: 'desc', limit: 5 }
-            });
-            const realFill = closedOrders.data.find(o => o.side === 'sell' && o.status === 'filled' && o.filled_avg_price);
-            if (realFill) {
-                exitPrice = parseFloat(realFill.filled_avg_price);
-                exitTime = realFill.filled_at;
+            const fills = await realSellFillsSince(base, headers, symbol, position.opened_at);
+            if (fills.qty > 0) {
+                exitPrice = fills.avgPrice;
+                exitTime = fills.lastFilledAt;
+                soldQty = fills.qty;
+                label = fills.byStop ? 'broker-stop-filled' : `${exitReason}-broker-fill`;
             }
         } catch (lookupErr) {
             logger.debug('[CryptoBot] Could not fetch real closing fill, using cached price estimate', {
                 userId, symbol, error: lookupErr.message
             });
         }
+        const buyQty = await _buyFilledQty(userId, position.broker_order_id);
 
-        await cryptoDb.closePosition(userId, symbol, {
-            exitPrice, exitTime, exitReason: `${exitReason}_stale_skip`, scoreAtEntry
-        }).catch(() => {});
-        return null;
+        // Return the recorded trade (it used to return null), so the ghost-reconcile caller's
+        // "losing ghost close → stop-loss cooldown" check can actually see the loss.
+        return cryptoDb.closePosition(userId, symbol, {
+            exitPrice, exitTime, exitReason: label, scoreAtEntry, buyQty, soldQty,
+        }).catch(() => null);
     }
     // 2026-09-20: never sell more than Alpaca actually holds. crypto_positions.quantity is
     // stored at 8 decimals, but Alpaca reports up to 9 — SHIB/USD's DB qty (96359707.06155586)
@@ -336,8 +345,12 @@ async function sellCrypto(userId, symbol, { exitReason, scoreAtEntry }) {
     }
 
     const exitPrice = filled.status === 'filled' ? parseFloat(filled.filled_avg_price) : parseFloat(position.current_price || position.average_price);
+    const soldQty = filled.status === 'filled' ? parseFloat(filled.filled_qty) : null;
+    const buyQty = await _buyFilledQty(userId, position.broker_order_id);
 
-    const trade = await cryptoDb.closePosition(userId, symbol, { exitPrice, exitReason, scoreAtEntry });
+    const trade = await cryptoDb.closePosition(userId, symbol, {
+        exitPrice, exitReason: filled.status === 'filled' ? exitReason : `${exitReason}-estimated`, scoreAtEntry, buyQty, soldQty,
+    });
     logger.info('[CryptoBot] Position closed', { userId, symbol, exitPrice, exitReason, pnl: trade?.pnl });
     return trade;
 }
@@ -353,9 +366,44 @@ async function sellCrypto(userId, symbol, { exitReason, scoreAtEntry }) {
  * stopped out cleanly at Alpaca, price just never drifted back down to (or
  * up past) either recorded threshold again.
  */
+/**
+ * Every real sell fill for this pair since the position opened (2026-11-22). Includes
+ * partial fills on orders that were later cancelled. Returns the quantity-weighted
+ * average price, the total quantity, the last fill time, and whether a broker-side stop
+ * did the selling.
+ */
+async function realSellFillsSince(base, headers, symbol, openedAt) {
+    const since = new Date(openedAt).getTime();
+    if (!Number.isFinite(since)) return { qty: 0 };
+    const r = await axios.get(`${base}/orders`, {
+        headers, params: { status: 'closed', symbols: symbol, after: new Date(since - 60000).toISOString(), direction: 'asc', limit: 100 }
+    });
+    const sells = (r.data || []).filter(o => o.side === 'sell' && parseFloat(o.filled_qty) > 0 && o.filled_avg_price
+        && o.filled_at && new Date(o.filled_at).getTime() >= since);
+    const qty = sells.reduce((a, o) => a + parseFloat(o.filled_qty), 0);
+    if (!(qty > 0)) return { qty: 0 };
+    const notional = sells.reduce((a, o) => a + parseFloat(o.filled_qty) * parseFloat(o.filled_avg_price), 0);
+    return {
+        qty, avgPrice: notional / qty,
+        lastFilledAt: sells.map(o => o.filled_at).sort().pop(),
+        byStop: sells.some(o => /stop/.test(o.type || o.order_type || '')),
+    };
+}
+
+/** The quantity the entry order really bought (before Alpaca takes its fee in coin). Null if unknown. */
+async function _buyFilledQty(userId, orderId) {
+    if (!orderId) return null;
+    try {
+        const { base, headers } = await _getAuth(userId);
+        const o = (await axios.get(`${base}/orders/${orderId}`, { headers })).data;
+        const q = parseFloat(o?.filled_qty);
+        return q > 0 ? q : null;
+    } catch (_) { return null; }
+}
+
 async function hasRealPosition(userId, symbol) {
     const realPosition = await brokerService.getPosition(userId, _toPositionSymbol(symbol));
     return !!realPosition && parseFloat(realPosition.qty) > 0;
 }
 
-module.exports = { buyCrypto, sellCrypto, hasRealPosition, _truncDecimals };
+module.exports = { buyCrypto, sellCrypto, hasRealPosition, realSellFillsSince, _truncDecimals };

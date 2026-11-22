@@ -238,15 +238,38 @@ async function updatePositionPrice(userId, symbol, currentPrice) {
     );
 }
 
-async function closePosition(userId, symbol, { exitPrice, exitTime, exitReason, scoreAtEntry }) {
+/**
+ * Net P&L the way the broker really settles it (2026-11-22). Alpaca crypto takes 0.25% of
+ * the bought coin on entry (so the cost is the full bought qty × price) and 0.25% of the
+ * USD proceeds on exit. The old formula, (exit − entry) × held qty, ignored both fees.
+ */
+const feeRate = () => {
+    const v = parseFloat(process.env.CRYPTO_FEE_RATE);
+    return Number.isFinite(v) && v >= 0 && v < 0.05 ? v : 0.0025;
+};
+function netPnl({ entryPrice, exitPrice, heldQty, buyQty, soldQty, rate = feeRate() }) {
+    const bought = buyQty > 0 ? buyQty : heldQty;
+    const sold = soldQty > 0 ? soldQty : heldQty;
+    const cost = entryPrice * bought;
+    const gross = exitPrice * sold;
+    const exitFee = gross * rate;
+    const pnl = gross - exitFee - cost;
+    return {
+        pnl, pnlPercent: cost > 0 ? (pnl / cost) * 100 : 0,
+        meta: { cost: +cost.toFixed(4), proceeds: +gross.toFixed(4), exitFeeUsd: +exitFee.toFixed(4),
+            entryFeeUsd: +((bought - heldQty) * entryPrice).toFixed(4), buyQty: bought, soldQty: sold, feeRate: rate,
+            grossPnlNoFees: +((exitPrice - entryPrice) * heldQty).toFixed(4) },
+    };
+}
+
+async function closePosition(userId, symbol, { exitPrice, exitTime, exitReason, scoreAtEntry, buyQty, soldQty }) {
     await ensureCryptoSchema();
     const pos = await getPosition(userId, symbol);
     if (!pos) return null;
 
-    const pnl = (exitPrice - parseFloat(pos.average_price)) * parseFloat(pos.quantity);
-    const pnlPercent = parseFloat(pos.average_price) > 0
-        ? ((exitPrice - parseFloat(pos.average_price)) / parseFloat(pos.average_price)) * 100
-        : 0;
+    const { pnl, pnlPercent, meta } = netPnl({
+        entryPrice: parseFloat(pos.average_price), exitPrice, heldQty: parseFloat(pos.quantity), buyQty, soldQty,
+    });
 
     await query('DELETE FROM crypto_positions WHERE user_id = $1 AND symbol = $2', [userId, symbol.toUpperCase()]);
 
@@ -259,10 +282,11 @@ async function closePosition(userId, symbol, { exitPrice, exitTime, exitReason, 
     // actually happened the prior morning.
     const trade = await query(
         `INSERT INTO crypto_trades
-            (user_id, symbol, side, quantity, entry_price, exit_price, entry_time, exit_time, pnl, pnl_percent, exit_reason, score_at_entry)
-         VALUES ($1, $2, 'sell', $3, $4, $5, $6, COALESCE($11, NOW()), $7, $8, $9, $10)
+            (user_id, symbol, side, quantity, entry_price, exit_price, entry_time, exit_time, pnl, pnl_percent, exit_reason, score_at_entry, metadata)
+         VALUES ($1, $2, 'sell', $3, $4, $5, $6, COALESCE($11, NOW()), $7, $8, $9, $10, $12)
          RETURNING *`,
-        [userId, symbol.toUpperCase(), pos.quantity, pos.average_price, exitPrice, pos.opened_at, pnl, pnlPercent, exitReason || 'manual', scoreAtEntry || null, exitTime || null]
+        [userId, symbol.toUpperCase(), pos.quantity, pos.average_price, exitPrice, pos.opened_at, pnl, pnlPercent, exitReason || 'manual', scoreAtEntry || null, exitTime || null,
+            JSON.stringify({ ...meta, buyOrderId: pos.broker_order_id || null })]
     );
     return trade.rows[0];
 }
@@ -381,6 +405,7 @@ module.exports = {
     openPosition,
     updatePositionPrice,
     closePosition,
+    netPnl,
     getTradeHistory,
     getTodayTradeCount,
     getTodayPnl,

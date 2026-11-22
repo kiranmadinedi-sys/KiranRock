@@ -44,7 +44,7 @@ describe('cryptoBrokerService.sellCrypto — stale_skip real-fill lookup', () =>
     test('uses the real Alpaca fill price/time when a matching closed sell order is found', async () => {
         axios.get.mockResolvedValue({
             data: [
-                { side: 'sell', status: 'filled', filled_avg_price: '6.86783', filled_at: '2026-09-08T13:40:45.416884Z' },
+                { side: 'sell', status: 'filled', type: 'stop_limit', filled_qty: '71.2', filled_avg_price: '6.86783', filled_at: '2026-09-08T13:40:45.416884Z' },
             ],
         });
 
@@ -53,7 +53,8 @@ describe('cryptoBrokerService.sellCrypto — stale_skip real-fill lookup', () =>
         expect(cryptoDb.closePosition).toHaveBeenCalledWith('user-1', 'UNI/USD', expect.objectContaining({
             exitPrice: 6.86783,
             exitTime: '2026-09-08T13:40:45.416884Z',
-            exitReason: 'stop-loss-backstop_stale_skip',
+            exitReason: 'broker-stop-filled',
+            soldQty: 71.2,
         }));
     });
 
@@ -65,7 +66,7 @@ describe('cryptoBrokerService.sellCrypto — stale_skip real-fill lookup', () =>
         expect(cryptoDb.closePosition).toHaveBeenCalledWith('user-1', 'UNI/USD', expect.objectContaining({
             exitPrice: 6.75745, // position.current_price fallback
             exitTime: null,
-            exitReason: 'stop-loss-backstop_stale_skip',
+            exitReason: 'stop-loss-backstop-estimated',
         }));
     });
 
@@ -74,11 +75,11 @@ describe('cryptoBrokerService.sellCrypto — stale_skip real-fill lookup', () =>
 
         await expect(
             cryptoBrokerService.sellCrypto('user-1', 'UNI/USD', { exitReason: 'stop-loss-backstop' })
-        ).resolves.toBeNull();
+        ).resolves.toEqual({});
 
         expect(cryptoDb.closePosition).toHaveBeenCalledWith('user-1', 'UNI/USD', expect.objectContaining({
             exitPrice: 6.75745,
-            exitReason: 'stop-loss-backstop_stale_skip',
+            exitReason: 'stop-loss-backstop-estimated',
         }));
     });
 
@@ -98,7 +99,7 @@ describe('cryptoBrokerService.sellCrypto — stale_skip real-fill lookup', () =>
         await cryptoBrokerService.sellCrypto('user-1', 'UNI/USD', { exitReason: 'stop-loss-backstop' });
 
         expect(cryptoDb.closePosition).toHaveBeenCalledWith('user-1', 'UNI/USD', expect.objectContaining({
-            exitReason: 'stop-loss-backstop_stale_skip',
+            exitReason: 'stop-loss-backstop-estimated',
         }));
         // Never attempted a real sell order for the dust quantity.
         expect(axios.post).not.toHaveBeenCalled();

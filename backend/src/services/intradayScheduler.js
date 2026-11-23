@@ -20,11 +20,12 @@ const { logger } = require('../utils/logger');
 // Was a local weekday+time-only reimplementation — never checked NYSE holidays.
 // See utils/marketCalendar.js for why this changed (found 2026-09-06, the eve
 // of Labor Day 2026-09-07 — this would have believed the market was open).
-const { isMarketOpen } = require('../utils/marketCalendar');
+const { isMarketOpen, isEarlyClose } = require('../utils/marketCalendar');
 
 let schedulerActive = false;
 let tickJob = null;
 let flattenJob = null;
+let earlyFlattenJob = null;
 
 async function runTick() {
     if (!isMarketOpen()) return;
@@ -93,16 +94,20 @@ function startScheduler() {
     // positions were held overnight. Repeats are safe: forceFlattenUser only sells what's
     // still open, sellIntraday re-checks the real broker position and cancels resting
     // sells first, and each sell runs under the per-user lock — once flat, later runs no-op.
-    flattenJob = cron.schedule('50-58 15 * * 1-5', runForceFlatten, { timezone: 'America/New_York' });
+    // Early-close days (1:00 PM ET) flatten 12:50-12:58 instead; the 15:50 run would be after
+    // the close and its sells would sit until the next session (calendar fix 2026-11-22).
+    flattenJob = cron.schedule('50-58 15 * * 1-5', () => { if (!isEarlyClose()) return runForceFlatten(); }, { timezone: 'America/New_York' });
+    earlyFlattenJob = cron.schedule('50-58 12 * * 1-5', () => { if (isEarlyClose()) return runForceFlatten(); }, { timezone: 'America/New_York' });
 
     schedulerActive = true;
-    logger.info('[Blitz] Scheduler started — 1-min cycle during market hours, EOD flatten 15:50-15:58 ET (retries each minute)');
+    logger.info('[Blitz] Scheduler started — 1-min cycle during market hours, EOD flatten 15:50-15:58 ET (12:50 on early-close days, retries each minute)');
 }
 
 function stopScheduler() {
     if (!schedulerActive) return;
     if (tickJob) { tickJob.stop(); tickJob = null; }
     if (flattenJob) { flattenJob.stop(); flattenJob = null; }
+    if (earlyFlattenJob) { earlyFlattenJob.stop(); earlyFlattenJob = null; }
     schedulerActive = false;
     logger.info('[Blitz] Scheduler stopped');
 }

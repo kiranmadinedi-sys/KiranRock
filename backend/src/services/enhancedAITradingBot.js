@@ -299,7 +299,7 @@ const NFP_RELEASE_DATES = new Set([
 // list, only weekday + time-of-day. Now the single source of truth every consumer
 // should import instead of re-deriving. First trading day AFTER a holiday has
 // lower liquidity, wider spreads, and gap-fill volatility — raise minBuyScore +5.
-const { NYSE_HOLIDAYS, isMarketOpen: _isMarketOpenCalendar } = require('../utils/marketCalendar');
+const { NYSE_HOLIDAYS, isMarketOpen: _isMarketOpenCalendar, marketCloseMinutesET } = require('../utils/marketCalendar');
 
 /**
  * Returns true if today is the first trading day back after a market holiday.
@@ -4015,11 +4015,12 @@ async function executeAutonomousTrading(userId) {
         // Entering at 3:30 PM ET leaves no time to confirm the setup holds overnight.
         const _etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
         const _etMinutes = _etNow.getHours() * 60 + _etNow.getMinutes();
-        const _isLateDay = _etMinutes >= 15 * 60 + 30; // 3:30 PM ET
+        // 30 min before the close: 3:30 PM ET, or 12:30 PM on early-close days (2026-11-22).
+        const _isLateDay = _etMinutes >= marketCloseMinutesET() - 30;
         if (_isLateDay) {
-            logger.info('[SwingGuard] After 3:30 PM ET — skipping new entries, managing exits only', { userId });
+            logger.info('[SwingGuard] Last 30 min before close — skipping new entries, managing exits only', { userId });
             await manageExistingPositions(userId);
-            return { success: true, message: 'After 3:30 PM ET — swing-only mode, exits managed' };
+            return { success: true, message: 'Last 30 min before close — swing-only mode, exits managed' };
         }
 
         // Opening volatility block: no new entries in the first 30 min of the session.

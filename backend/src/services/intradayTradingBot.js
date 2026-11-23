@@ -58,6 +58,7 @@ function scoreCandidate(quote) {
 // flatten had already run — so those were held overnight on ANY day. Found 2026-10-06: a
 // fresh 102-share NOK entry at 15:59 ET. 15:45 leaves the 15:50 flatten window to close
 // whatever's left.
+// Early-close days (1:00 PM) move it to 12:45 with the 12:50 flatten (calendar fix 2026-11-22).
 const ENTRY_CUTOFF_ET_MIN = 15 * 60 + 45;
 function _pastEntryCutoff(now = new Date()) {
     const parts = new Intl.DateTimeFormat('en-US', {
@@ -65,7 +66,9 @@ function _pastEntryCutoff(now = new Date()) {
     }).formatToParts(now);
     const h = parseInt(parts.find(p => p.type === 'hour').value, 10);
     const m = parseInt(parts.find(p => p.type === 'minute').value, 10);
-    return h * 60 + m >= ENTRY_CUTOFF_ET_MIN;
+    const { marketCloseMinutesET } = require('../utils/marketCalendar');
+    const cutoff = ENTRY_CUTOFF_ET_MIN - (16 * 60 - marketCloseMinutesET(now));
+    return h * 60 + m >= cutoff;
 }
 
 async function scanForUser(user) {

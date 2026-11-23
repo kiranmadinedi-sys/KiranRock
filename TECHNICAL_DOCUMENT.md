@@ -135,7 +135,7 @@ In order:
 
 - **One Alpaca rate limiter** across all schedulers (`dataProvider`), plus a 60-second quote cache.
 - **Circuit breakers** on Yahoo and Gemini, so one failing caller can't starve the others.
-- **Shared market calendar** (`utils/marketCalendar.js`): holidays and half days. This is the only "is the market open" implementation.
+- **Shared market calendar** (`utils/marketCalendar.js`): holidays and 1:00 PM early-close days (`NYSE_EARLY_CLOSES`, added 2026-11-22; update both lists each January). This is the only "is the market open" implementation for trading. On early-close days the near-close windows shift with the close: swing, bear and options-income entries stop at 12:30 PM, Blitz entries stop at 12:45 PM, and Blitz flattens from 12:50 PM. A few scan and monitoring helpers still use their own 9:30–4:00 check; they place no orders.
 - **Report archive** (`report_archive`). Every Telegram message is stored, so the portal's /reports page shows everything Telegram shows.
 
 ---
@@ -502,7 +502,7 @@ Health: `GET /health`, `/api/system/health-dashboard`, `/api/system/live-readine
 
 ### 11.3 Tests
 
-- `cd backend; npx jest`: 742 tests in 113 suites on 2026-11-22. Run from `backend/`; running from the repo root picks up unrelated suites.
+- `cd backend; npx jest`: 747 tests in 114 suites on 2026-11-22. Run from `backend/`; running from the repo root picks up unrelated suites.
 - Jest doesn't load the worker entry point, so after edits also run `node --check src/worker.js`.
 
 ---
@@ -566,4 +566,4 @@ These findings come from our own data and drive current decisions. Each has a da
 | Oct | Approvals and promotion; core holdings; satellite; options income; 3-year history; market study; jump guard; equal sizing; scan rotation; database backup; drawdown false-halt fix; cycle-relative live scan budget |
 | Nov 1–12 | ORACLE shadow; research lab and agent; portfolio lab; prediction check; resource monitor; loss-limit safeguards; VolumeGate pacing; PROPHET off in scan; Ollama locked to localhost; CANSLIM via Finnhub; ATLAS via Alpaca ETFs |
 | Nov 14–21 | Lab grading with costs; swing P&L records gap; **bear side** (paper) with kill switch, gap stress and 30-day plan; correlation study; reversal-put shadow log |
-| Nov 22 | Crypto records match the broker (222cdf5); broker scoreboard and buy-list timeout (416ae96); this document rewritten |
+| Nov 22 | Crypto records match the broker (222cdf5); broker scoreboard and buy-list timeout (416ae96); this document rewritten; 1:00 PM early-close days added to the market calendar |

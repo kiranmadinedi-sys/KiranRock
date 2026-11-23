@@ -537,22 +537,23 @@ const _enteredOn = new Set();
 async function runTick(now = new Date()) {
     const ids = userIds();
     if (!ids.length) return;
-    const { isMarketOpen } = require('../utils/marketCalendar');
+    const { isMarketOpen, marketCloseMinutesET } = require('../utils/marketCalendar');
     if (!isMarketOpen(now)) return;
     const et = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hour12: false }).formatToParts(now);
     const etMin = parseInt(et.find(p => p.type === 'hour').value, 10) * 60 + parseInt(et.find(p => p.type === 'minute').value, 10);
+    const closeMin = marketCloseMinutesET(now); // 960, or 780 on early-close days
     for (const id of ids) {
         try {
             await runManagement(id, now);
             const key = `${id}:${etToday(now)}`;
-            if (etMin >= 11 * 60 && etMin < 15 * 60 + 30 && !_enteredOn.has(key)) {
+            if (etMin >= 11 * 60 && etMin < closeMin - 30 && !_enteredOn.has(key)) {
                 _enteredOn.add(key);
                 const r = await runEntries(id, now);
                 if (r.opened?.length) logger.info('[OptionsIncome] Entries', { userId: id, opened: r.opened });
             }
             // Data only: one IV snapshot a day (first configured paper user), 3:30–3:55 PM ET.
             const ivKey = `iv:${etToday(now)}`;
-            if (id === ids[0] && etMin >= 15 * 60 + 30 && etMin < 15 * 60 + 55 && !_enteredOn.has(ivKey)) {
+            if (id === ids[0] && etMin >= closeMin - 30 && etMin < closeMin - 5 && !_enteredOn.has(ivKey)) {
                 _enteredOn.add(ivKey);
                 await recordIvSnapshot(id, now).catch(err => logger.warn('[OptionsIncome] IV snapshot failed (non-blocking)', { error: err.message }));
             }

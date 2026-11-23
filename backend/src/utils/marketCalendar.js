@@ -31,6 +31,31 @@ const NYSE_HOLIDAYS = new Set([
     '2026-09-07', '2026-11-26', '2026-12-25',
 ]);
 
+// Early-close days: NYSE closes at 1:00 PM ET (found 2026-11-22: before this, every weekday
+// was treated as open until 4:00 PM, so on 11-27 the bots would have kept trading for three
+// hours after the real close — orders queued to Monday's open, EOD jobs on a closed market,
+// Blitz flattening at 3:50 PM after the close). Update each January with the holiday list.
+const NYSE_EARLY_CLOSES = new Set([
+    '2025-07-03', '2025-11-28', '2025-12-24',
+    '2026-11-27', '2026-12-24',
+]);
+const REGULAR_CLOSE_MIN = 16 * 60;
+const EARLY_CLOSE_MIN = 13 * 60;
+
+function _etDateKey(date) {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(date); // YYYY-MM-DD
+}
+
+/** True if `date` (default now) is a listed 1:00 PM early-close day, ET calendar day. */
+function isEarlyClose(date = new Date()) {
+    return NYSE_EARLY_CLOSES.has(_etDateKey(date));
+}
+
+/** Today's close in minutes after ET midnight: 780 (1:00 PM) on early-close days, else 960. */
+function marketCloseMinutesET(date = new Date()) {
+    return isEarlyClose(date) ? EARLY_CLOSE_MIN : REGULAR_CLOSE_MIN;
+}
+
 /** Returns true if `date` (default now) falls on a listed NYSE holiday, ET calendar day. */
 function isTradingHoliday(date = new Date()) {
     const etDateKey = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(date); // YYYY-MM-DD
@@ -38,7 +63,7 @@ function isTradingHoliday(date = new Date()) {
 }
 
 /**
- * Is NYSE open right now? Weekday + 9:30 AM-4:00 PM ET + not a listed holiday.
+ * Is NYSE open right now? Weekday + 9:30 AM-4:00 PM ET (1:00 PM on early-close days) + not a listed holiday.
  * Uses Intl.DateTimeFormat so DST (EDT=UTC-4, EST=UTC-5) is handled automatically.
  */
 function isMarketOpen(date = new Date()) {
@@ -54,9 +79,9 @@ function isMarketOpen(date = new Date()) {
     const parts    = etTimeFormatter.formatToParts(date);
     const etHour   = parseInt(parts.find(p => p.type === 'hour').value, 10);
     const etMinute = parseInt(parts.find(p => p.type === 'minute').value, 10);
-    const etTime   = etHour + etMinute / 60;
+    const etMin    = etHour * 60 + etMinute;
 
-    return etTime >= 9.5 && etTime < 16;
+    return etMin >= 9 * 60 + 30 && etMin < marketCloseMinutesET(date);
 }
 
 /**
@@ -75,4 +100,7 @@ if (isTradingHoliday()) {
     logger.info('[MarketCalendar] Today is a listed NYSE holiday — isMarketOpen() will return false all day');
 }
 
-module.exports = { isMarketOpen, isTradingHoliday, previousTradingDay, NYSE_HOLIDAYS };
+module.exports = {
+    isMarketOpen, isTradingHoliday, isEarlyClose, marketCloseMinutesET, previousTradingDay,
+    NYSE_HOLIDAYS, NYSE_EARLY_CLOSES,
+};

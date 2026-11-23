@@ -1490,11 +1490,12 @@ const _enteredOn = new Set();
 async function runTick(now = new Date()) {
     const ids = userIds();
     if (!ids.length) return;
-    const { isMarketOpen } = require('../utils/marketCalendar');
+    const { isMarketOpen, marketCloseMinutesET } = require('../utils/marketCalendar');
     if (!isMarketOpen(now)) return;
     const et = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: 'numeric', hour12: false }).formatToParts(now);
     const etMin = parseInt(et.find(p => p.type === 'hour').value, 10) * 60 + parseInt(et.find(p => p.type === 'minute').value, 10);
-    const allowEntries = etMin >= 10 * 60 + 30 && etMin < 15 * 60 + 30;
+    // Entries stop 30 min before the close (12:30 PM on early-close days — calendar fix 2026-11-22).
+    const allowEntries = etMin >= 10 * 60 + 30 && etMin < marketCloseMinutesET(now) - 30;
     for (const id of ids) {
         try {
             const r = await runForUser(id, now, { allowEntries });

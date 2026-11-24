@@ -485,6 +485,7 @@ Health: `GET /health`, `/api/system/health-dashboard`, `/api/system/live-readine
 - **Always** run `start.ps1` as Administrator. It elevates itself, runs preflight, stops old processes in three passes, starts PM2 processes plus the frontend, and runs a startup signal pass.
 - **Never run `pm2` from a non-admin shell.** That spawns a stray PM2 daemon (EPERM issues).
 - **A restart during the nightly scan loses the rest of the scan.** Restart after it finishes (around 02:00–03:00 ET).
+- **Weekend restarts:** a restart on a Saturday or Sunday builds the smaller weekend stock list (~1,350 qualified, vs ~2,750 on weekdays). Before 2026-11-23 that list stayed cached into Monday, and Monday's scan covered 752 stocks. Now a weekend- or holiday-built list is never reused on a trading day, and the "scan complete" check falls back to the latest weekday build's size instead of a fixed 420.
 - After a restart:
   - confirm only one worker holds leadership;
   - confirm `/health` is OK;
@@ -502,7 +503,7 @@ Health: `GET /health`, `/api/system/health-dashboard`, `/api/system/live-readine
 
 ### 11.3 Tests
 
-- `cd backend; npx jest`: 747 tests in 114 suites on 2026-11-22. Run from `backend/`; running from the repo root picks up unrelated suites.
+- `cd backend; npx jest`: 757 tests in 115 suites on 2026-11-23. Run from `backend/`; running from the repo root picks up unrelated suites.
 - Jest doesn't load the worker entry point, so after edits also run `node --check src/worker.js`.
 
 ---
@@ -567,3 +568,4 @@ These findings come from our own data and drive current decisions. Each has a da
 | Nov 1–12 | ORACLE shadow; research lab and agent; portfolio lab; prediction check; resource monitor; loss-limit safeguards; VolumeGate pacing; PROPHET off in scan; Ollama locked to localhost; CANSLIM via Finnhub; ATLAS via Alpaca ETFs |
 | Nov 14–21 | Lab grading with costs; swing P&L records gap; **bear side** (paper) with kill switch, gap stress and 30-day plan; correlation study; reversal-put shadow log |
 | Nov 22 | Crypto records match the broker (222cdf5); broker scoreboard and buy-list timeout (416ae96); this document rewritten; 1:00 PM early-close days added to the market calendar |
+| Nov 23 | Weekend-built stock list no longer reused on a trading day; 15:45 ET cleanup cancels unfilled buys in every account (was the paper account only) and never records an order still open at the broker as cancelled; sells wait until cancelled orders release the shares (was a fixed pause) |

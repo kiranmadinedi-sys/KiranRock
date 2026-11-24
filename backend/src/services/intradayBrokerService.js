@@ -202,14 +202,25 @@ async function sellIntraday(userId, symbol, { exitReason, scoreAtEntry }) {
         for (const o of openOrders) {
             if (o.side === 'sell') await brokerService.cancelOrder(userId, o.id).catch(() => {});
         }
-        if (openOrders.some(o => o.side === 'sell')) await new Promise(r => setTimeout(r, 1500));
+        // Wait for the cancel to actually release the shares (was a fixed 1.5s — the 2026-11-23
+        // EOD flatten of NVDA got 403 "insufficient qty" while the stop was still cancelling).
+        if (openOrders.some(o => o.side === 'sell')) {
+            await brokerService.waitForSharesReleased(base.replace(/\/v2$/, ''), headers, symbol, sellQty);
+        }
     } catch (cancelErr) {
         logger.warn('[Blitz] Could not cancel resting stop before sell', { userId, symbol, err: cancelErr.message });
     }
 
-    const order = await axios.post(`${base}/orders`, {
-        symbol, qty: String(sellQty), side: 'sell', type: 'market', time_in_force: 'day'
-    }, { headers });
+    const sellBody = { symbol, qty: String(sellQty), side: 'sell', type: 'market', time_in_force: 'day' };
+    let order;
+    try {
+        order = await axios.post(`${base}/orders`, sellBody, { headers });
+    } catch (firstErr) {
+        if (!brokerService.isHeldQtyRejection(firstErr)) throw firstErr;
+        logger.warn('[Blitz] Sell rejected — shares still held by a cancelling stop; retrying once', { userId, symbol });
+        await new Promise(r => setTimeout(r, 3000));
+        order = await axios.post(`${base}/orders`, sellBody, { headers });
+    }
 
     let filled = order.data;
     for (let i = 0; i < 5 && filled.status !== 'filled'; i++) {

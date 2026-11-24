@@ -1122,16 +1122,9 @@ function _effectiveScanDay(etHour, etDate) {
 }
 
 /** Real target universe size for a date, from the same source the scan itself uses to build its candidate list. */
+// Falls back to the latest weekday build when the date has none (2026-11-23 fix).
 async function _getTargetUniverseSize(etDate) {
-    try {
-        const { rows } = await query(
-            `SELECT COUNT(*) AS n FROM hermes_symbol_log WHERE universe_date = $1 AND passed = true AND (tier != 1 OR tier IS NULL)`,
-            [etDate]
-        );
-        return parseInt(rows[0]?.n || 0, 10);
-    } catch {
-        return 0;
-    }
+    return require('./marketScreenerService').getScanTargetSize(etDate);
 }
 
 async function runNightlyScanTrigger() {

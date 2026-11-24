@@ -26,7 +26,28 @@ const TIER5_SPECULATIVE = [
 // Cache for screened stocks (refresh daily)
 let cachedStockUniverse = null;
 let lastScreenTime = null;
+let cachedUniverseDate = null; // ET date the cached list was built for
 const CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
+
+/**
+ * A list built on a weekend or holiday is much smaller (~1,350 qualified vs ~13,400 on a
+ * weekday — found 2026-11-23). It must not be reused on a trading day: the owner's Sunday
+ * 21:17 restart built a weekend list, the 24h cache carried it through Monday, and Monday's
+ * nightly scan covered 752 symbols instead of ~2,750 with no build of its own to fall back on.
+ */
+function _isCacheValid(now = Date.now(), todayET = _todayET()) {
+    if (!cachedStockUniverse || !lastScreenTime || now - lastScreenTime >= CACHE_DURATION) return false;
+    if (cachedUniverseDate && cachedUniverseDate !== todayET) {
+        const { isTradingHoliday } = require('../utils/marketCalendar');
+        const isTradingDay = (d) => {
+            const dt = new Date(`${d}T12:00:00Z`);
+            const dow = dt.getUTCDay();
+            return dow !== 0 && dow !== 6 && !isTradingHoliday(new Date(`${d}T17:00:00Z`));
+        };
+        if (!isTradingDay(cachedUniverseDate) && isTradingDay(todayET)) return false;
+    }
+    return true;
+}
 // In-flight build, shared by every concurrent caller instead of each starting its own.
 // Without this, a build slower than the calling interval (istPipelineScheduler alone
 // calls getStockUniverse() from 3 places inside its own 60-second loop) means every
@@ -280,7 +301,7 @@ async function getVelocitySymbols() {
  */
 async function getStockUniverse() {
     // Return cache if still valid
-    if (cachedStockUniverse && lastScreenTime && (Date.now() - lastScreenTime < CACHE_DURATION)) {
+    if (_isCacheValid()) {
         console.log(`[Market Screener] Returning cached universe (${cachedStockUniverse.length} stocks)`);
         return cachedStockUniverse;
     }
@@ -545,6 +566,7 @@ async function _buildStockUniverse() {
         const velocityCount = selected.filter(s => s.isVelocity).length;
         cachedStockUniverse = selected;
         lastScreenTime = Date.now();
+        cachedUniverseDate = universeDate;
         console.log(
             `[HERMES] ✓ Universe: ${selected.length} stocks | ` +
             `${selected.length - velocityCount} static + ${velocityCount} velocity breakouts | ` +
@@ -822,6 +844,7 @@ function passesQuickFilter(stock) {
 function refreshCache() {
     cachedStockUniverse = null;
     lastScreenTime = null;
+    cachedUniverseDate = null;
     console.log('[Market Screener] Cache cleared, will refresh on next request');
 }
 
@@ -962,7 +985,40 @@ async function loadRealAvgVolumes(symbols, deps = {}) {
     }
 }
 
+/**
+ * How many symbols a complete nightly scan for `etDate` should cover (qualified, non-ETF).
+ * Uses that date's own HERMES log; if the date has none (no build that day — e.g. the
+ * Monday after a weekend restart, 2026-11-23), falls back to the most recent WEEKDAY
+ * build on or before it, never a weekend one (weekend builds qualify ~1,350, not ~2,750).
+ * Before this, callers fell back to a fixed 420 and accepted a 752-symbol scan as complete.
+ */
+async function getScanTargetSize(etDate, deps = {}) {
+    const runQuery = deps.query || require('../config/database').query;
+    const count = async (d) => parseInt((await runQuery(
+        `SELECT COUNT(*) AS n FROM hermes_symbol_log WHERE universe_date = $1 AND passed = true AND (tier != 1 OR tier IS NULL)`,
+        [d])).rows[0]?.n || 0, 10);
+    try {
+        const own = await count(etDate);
+        if (own > 0) return own;
+        const prev = await runQuery(
+            `SELECT universe_date::text AS d FROM hermes_build_status
+             WHERE universe_date <= $1::date AND EXTRACT(DOW FROM universe_date) NOT IN (0, 6)
+             ORDER BY universe_date DESC LIMIT 1`, [etDate]);
+        return prev.rows[0]?.d ? await count(prev.rows[0].d) : 0;
+    } catch {
+        return 0;
+    }
+}
+
+/** Test hook: seed the in-memory cache. */
+function _setCacheForTest({ list, builtAt, universeDate }) {
+    cachedStockUniverse = list; lastScreenTime = builtAt; cachedUniverseDate = universeDate;
+}
+
 module.exports = {
+    getScanTargetSize,
+    _isCacheValid,
+    _setCacheForTest,
     loadRealAvgVolumes, // exported 2026-09-21 for testability
     dropInactiveTickers, // exported 2026-09-20 for testability
     getStockUniverse,

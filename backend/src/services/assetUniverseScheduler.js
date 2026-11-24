@@ -239,11 +239,8 @@ const CATCHUP_THRESHOLD_FALLBACK = 420; // only if hermes_symbol_log has no targ
 
 /** Rows needed for a scan date to count as complete: 90% of that day's HERMES target. */
 async function _scanCompleteThreshold(scanDate) {
-    const { query } = require('../config/database');
-    const target = parseInt((await query(
-        `SELECT COUNT(*) AS n FROM hermes_symbol_log WHERE universe_date = $1 AND passed = true AND (tier != 1 OR tier IS NULL)`,
-        [scanDate]
-    ).catch(() => ({ rows: [{ n: 0 }] }))).rows[0]?.n || 0, 10);
+    // Falls back to the latest weekday build's target when the date has none (2026-11-23 fix).
+    const target = await require('./marketScreenerService').getScanTargetSize(scanDate);
     return target > 0 ? Math.round(target * CATCHUP_COMPLETION_RATIO) : CATCHUP_THRESHOLD_FALLBACK;
 }
 

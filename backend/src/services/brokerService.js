@@ -867,6 +867,34 @@ const alpacaBroker = (() => {
         };
     }
 
+    /** True for Alpaca's "shares are held by other orders" sell rejection (403 / 40310000). */
+    function _isHeldQtyRejection(err) {
+        const status = err?.response?.status || err?.statusCode || err?.status;
+        const text = `${err?.message || ''} ${JSON.stringify(err?.response?.data || '')}`;
+        return status === 403 || /40310000|insufficient qty|held_for_orders/i.test(text);
+    }
+
+    /**
+     * Poll the position until `qty_available` covers the sell (cancels finished), up to
+     * `maxMs`. Returns true once released, false on timeout — the caller sells either way.
+     */
+    async function _waitForSharesReleased(baseUrl, headers, symbol, quantity, { maxMs = 15000, stepMs = 500, deps = {} } = {}) {
+        const axios = deps.axios || require('axios');
+        const sleep = deps.sleep || (ms => new Promise(r => setTimeout(r, ms)));
+        const need = Math.abs(parseFloat(quantity)) || 0;
+        const tries = Math.max(1, Math.ceil(maxMs / stepMs));
+        for (let i = 0; i < tries; i++) {
+            await sleep(stepMs);
+            try {
+                const { data: pos } = await axios.get(`${baseUrl}/v2/positions/${encodeURIComponent(symbol)}`, { headers, timeout: 5000 });
+                const avail = Math.abs(parseFloat(pos.qty_available ?? pos.qty) || 0);
+                if (avail + 1e-9 >= need) return true;
+            } catch (_) { /* transient — keep polling */ }
+        }
+        logger.warn('[Broker:Alpaca] Shares not released before sell — submitting anyway', { symbol, quantity, waitedMs: tries * stepMs });
+        return false;
+    }
+
     async function sellMarket(userId, symbol, quantity, meta = {}) {
         // Missing userId here (found alongside the 2026-08-07 duplicate-order fix) meant two
         // different users selling the same symbol for the same reason on the same day shared
@@ -900,8 +928,12 @@ const alpacaBroker = (() => {
                 logger.info('[Broker:Alpaca] Cancelled open order before sell', { symbol, orderId: o.id, type: o.type, status: o.status });
             }
             if (openOrders.length > 0) {
-                // Brief pause for Alpaca to release the held shares
-                await new Promise(r => setTimeout(r, 2000));
+                // Wait until Alpaca actually releases the shares. A fixed 2s pause was not
+                // always enough: cancelling a bracket's take-profit also cancels its held stop
+                // leg, and while both sit in pending_cancel the sell is rejected with 403
+                // "insufficient qty available" — paper PHG (exit then suppressed 40 min) and the
+                // paper Blitz NVDA EOD flatten, both 2026-11-23.
+                await _waitForSharesReleased(baseUrl, headers, symbol, quantity);
             }
         } catch (cancelErr) {
             logger.warn('[Broker:Alpaca] Could not cancel open orders before sell', { symbol, err: cancelErr.message });
@@ -916,15 +948,24 @@ const alpacaBroker = (() => {
         const sellPrice = parseFloat(((sellQuote?.price || 0) * 0.995).toFixed(2));
 
         let order;
+        const _sellParams = {
+            symbol,
+            qty:           quantity,
+            side:          'sell',
+            type:          sellPrice > 0 ? 'limit' : 'market',
+            ...(sellPrice > 0 ? { limit_price: sellPrice } : {}),
+            time_in_force: 'day'
+        };
         try {
-            order = await client.createOrder({
-                symbol,
-                qty:           quantity,
-                side:          'sell',
-                type:          sellPrice > 0 ? 'limit' : 'market',
-                ...(sellPrice > 0 ? { limit_price: sellPrice } : {}),
-                time_in_force: 'day'
-            });
+            try {
+                order = await client.createOrder(_sellParams);
+            } catch (firstErr) {
+                // Shares still held by a cancel that hasn't finished — wait once more and retry.
+                if (!_isHeldQtyRejection(firstErr)) throw firstErr;
+                logger.warn('[Broker:Alpaca] Sell rejected — shares still held by cancelling orders; retrying once', { symbol, err: firstErr.message });
+                await new Promise(r => setTimeout(r, 3000));
+                order = await client.createOrder(_sellParams);
+            }
         } catch (orderErr) {
             await logOrderState(idemKey, userId, symbol, 'FAILED', 'CREATED', {
                 broker: isPaper ? 'alpaca-paper' : 'alpaca-live',
@@ -1257,7 +1298,7 @@ const alpacaBroker = (() => {
         return events;
     }
 
-    return { buyMarket, buyBracket, buyFractional, buyLimitExtendedHours, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, getNetDeposits, getDepositActivities, getRecentActivity, placeStopOrder, cancelOrder, name: 'Alpaca Markets' };
+    return { buyMarket, buyBracket, buyFractional, buyLimitExtendedHours, sellMarket, getAccountInfo, getPositions, getOpenOrders, getPosition, getNetDeposits, getDepositActivities, getRecentActivity, placeStopOrder, cancelOrder, getClientForUser, _waitForSharesReleased, _isHeldQtyRejection, name: 'Alpaca Markets' };
 })();
 
 // ─── ACTIVE BROKER SELECTION ─────────────────────────────────────────────────
@@ -1346,7 +1387,8 @@ module.exports = {
      * Spec: "Cancel remainder before close. Journal as complete."
      *
      * Runs at 15:45 ET (15 mins before NYSE close).
-     * For Alpaca: cancels all open orders via API then journals each.
+     * For Alpaca: cancels unfilled non-crypto buy orders in every trading account (deduped
+     * by API key), then journals stale audit rows — skipping any order still open at a broker.
      * For simulated: journals any SUBMITTED/PARTIALLY_FILLED rows in order_audit_log.
      *
      * @returns {{ canceled: number, journaled: number }}
@@ -1354,46 +1396,76 @@ module.exports = {
     async eodCancelPartialFills() {
         const canceled  = [];
         const journaled = [];
+        // Order ids still open at a broker after the sweep — never journal these as CANCELED.
+        const stillOpen = new Set();
+        let sweepComplete = BROKER !== 'alpaca';
 
         if (BROKER === 'alpaca') {
-            // ── Alpaca: cancel all open orders via broker API ──────────────────
+            // ── Alpaca: cancel unfilled buys in EVERY trading account ──────────
+            // Was a single client built from .env — the shared paper account only — while the
+            // journal step below marked every user's stale order CANCELED. Found 2026-11-23:
+            // kmadined's unfilled RHP GTC bracket buy stayed live at the broker overnight
+            // while the DB said it was cancelled.
+            let accounts = [];
             try {
-                const alpacaClient = (() => {
-                    const Alpaca = require('@alpacahq/alpaca-trade-api');
-                    return new Alpaca({
-                        keyId:     process.env.ALPACA_KEY_ID,
-                        secretKey: process.env.ALPACA_SECRET_KEY,
-                        paper:     process.env.ALPACA_PAPER !== 'false'
-                    });
-                })();
-
-                const openOrders = await alpacaClient.getOrders({ status: 'open', limit: 100 });
-                for (const order of openOrders) {
-                    // NEVER cancel protective sell-side orders (stop-loss, trailing stop, take-profit).
-                    // Canceling stops leaves positions naked overnight — a gap-down can wipe months of gains.
-                    // Only cancel unfilled BUY orders that will become stale after market close.
-                    const isSellSide = order.side === 'sell';
-                    const isStopType = order.type === 'stop' || order.type === 'stop_limit' || order.type === 'trailing_stop';
-                    if (isSellSide || isStopType) {
-                        logger.info('[ARROW-EOD] Preserving protective order — not canceling', {
-                            orderId: order.id, symbol: order.symbol, side: order.side, type: order.type
-                        });
-                        continue;
-                    }
+                const res = await query(`SELECT id FROM users WHERE ai_trading_enabled = true OR alpaca_key_id IS NOT NULL ORDER BY id`);
+                const seenKeys = new Set();
+                const userDb = require('./userDatabaseService');
+                for (const { id } of res.rows) {
                     try {
-                        await alpacaClient.cancelOrder(order.id);
-                        canceled.push(order.id);
-                        logger.info('[ARROW-EOD] Canceled unfilled buy order', {
-                            orderId: order.id, symbol: order.symbol, qty: order.qty
-                        });
-                    } catch (cancelErr) {
-                        logger.warn('[ARROW-EOD] Could not cancel order — may have filled', {
-                            orderId: order.id, err: cancelErr.message
-                        });
-                    }
+                        const creds = await userDb.getUserAlpacaCredentials(id);
+                        if (!creds.keyId || seenKeys.has(creds.keyId)) continue; // users on the shared .env keys = one account
+                        seenKeys.add(creds.keyId);
+                        accounts.push(String(id));
+                    } catch (_) { /* no keys — nothing to sweep */ }
                 }
+                sweepComplete = true;
             } catch (err) {
-                logger.warn('[ARROW-EOD] Alpaca cancel-all failed', { err: err.message });
+                logger.warn('[ARROW-EOD] Could not list trading accounts', { err: err.message });
+            }
+
+            for (const userId of accounts) {
+                try {
+                    const { client: alpacaClient } = await alpacaBroker.getClientForUser(userId);
+                    const openOrders = await alpacaClient.getOrders({ status: 'open', limit: 500 });
+                    for (const order of openOrders) {
+                        // NEVER cancel protective sell-side orders (stop-loss, trailing stop, take-profit).
+                        // Canceling stops leaves positions naked overnight — a gap-down can wipe months of gains.
+                        // Only cancel unfilled BUY orders that will become stale after market close.
+                        const isSellSide = order.side === 'sell';
+                        const isStopType = order.type === 'stop' || order.type === 'stop_limit' || order.type === 'trailing_stop';
+                        // Crypto trades 24/7 — a resting crypto buy is not stale at the stock close.
+                        const isCrypto = order.asset_class === 'crypto' || String(order.symbol || '').includes('/');
+                        if (isSellSide || isStopType || isCrypto) {
+                            logger.info('[ARROW-EOD] Preserving order — not canceling', {
+                                userId, orderId: order.id, symbol: order.symbol, side: order.side, type: order.type
+                            });
+                            continue;
+                        }
+                        try {
+                            await alpacaClient.cancelOrder(order.id);
+                            canceled.push(order.id);
+                            logger.info('[ARROW-EOD] Canceled unfilled buy order', {
+                                userId, orderId: order.id, symbol: order.symbol, qty: order.qty
+                            });
+                        } catch (cancelErr) {
+                            stillOpen.add(order.id);
+                            logger.warn('[ARROW-EOD] Could not cancel order — may have filled', {
+                                userId, orderId: order.id, err: cancelErr.message
+                            });
+                        }
+                    }
+                    // Everything this account still shows open (protective legs, crypto, failed
+                    // cancels) must not be journaled as CANCELED below.
+                    const after = await alpacaClient.getOrders({ status: 'open', limit: 500 }).catch(() => openOrders);
+                    for (const o of after) {
+                        // A cancel just accepted is pending_cancel — it is going away, so let it journal.
+                        if (o.status !== 'pending_cancel') stillOpen.add(o.id);
+                    }
+                } catch (err) {
+                    sweepComplete = false;
+                    logger.warn('[ARROW-EOD] Alpaca sweep failed for account', { userId, err: err.message });
+                }
             }
         }
 
@@ -1409,6 +1481,17 @@ module.exports = {
             );
 
             for (const row of staleRes.rows) {
+                // Still live at the broker → it was NOT cancelled; recording CANCELED would
+                // make the DB disagree with the broker (the 2026-11-23 RHP case).
+                if (row.broker_order_id && stillOpen.has(row.broker_order_id)) {
+                    logger.warn('[ARROW-EOD] Order still open at broker — not journaling as CANCELED', {
+                        key: row.idempotency_key, symbol: row.symbol, orderId: row.broker_order_id
+                    });
+                    continue;
+                }
+                // If any account's sweep failed we can't see its open orders — then only journal
+                // orders this sweep itself cancelled (plus rows with no broker order at all).
+                if (!sweepComplete && row.broker_order_id && !canceled.includes(row.broker_order_id)) continue;
                 const eodKey = row.idempotency_key + ':arrow_eod';
                 // Idempotency: skip if already journaled
                 const exists = await query(
@@ -1533,6 +1616,10 @@ module.exports = {
                         activeBroker.cancelOrder
                             ? activeBroker.cancelOrder(userId, orderId)
                             : Promise.resolve(null),
+
+    /** Wait for cancelled orders to release a position's shares before selling (2026-11-23). */
+    waitForSharesReleased: (...args) => alpacaBroker._waitForSharesReleased(...args),
+    isHeldQtyRejection:    (err) => alpacaBroker._isHeldQtyRejection(err),
 
     /**
      * Fetch total deposits and withdrawals from Alpaca account activities.

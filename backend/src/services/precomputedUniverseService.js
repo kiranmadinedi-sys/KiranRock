@@ -318,7 +318,9 @@ async function getExclusionSummary(date) {
                 CASE
                     WHEN metadata->>'skipCode' IS NOT NULL
                         THEN metadata->>'skipCode'
+                    -- 'BUY / score 65' starts with BUY (no leading space) — was falling to 'error'
                     WHEN exclusion_reason ILIKE '%STRONG BUY%' OR exclusion_reason ILIKE '% BUY%'
+                         OR exclusion_reason ILIKE 'BUY%'
                         THEN 'score_borderline'
                     WHEN exclusion_reason ILIKE '%HOLD%' OR exclusion_reason ILIKE '%SELL%'
                         THEN 'weak_signal'

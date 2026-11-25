@@ -1472,12 +1472,22 @@ module.exports = {
         // ── Journal stale SUBMITTED / PARTIALLY_FILLED rows in audit log ──────
         // (applies to both simulated and alpaca — catches anything missed)
         try {
+            // 2026-11-24: take each order's LATEST row first, then keep it only if that latest
+            // state is still pending. Filtering on state before DISTINCT ON picked the old
+            // SUBMITTED row of orders that had since FILLED/CLOSED and journaled them as
+            // CANCELED (~120 false rows in 30 days, e.g. kmadined CLOI/GME/USFD sells).
+            // Older than 7 days was already handled by earlier daily runs.
             const staleRes = await query(
-                `SELECT DISTINCT ON (idempotency_key) idempotency_key, user_id, symbol, quantity, broker_order_id
-                 FROM order_audit_log
-                 WHERE state IN ('SUBMITTED', 'PENDING_FILL', 'PARTIALLY_FILLED')
-                   AND created_at < NOW() - INTERVAL '30 minutes'
-                 ORDER BY idempotency_key, created_at DESC`
+                `SELECT idempotency_key, user_id, symbol, quantity, broker_order_id
+                 FROM (
+                     SELECT DISTINCT ON (idempotency_key) idempotency_key, user_id, symbol, quantity,
+                            broker_order_id, state, created_at
+                     FROM order_audit_log
+                     WHERE created_at > NOW() - INTERVAL '7 days'
+                     ORDER BY idempotency_key, created_at DESC
+                 ) latest
+                 WHERE latest.state IN ('SUBMITTED', 'PENDING_FILL', 'PARTIALLY_FILLED')
+                   AND latest.created_at < NOW() - INTERVAL '30 minutes'`
             );
 
             for (const row of staleRes.rows) {

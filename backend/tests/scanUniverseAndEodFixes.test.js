@@ -101,6 +101,16 @@ describe('15:45 ET cleanup — every account, and no false CANCELED rows', () =>
         expect(journaledKeys.some(k => k.startsWith('SOL:paper'))).toBe(false); // still open → not CANCELED
     });
 
+    test('stale-order lookup judges each order by its LATEST row (filled sells are not CANCELED)', async () => {
+        await brokerService.eodCancelPartialFills();
+        const db = require('../src/config/database');
+        const sql = db.query.mock.calls.map(c => c[0]).find(s => /DISTINCT ON \(idempotency_key\)/.test(s));
+        // the pending-state filter must sit OUTSIDE the DISTINCT ON subquery
+        const inner = sql.slice(sql.indexOf('DISTINCT ON'), sql.indexOf(') latest'));
+        expect(inner).not.toMatch(/state IN/);
+        expect(sql.slice(sql.indexOf(') latest'))).toMatch(/latest\.state IN \('SUBMITTED', 'PENDING_FILL', 'PARTIALLY_FILLED'\)/);
+    });
+
     test('a failed cancel keeps the order out of the CANCELED journal', async () => {
         clients.kLive.cancelOrder.mockRejectedValue(new Error('order is not cancelable'));
         clients.kLive.getOrders.mockReset()

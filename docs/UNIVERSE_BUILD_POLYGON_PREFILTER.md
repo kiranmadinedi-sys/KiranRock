@@ -1,6 +1,8 @@
 # Universe build: Polygon first, Yahoo as backup
 
-Status: REVISED after cold-read review — 2026-11-25. Nothing implemented yet. Live-affecting → owner approval required before `on`.
+Status: IMPLEMENTED in shadow mode — 2026-11-25 (owner approved shadow build). `on` still requires owner approval after 3–5 shadow days.
+
+Implementation: `src/services/universePrefilterService.js`; hooks in `marketScreenerService._buildStockUniverse`, `dynamicUniverseService.buildPreMarketCache`, `eodIngestionService.runEodIngestion`; migration `20261125_universe_prefilter`; backfill `scripts/backfillMarketDailyVolume.js`; tests `tests/universePrefilter.test.js` (shadow output proven identical to off). Holiday builds are never reused by Blitz.
 
 ## 1. Problem
 

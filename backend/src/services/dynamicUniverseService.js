@@ -304,11 +304,60 @@ async function buildPreMarketCache() {
         );
         const alpacaSnapMap = await _batchAlpacaSnapshots(dbCandidates);
 
+        // Reuse the last completed HERMES build (docs/UNIVERSE_BUILD_POLYGON_PREFILTER.md §3.3).
+        // Fails open: any error or no recent build → every symbol goes to Yahoo as before.
+        // 'shadow' (default): the Yahoo path below runs unchanged for ALL symbols; the cached
+        // list is only built afterwards for comparison. 'on': Yahoo only for misses/ETFs/velocity.
+        let pfSvc = null, pfMode = 'off', hermesCache = { date: null, map: new Map() };
+        const cacheDecisions = new Map(); // symbol → 'hit' | 'reject' | 'miss'
+        try {
+            pfSvc  = require('./universePrefilterService');
+            pfMode = pfSvc.mode();
+            if (pfMode !== 'off') {
+                hermesCache = await pfSvc.loadHermesCache(_todayET());
+                if (hermesCache.date) {
+                    for (const s of allSymbols) {
+                        if (TIER1_ETFS.has(s) || velocitySymbols.has(s)) continue; // always live-quoted
+                        cacheDecisions.set(s, pfSvc.classifyCached(hermesCache.map.get(s)));
+                    }
+                }
+                logger.info('[DynamicUniverse] HERMES cache', { mode: pfMode, buildDate: hermesCache.date, rows: hermesCache.map.size });
+            }
+        } catch (err) {
+            logger.warn('[DynamicUniverse] HERMES cache unavailable — full Yahoo build', { error: err.message });
+            pfMode = 'off'; hermesCache = { date: null, map: new Map() }; cacheDecisions.clear();
+        }
+        // Stocks built from the cached HERMES rows (shadow AND on). Built BEFORE the Yahoo loop so
+        // that in 'on' mode any failure here sends every symbol to Yahoo (fail open).
+        const byTierThenRS = (a, b) => (a.tier !== b.tier ? a.tier - b.tier : b.rsScore - a.rsScore);
+        let cacheQualified = null;
+        if (hermesCache.date) {
+            try {
+                const hitSyms = [...cacheDecisions].filter(([, d]) => d === 'hit').map(([s]) => s);
+                const live = await _batchAlpacaSnapshots(hitSyms); // live PRICE only — never IEX volume
+                const built = [];
+                for (const s of hitSyms) {
+                    const stock = pfSvc.stockFromCache(s, hermesCache.map.get(s), live.get(s)?.price ?? null);
+                    if (stock.marketCap < MIN_MARKET_CAP || stock.avgVolume < MIN_AVG_VOLUME) continue;
+                    if (!passesQuickFilter(stock)) continue;
+                    built.push(stock);
+                }
+                cacheQualified = built;
+            } catch (err) {
+                logger.warn('[DynamicUniverse] Cached build failed — full Yahoo build', { error: err.message });
+                cacheQualified = null;
+            }
+        }
+        const useCache = pfMode === 'on' && !!hermesCache.date && Array.isArray(cacheQualified);
+        const yahooSymbols = useCache
+            ? allSymbols.filter(s => { const d = cacheDecisions.get(s); return d === undefined || d === 'miss'; })
+            : allSymbols;
+
         const qualified = [];
         let dbHits = 0, yahooFetches = 0;
 
-        for (let i = 0; i < allSymbols.length; i += BATCH_SIZE) {
-            const batch = allSymbols.slice(i, i + BATCH_SIZE);
+        for (let i = 0; i < yahooSymbols.length; i += BATCH_SIZE) {
+            const batch = yahooSymbols.slice(i, i + BATCH_SIZE);
             let batchYahooCalls = 0;
             const results = await Promise.allSettled(
                 batch.map(async (symbol) => {
@@ -419,20 +468,49 @@ async function buildPreMarketCache() {
             });
 
             // Only delay when this batch had actual Yahoo fetches (DB-only batches need no rate-limit pause)
-            if (i + BATCH_SIZE < allSymbols.length && batchYahooCalls > 0) {
+            if (i + BATCH_SIZE < yahooSymbols.length && batchYahooCalls > 0) {
                 await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
             }
         }
 
         logger.info('[DynamicUniverse] Quote resolution complete', { dbHits, yahooFetches });
 
+        if (useCache) qualified.push(...cacheQualified);
+
         // Sort: tier first (ETFs → mega-caps → velocity), then RS score
-        qualified.sort((a, b) => {
-            if (a.tier !== b.tier) return a.tier - b.tier;
-            return b.rsScore - a.rsScore;
-        });
+        qualified.sort(byTierThenRS);
 
         const capped = qualified.slice(0, MAX_STOCKS);
+
+        if (pfMode === 'shadow' && hermesCache.date && cacheQualified) {
+            try {
+                // What 'on' would have produced: Yahoo results for symbols it would still quote,
+                // plus the cached stocks — sorted and capped the same way.
+                const quotedAnyway = qualified.filter(s => { const d = cacheDecisions.get(s.symbol); return d === undefined || d === 'miss'; });
+                const hypo = [...quotedAnyway, ...cacheQualified].sort(byTierThenRS).slice(0, MAX_STOCKS);
+                const yahooList = capped.map(s => s.symbol), cacheList = hypo.map(s => s.symbol);
+                // Agreement only on symbols Yahoo passed and the cache would have decided.
+                const cachePassed = new Set(cacheQualified.map(s => s.symbol));
+                const decidedYahooPass = qualified.filter(s => ['hit', 'reject'].includes(cacheDecisions.get(s.symbol)));
+                const agreed = decidedYahooPass.filter(s => cachePassed.has(s.symbol)).length;
+                const counts = { hit: 0, reject: 0, miss: 0 };
+                for (const d of cacheDecisions.values()) counts[d]++;
+                const summary = {
+                    buildDate: hermesCache.date, decisions: counts,
+                    yahooCallsIfOn: allSymbols.length - counts.hit - counts.reject,
+                    yahooCallsNow: yahooFetches,
+                    jaccard400: +pfSvc.jaccard(yahooList, cacheList).toFixed(4),
+                    top100Overlap: +pfSvc.topOverlap(yahooList, cacheList, 100).toFixed(4),
+                    agreementOnYahooPasses: decidedYahooPass.length ? +(agreed / decidedYahooPass.length).toFixed(4) : null,
+                    onlyInYahoo: yahooList.filter(s => !cacheList.includes(s)).slice(0, 40),
+                    onlyInCache: cacheList.filter(s => !yahooList.includes(s)).slice(0, 40),
+                };
+                logger.info('[DynamicUniverse] Prefilter shadow comparison', summary);
+                pfSvc.recordShadow(_todayET(), 'blitz', summary).catch(() => {});
+            } catch (err) {
+                logger.warn('[DynamicUniverse] Shadow comparison failed (non-fatal)', { error: err.message });
+            }
+        }
 
         _universeCache = capped;
         _cacheDate     = _todayET();

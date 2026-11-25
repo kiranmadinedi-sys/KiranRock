@@ -503,7 +503,7 @@ Health: `GET /health`, `/api/system/health-dashboard`, `/api/system/live-readine
 
 ### 11.3 Tests
 
-- `cd backend; npx jest`: 758 tests in 115 suites on 2026-11-24. Run from `backend/`; running from the repo root picks up unrelated suites.
+- `cd backend; npx jest`: 775 tests (3 todo) in 116 suites on 2026-11-25. Run from `backend/`; running from the repo root picks up unrelated suites.
 - Jest doesn't load the worker entry point, so after edits also run `node --check src/worker.js`.
 
 ---
@@ -518,7 +518,7 @@ These are names only; the values live in `backend/.env` and are never committed.
 | Database | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` |
 | Broker and data | `BROKER` (alpaca), `DATA_PROVIDER` (alpaca), `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY`, `ALPACA_PAPER`, `ALPACA_BASE_URL` (shared fallback; accounts normally use their own stored keys), `POLYGON_API_KEY`, `FINNHUB_KEY`/`FINNHUB_API_KEY`, `ALPHA_VANTAGE_KEY`, `NEWSAPI_KEY`, `FRED_API_KEY`, `X_*`, `REDDIT_*`, `HUGGINGFACE_API_KEY` |
 | AI | `OLLAMA_BASE_URL`, `OLLAMA_MODEL` (batch), `OLLAMA_MODEL_LIVE`, `OLLAMA_TIMEOUT_MS`, `ORACLE_MAX_PER_CYCLE`, `LIVE_ORACLE_CUTOFF_MS`, `LIVE_SCAN_CUTOFF_MS`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `ANTHROPIC_API_KEY`/`CLAUDE_MODEL` (fallback only) |
-| Universe | `HERMES_MIN_MARKET_CAP`, `HERMES_MIN_AVG_VOLUME`, `HERMES_MAX_STOCKS`, `COMPASS_LOOKBACK_DAYS`, `COMPASS_CACHE_TTL_MS` |
+| Universe | `HERMES_MIN_MARKET_CAP`, `HERMES_MIN_AVG_VOLUME`, `HERMES_MAX_STOCKS`, `UNIVERSE_PREFILTER` (off/shadow/on, default shadow), `HERMES_PREFILTER_MIN_VOLUME`, `COMPASS_LOOKBACK_DAYS`, `COMPASS_CACHE_TTL_MS` |
 | Risk | `BOT_ENABLED`, `MAX_BOT_INVESTMENT_USD`, `DAILY_LOSS_LIMIT_USD`, `WEEKLY_LOSS_LIMIT_USD`, `MIN_SHARPE_FOR_LIVE`, `ACTIVATION_GATES_ENFORCE` (false) |
 | Strategy opt-ins (account lists) | `SELECTION_EXPERIMENT_USER_IDS`, `OPTIONS_INCOME_USER_IDS`, `OPTIONS_INCOME_MAX_COLLATERAL`, `SATELLITE_USER_IDS`, `SATELLITE_PCT`, `SCAN_ROTATION_USER_IDS`, `BEAR_SIDE_USER_IDS`, `BEAR_ALLOW_MARGIN`, optional `BEAR_MAX_GAP_RISK_PCT`, `REVERSAL_SHADOW_USER_ID`, `BROKER_SCOREBOARD_USER_IDS`, `CRYPTO_FEE_RATE` |
 | Notifications | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (admin), `EMAIL_*`, `TWILIO_*`, `NOTIFY_WHATSAPP` |
@@ -570,3 +570,4 @@ These findings come from our own data and drive current decisions. Each has a da
 | Nov 22 | Crypto records match the broker (222cdf5); broker scoreboard and buy-list timeout (416ae96); this document rewritten; 1:00 PM early-close days added to the market calendar |
 | Nov 23 | Weekend-built stock list no longer reused on a trading day; 15:45 ET cleanup cancels unfilled buys in every account (was the paper account only) and never records an order still open at the broker as cancelled; sells wait until cancelled orders release the shares (was a fixed pause) |
 | Nov 24 | 15:45 ET cleanup judges each order by its latest log entry, so filled or closed orders are no longer recorded as cancelled (530 false entries since October removed; backup in the OneDrive backups folder) |
+| Nov 25 | Universe build, Polygon first with Yahoo as backup — SHADOW only (`UNIVERSE_PREFILTER=shadow`): the 6:30 PM job stores whole-market daily volume (`market_daily_volume`); HERMES records which illiquid bulk names it would skip, and Blitz compares a list rebuilt from the last completed HERMES build; results in `universe_prefilter_shadow`. Output unchanged until the owner approves `on`. Design: docs/UNIVERSE_BUILD_POLYGON_PREFILTER.md. Also: scan summary labels `BUY / score N` as score_borderline |

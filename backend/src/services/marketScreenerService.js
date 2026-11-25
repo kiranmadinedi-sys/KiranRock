@@ -158,7 +158,42 @@ async function getCompletedHermesSymbols(universeDate) {
     }
 }
 
-async function _logHermesSymbol(universeDate, symbol, marketCap, avgVol, capFloor, minVolume, passed, failReason, isVelocity, tier) {
+// null = untested, false = extra columns missing (migration not run) → plain insert only.
+let _hermesExtColsOk = null;
+
+async function _logHermesSymbol(universeDate, symbol, marketCap, avgVol, capFloor, minVolume, passed, failReason, isVelocity, tier, extra = null) {
+    // 2026-11-25: passed rows also store the quote fields the Blitz build needs. If that
+    // insert fails for ANY reason, fall through to the original insert below so the row the
+    // nightly scan depends on is still written exactly as before.
+    if (extra && _hermesExtColsOk !== false) {
+        try {
+            const { query } = require('../config/database');
+            const n = v => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
+            await query(
+                `INSERT INTO hermes_symbol_log
+                     (universe_date, symbol, market_cap, avg_volume, cap_floor, volume_floor, passed, fail_reason, is_velocity, tier,
+                      price, rs_score, week52_high, week52_low, sma50, sma200, sector, industry)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                 ON CONFLICT (universe_date, symbol) DO UPDATE SET
+                     market_cap = EXCLUDED.market_cap, avg_volume = EXCLUDED.avg_volume,
+                     cap_floor = EXCLUDED.cap_floor, volume_floor = EXCLUDED.volume_floor,
+                     passed = EXCLUDED.passed, fail_reason = EXCLUDED.fail_reason,
+                     is_velocity = EXCLUDED.is_velocity, tier = EXCLUDED.tier,
+                     price = EXCLUDED.price, rs_score = EXCLUDED.rs_score,
+                     week52_high = EXCLUDED.week52_high, week52_low = EXCLUDED.week52_low,
+                     sma50 = EXCLUDED.sma50, sma200 = EXCLUDED.sma200,
+                     sector = EXCLUDED.sector, industry = EXCLUDED.industry`,
+                [universeDate, symbol, marketCap, Math.round(Number(avgVol) || 0), capFloor, minVolume, passed, failReason, isVelocity, tier,
+                 n(extra.price), n(extra.rsScore), n(extra.week52High), n(extra.week52Low), n(extra.sma50), n(extra.sma200),
+                 extra.sector ? String(extra.sector).slice(0, 60) : null, extra.industry ? String(extra.industry).slice(0, 80) : null]
+            );
+            _hermesExtColsOk = true;
+            return;
+        } catch (err) {
+            if (/column .* does not exist/i.test(err.message || '')) _hermesExtColsOk = false;
+            // fall through to the original insert
+        }
+    }
     try {
         const { query } = require('../config/database');
         await query(
@@ -398,6 +433,22 @@ async function _buildStockUniverse() {
         const staticSymbolSet = new Set(staticSymbols); // O(1) lookup below, not O(n) per symbol over ~13k
         // One query for the whole pool's consolidated 20-day average volume (see avgVol below).
         const realAvgVolumes = await loadRealAvgVolumes(allSymbols);
+        // Polygon volume prefilter (docs/UNIVERSE_BUILD_POLYGON_PREFILTER.md). Fails open:
+        // any problem → inactive → every symbol goes to Yahoo exactly as before. In 'shadow'
+        // (default) decisions are only recorded; the Yahoo call still happens for every symbol.
+        let prefilter = { mode: 'off', active: false, reason: 'not loaded', avgVol: new Map() };
+        let prefilterSvc = null;
+        try {
+            prefilterSvc = require('./universePrefilterService');
+            prefilter = await prefilterSvc.prepareHermesPrefilter(universeDate);
+        } catch (e) {
+            prefilter = { mode: 'off', active: false, reason: e.message, avgVol: new Map() };
+        }
+        if (prefilter.mode !== 'off') {
+            console.log(`[HERMES] Polygon prefilter mode=${prefilter.mode} ${prefilter.active ? `active (${prefilter.goodDays} days)` : `OFF — ${prefilter.reason}; full Yahoo build`}`);
+        }
+        const prefilterWouldSkip = new Set();
+        let prefilteredCount = 0;
 
         // HERMES filters
         const qualified  = [];
@@ -424,6 +475,23 @@ async function _buildStockUniverse() {
                     const isETF = TIER1_ETFS.includes(symbol);
                     const isSpec = TIER5_SPECULATIVE.includes(symbol);
                     let tier = tierMap.get(symbol) || 3; // default to 3 (earnings watch, tagged below)
+                    if (prefilter.active) {
+                        let skip = false;
+                        try {
+                            skip = prefilterSvc.shouldSkip({
+                                tier, isVelocity, poly: prefilter.avgVol.get(symbol),
+                                realAvg: realAvgVolumes.get(symbol), hermesFloor: minVolume,
+                            });
+                        } catch { skip = false; }
+                        if (skip) {
+                            prefilterWouldSkip.add(symbol);
+                            if (prefilter.mode === 'on') {
+                                prefilteredCount++;
+                                _logHermesSymbol(universeDate, symbol, null, prefilter.avgVol.get(symbol).avg, capFloor, minVolume, false, 'volume_prefilter', false, tier);
+                                return null;
+                            }
+                        }
+                    }
                     try {
                         const quote = await _withTimeout(rateLimiter.execute(() => yahooFinance.quote(symbol)), 15000);
                         const rawCap   = quote.marketCap || quote?.price?.marketCap || 0;
@@ -478,7 +546,14 @@ async function _buildStockUniverse() {
                         }
 
                         if (marketCap >= capFloor && avgVol >= minVolume) {
-                            _logHermesSymbol(universeDate, symbol, marketCap, avgVol, capFloor, minVolume, true, null, isVelocity, tier);
+                            _logHermesSymbol(universeDate, symbol, marketCap, avgVol, capFloor, minVolume, true, null, isVelocity, tier, {
+                                // Stored so the Blitz pre-market build can reuse this row instead of
+                                // re-quoting Yahoo. rs_score NULL when the cap is the placeholder, so
+                                // Blitz never trusts a fake $10B cap (classifyCached → Yahoo).
+                                price, rsScore: rawCap > 0 ? rsScore : null, week52High, week52Low,
+                                sma50: quote.fiftyDayAverage || null, sma200: quote.twoHundredDayAverage || null,
+                                sector, industry,
+                            });
                             return {
                                 symbol,
                                 marketCap,
@@ -592,6 +667,28 @@ async function _buildStockUniverse() {
             })
             .join(' ');
         console.log(`[HERMES] Volume-floor gain curve (lowering from current ${minVolume.toLocaleString()}): ${gainCurve}`);
+        if (prefilter.active) {
+            try {
+                // Shadow: every would-skip symbol was still quoted, so `lost` = qualified stocks the
+                // prefilter WOULD have dropped. Placeholder-cap passes are listed separately.
+                const lost = qualified.filter(s => prefilterWouldSkip.has(s.symbol));
+                const realCapLost = lost.filter(s => s.marketCap !== fallbackCap);
+                const summary = {
+                    mode: prefilter.mode, pool: allSymbols.length, goodDays: prefilter.goodDays,
+                    cut: prefilterSvc.minVolume(), wouldSkip: prefilterWouldSkip.size,
+                    prefiltered: prefilteredCount, qualified: qualified.length,
+                    lost: lost.map(s => s.symbol), realCapLost: realCapLost.map(s => s.symbol),
+                };
+                console.log(
+                    `[HERMES] Prefilter ${prefilter.mode}: ${prefilter.mode === 'on' ? 'skipped' : 'would skip'} ` +
+                    `${prefilterWouldSkip.size} of ${allSymbols.length} Yahoo calls (prefiltered=${prefilteredCount}) | ` +
+                    `qualified stocks affected: ${lost.length} (real cap: ${realCapLost.length}${realCapLost.length ? ' — ' + realCapLost.slice(0, 20).map(s => s.symbol).join(', ') : ''})`
+                );
+                prefilterSvc.recordShadow(universeDate, 'hermes', summary).catch(() => {});
+            } catch (e) {
+                console.warn('[HERMES] Prefilter summary failed (non-fatal):', e.message);
+            }
+        }
         _markHermesBuildComplete(universeDate, allSymbols.length).catch(() => {});
         return selected;
     } catch (error) {

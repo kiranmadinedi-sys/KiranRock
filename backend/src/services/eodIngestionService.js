@@ -361,6 +361,15 @@ async function runEodIngestion(options = {}) {
             return result;
         }
 
+        // 2026-11-25: keep the WHOLE market's volume (not just our universe) for the HERMES
+        // Polygon prefilter. Non-blocking: a failure here never affects bar ingestion.
+        try {
+            const stored = await require('./universePrefilterService').storeMarketDailyVolume(tradingDate, allBars);
+            logger.info('[EOD] Whole-market daily volume stored', { date: tradingDate, rows: stored });
+        } catch (err) {
+            logger.warn('[EOD] Whole-market daily volume store failed (non-fatal)', { error: err.message });
+        }
+
         const barMap = new Map(allBars.map(b => [b.symbol, b]));
         const inUniverse = universe.filter(s => barMap.has(s)).length;
         logger.info('[EOD] Polygon bars received', {

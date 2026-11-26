@@ -1142,6 +1142,8 @@ async function runNightlyScanTrigger() {
     // separate allow-windows, so it naturally covers the full night including the midnight
     // crossover without special-casing it.
     if (etDay < 1 || etDay > 5) return;
+    // NYSE holidays too (2026-11-26 Thanksgiving ran a full scan); the scan service refuses as well.
+    if (require('../utils/marketCalendar').isTradingHoliday()) return;
     const inDaytimeBlock = (etHour > 9 || (etHour === 9 && etMin > 25)) &&
                             (etHour < 16 || (etHour === 16 && etMin < 15));
     if (inDaytimeBlock) return;

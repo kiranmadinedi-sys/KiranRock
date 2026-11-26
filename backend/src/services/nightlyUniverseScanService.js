@@ -152,6 +152,13 @@ function _isMarketHours() {
     return d >= 1 && d <= 5 && t >= 9 * 60 + 30 && t < 16 * 60;
 }
 
+let _nonTradingSkipLogged = null;
+/** Weekend or listed NYSE holiday, by today's ET date. */
+function _isNonTradingDayET(now = new Date()) {
+    const dow = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short' }).format(now);
+    return dow === 'Sat' || dow === 'Sun' || require('../utils/marketCalendar').isTradingHoliday(now);
+}
+
 function _etHourNow() {
     return new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })).getHours();
 }
@@ -300,6 +307,21 @@ function getScanTargetDate() { return _lastScanTargetDate; }
 async function runNightlyUniverseScan(opts = {}) {
     if (_scanRunning) {
         console.log('[NightlyScan] Scan already in progress — skipping duplicate trigger');
+        return null;
+    }
+
+    // Never START a scan on a weekend or NYSE holiday (2026-11-26). Several launchers check only
+    // Mon–Fri, so Thanksgiving launched a full scan at 4:15 PM ET: ~10 h of PC time + Gemini
+    // re-scoring Wednesday's prices, stamped with the holiday date — and every reader that takes
+    // raw MAX(analysis_date) (options bot, morning briefing, pages) would then read that partial
+    // holiday scan on Friday. A run already in progress across midnight is unaffected; the next
+    // trading morning's catch-up scan covers anything left unfinished.
+    if (_isNonTradingDayET()) {
+        const d = _todayET();
+        if (_nonTradingSkipLogged !== d) {
+            console.log(`[NightlyScan] ${d} is a weekend/market holiday — not starting a scan`);
+            _nonTradingSkipLogged = d;
+        }
         return null;
     }
 
@@ -860,4 +882,4 @@ function formatSkipReasonBreakdown({ date, total, byCode, byFamily }) {
     return lines.join('\n');
 }
 
-module.exports = { runNightlyUniverseScan, rescanSymbol, rescanFailedSymbols, isScanRunning, getScanStartTime, getScanTargetDate, getSkipReasonBreakdown, formatSkipReasonBreakdown, _isErrorLikeCategory };
+module.exports = { runNightlyUniverseScan, rescanSymbol, rescanFailedSymbols, isScanRunning, getScanStartTime, getScanTargetDate, getSkipReasonBreakdown, formatSkipReasonBreakdown, _isErrorLikeCategory, _isNonTradingDayET };

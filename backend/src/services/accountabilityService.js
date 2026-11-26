@@ -32,6 +32,7 @@ const money = v => (v == null ? 'n/a' : `${v < 0 ? '-' : '+'}$${Math.abs(v).toFi
 async function _liveGains(now, deps) {
     const entries = deps.summaries ? await deps.summaries() : await require('./dailyPnlTargetService').buildAllSummaries({ now });
     const live = entries.filter(e => e.summary.isPaper === false).map(e => ({
+        userId: e.userId,
         username: e.username,
         total: e.summary.total?.last5 ?? null,        // Alpaca profit_loss: closed + open + core
         realized: e.summary.last5?.total ?? null,       // closed swing trades only
@@ -58,7 +59,8 @@ async function buildWeek({ now = new Date(), deps = {} } = {}) {
          FROM weekly_accountability ORDER BY week_end DESC LIMIT 4`)).rows;
     const scoreEdge = await (deps.scoreEdge || (() => require('./predictionCheckService').rolling({ nights: 20 })))().catch(() => null);
     const machine = await (deps.machine || (() => require('./systemResourceService').weekSummary()))().catch(() => null);
-    return { fromDay, toDay, spend, gains, net, history, scoreEdge, machine };
+    const vsSpy = await (deps.vsSpy || (accts => require('./depositBenchmarkService').forAccounts(accts)))(gains.accounts).catch(() => []);
+    return { fromDay, toDay, spend, gains, net, history, scoreEdge, machine, vsSpy };
 }
 
 function formatMessage(w) {
@@ -75,6 +77,8 @@ function formatMessage(w) {
     L.push('');
     if (w.net == null) L.push('<b>Net:</b> n/a (live P&amp;L unavailable)');
     else L.push(`<b>Net: ${money(w.net)}</b> — ${w.net >= 0 ? '✅ the app paid for itself this week' : '❌ the app cost more than it made this week'}`);
+    const spyLines = require('./depositBenchmarkService').formatLines(w.vsSpy);
+    if (spyLines.length) L.push('', ...spyLines);
     const e = w.scoreEdge;
     if (e && e.nights) {
         L.push('', `<b>Is the nightly score still working?</b> (last ${e.nights} scan nights, 5-day returns)`);

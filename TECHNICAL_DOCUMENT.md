@@ -503,7 +503,7 @@ Health: `GET /health`, `/api/system/health-dashboard`, `/api/system/live-readine
 
 ### 11.3 Tests
 
-- `cd backend; npx jest`: 775 tests (3 todo) in 116 suites on 2026-11-25. Run from `backend/`; running from the repo root picks up unrelated suites.
+- `cd backend; npx jest`: 781 tests (3 todo) in 116 suites on 2026-11-26. Run from `backend/`; running from the repo root picks up unrelated suites.
 - Jest doesn't load the worker entry point, so after edits also run `node --check src/worker.js`.
 
 ---
@@ -571,3 +571,4 @@ These findings come from our own data and drive current decisions. Each has a da
 | Nov 23 | Weekend-built stock list no longer reused on a trading day; 15:45 ET cleanup cancels unfilled buys in every account (was the paper account only) and never records an order still open at the broker as cancelled; sells wait until cancelled orders release the shares (was a fixed pause) |
 | Nov 24 | 15:45 ET cleanup judges each order by its latest log entry, so filled or closed orders are no longer recorded as cancelled (530 false entries since October removed; backup in the OneDrive backups folder) |
 | Nov 25 | Universe build, Polygon first with Yahoo as backup — SHADOW only (`UNIVERSE_PREFILTER=shadow`): the 6:30 PM job stores whole-market daily volume (`market_daily_volume`); HERMES records which illiquid bulk names it would skip, and Blitz compares a list rebuilt from the last completed HERMES build; results in `universe_prefilter_shadow`. Output unchanged until the owner approves `on`. Design: docs/UNIVERSE_BUILD_POLYGON_PREFILTER.md. Also: scan summary labels `BUY / score N` as score_borderline |
+| Nov 26 | Friday accountability report gains **App vs simply buying SPY**: per live account, every Alpaca deposit/withdrawal (CSD/CSW/JNLC) replayed into SPY at that day's adjusted close (Polygon, Alpaca backup) vs current equity (`depositBenchmarkService.js`). Paper accounts skipped; a failure never blocks the report. |

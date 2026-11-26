@@ -65,3 +65,74 @@ test('weekly report: live gains only, net = gains − cost', async () => {
     expect(text).toContain('cost more than it made');
     expect(text).toContain('Finnhub');
 });
+
+describe('app vs SPY with the same deposits', () => {
+    const bench = require('../src/services/depositBenchmarkService');
+    const closes = [{ d: '2026-06-05', c: 100 }, { d: '2026-06-08', c: 110 }, { d: '2026-06-09', c: 120 }];
+
+    test('each deposit buys SPY at the close of its day (weekend → next trading day)', () => {
+        // $1,000 @100 = 10 sh; $1,100 on Sat 06-06 → Mon 06-08 @110 = 10 sh; 20 sh @120 = $2,400
+        const r = bench.simulate([{ date: '2026-06-05', amount: 1000 }, { date: '2026-06-06', amount: 1100 }], closes, 2200);
+        expect(r.netDeposits).toBe(2100);
+        expect(r.spyValue).toBe(2400);
+        expect(r.spyPnl).toBe(300);
+        expect(r.appPnl).toBe(100);
+        expect(r.appVsSpy).toBe(-200);
+        expect(r.firstDeposit).toBe('2026-06-05');
+    });
+
+    test('withdrawals sell SPY shares', () => {
+        // +$2,000 @100 = 20 sh; −$1,200 @120 = −10 sh → 10 sh @120 = $1,200; net deposits $800
+        const r = bench.simulate([{ date: '2026-06-05', amount: 2000 }, { date: '2026-06-09', amount: -1200 }], closes, 900);
+        expect(r.spyValue).toBe(1200);
+        expect(r.netDeposits).toBe(800);
+        expect(r.appVsSpy).toBe(100 - 400);
+    });
+
+    test('forAccount skips paper accounts and uses Alpaca equity + flows', async () => {
+        expect(await bench.forAccount('p', { client: async () => ({ isPaper: true, client: {} }) })).toEqual({ skipped: 'paper' });
+        const client = {
+            getAccount: async () => ({ equity: '1150' }),
+            getAccountActivities: async () => [{ id: 'a', activity_type: 'CSD', date: '2026-06-05', net_amount: '1000' }],
+        };
+        const r = await bench.forAccount('k', { client: async () => ({ isPaper: false, client }), spyCloses: async () => closes });
+        expect(r.spyValue).toBe(1200);
+        expect(r.appVsSpy).toBe(150 - 200);
+    });
+
+    test('weekly accountability message carries the line; a failed account never breaks the report', async () => {
+        query.mockResolvedValue({ rows: [] });
+        const w = await acct.buildWeek({
+            now: new Date('2026-11-27T21:30:00Z'),
+            deps: {
+                spend: async () => ({ metered: [], subscriptions: [], totalUsd: 0, unknownPrices: [] }),
+                summaries: async () => [{ userId: 'k', username: 'kmadined', summary: { isPaper: false, total: { last5: 10 }, last5: { total: 1 } } }],
+                vsSpy: async accts => {
+                    expect(accts[0].userId).toBe('k');
+                    return [
+                        { username: 'kmadined', firstDeposit: '2026-06-05', netDeposits: 11000, equity: 10744, appPnl: -256, spyValue: 10476, spyPnl: -524, appVsSpy: 268 },
+                        { username: 'other', error: 'no Alpaca keys' },
+                    ];
+                },
+            },
+        });
+        const text = acct.formatMessage(w);
+        expect(text).toContain('App vs simply buying SPY');
+        expect(text).toContain('app ahead by $268');
+        expect(text).toContain('other: unavailable');
+    });
+
+    test('benchmark failure → report still builds without the section', async () => {
+        query.mockResolvedValue({ rows: [] });
+        const w = await acct.buildWeek({
+            now: new Date('2026-11-27T21:30:00Z'),
+            deps: {
+                spend: async () => ({ metered: [], subscriptions: [], totalUsd: 0, unknownPrices: [] }),
+                summaries: async () => [],
+                vsSpy: async () => { throw new Error('boom'); },
+            },
+        });
+        expect(w.vsSpy).toEqual([]);
+        expect(acct.formatMessage(w)).not.toContain('App vs simply buying SPY');
+    });
+});
